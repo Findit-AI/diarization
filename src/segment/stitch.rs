@@ -48,25 +48,38 @@ impl VoiceStitcher {
 
   /// Add one window of per-frame voice probabilities (length
   /// `FRAMES_PER_WINDOW`) starting at absolute sample `start_sample`.
+  ///
+  /// If `start_sample` is before the stitcher's `base_sample` (which can
+  /// happen for an end-of-stream tail-anchor window that overlaps
+  /// already-finalized samples), the prefix that lies in the finalized
+  /// region is silently skipped — only the suffix `[base_sample, end)`
+  /// contributes.
   pub(crate) fn add_window(&mut self, start_sample: u64, voice_per_frame: &[f32]) {
     debug_assert_eq!(voice_per_frame.len(), FRAMES_PER_WINDOW);
-    debug_assert!(start_sample >= self.base_sample);
 
-    // Ensure capacity covers [start_sample, start_sample + WINDOW_SAMPLES).
+    // Entirely in the finalized region → nothing to do.
     let end_sample = start_sample + WINDOW_SAMPLES as u64;
+    if end_sample <= self.base_sample {
+      return;
+    }
+
+    // Ensure capacity covers [base_sample, end_sample).
     let needed_len = (end_sample - self.base_sample) as usize;
     while self.sum.len() < needed_len {
       self.sum.push_back(0.0);
       self.count.push_back(0);
     }
 
-    // Expand each frame across its sample range.
+    // Expand each frame across its sample range, clipping to base_sample.
     for f in 0..FRAMES_PER_WINDOW {
       let s0 = frame_to_sample(f as u32) as u64;
       let s1 = frame_to_sample(f as u32 + 1) as u64;
       let p = voice_per_frame[f];
       for s in s0..s1 {
         let abs = start_sample + s;
+        if abs < self.base_sample {
+          continue;
+        }
         let idx = (abs - self.base_sample) as usize;
         self.sum[idx] += p;
         self.count[idx] += 1;
