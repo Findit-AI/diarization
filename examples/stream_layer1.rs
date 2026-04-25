@@ -6,7 +6,7 @@
 //! No model file required.
 
 use dia::segment::{
-  Action, SegmentOptions, Segmenter, FRAMES_PER_WINDOW, POWERSET_CLASSES, WINDOW_SAMPLES,
+  Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter, WINDOW_SAMPLES,
 };
 
 fn synth_scores_voiced() -> Vec<f32> {

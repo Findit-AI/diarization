@@ -1,8 +1,8 @@
 //! Layer-1 throughput bench. Runs `Segmenter` with synthetic scores so we
 //! measure state-machine cost only (no ort).
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use dia::segment::{Action, SegmentOptions, Segmenter, FRAMES_PER_WINDOW, POWERSET_CLASSES};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use dia::segment::{Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter};
 
 fn synth_scores() -> Vec<f32> {
   let mut out = vec![-10.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];

@@ -71,6 +71,9 @@ impl VoiceStitcher {
     }
 
     // Expand each frame across its sample range, clipping to base_sample.
+    // The index `f` is used both to compute frame->sample boundaries and to
+    // pick the per-frame probability; iterator form is not cleaner here.
+    #[allow(clippy::needless_range_loop)]
     for f in 0..FRAMES_PER_WINDOW {
       let s0 = frame_to_sample(f as u32) as u64;
       let s1 = frame_to_sample(f as u32 + 1) as u64;
@@ -152,9 +155,9 @@ mod tests {
     let mut s = VoiceStitcher::new();
     s.add_window(0, &ones_window()); // covers [0, 160_000)
     s.add_window(40_000, &zeros_window()); // covers [40_000, 200_000)
-                                           // [0, 40_000) only window 1 contributed → 1.0
-                                           // [40_000, 160_000) overlap → 0.5
-                                           // [160_000, 200_000) only window 2 → 0.0
+    // [0, 40_000) only window 1 contributed → 1.0
+    // [40_000, 160_000) overlap → 0.5
+    // [160_000, 200_000) only window 2 → 0.0
     let out = s.take_finalized(200_000);
     assert!((out[0] - 1.0).abs() < 1e-6);
     assert!((out[39_999] - 1.0).abs() < 1e-6);

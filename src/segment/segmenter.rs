@@ -13,13 +13,13 @@ use mediatime::TimeRange;
 
 use crate::segment::{
   error::Error,
-  hysteresis::{runs_of_true, Hysteresis},
+  hysteresis::{Hysteresis, runs_of_true},
   options::{
-    SegmentOptions, FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS, POWERSET_CLASSES, SAMPLE_RATE_HZ,
-    SAMPLE_RATE_TB, WINDOW_SAMPLES,
+    FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS, POWERSET_CLASSES, SAMPLE_RATE_HZ, SAMPLE_RATE_TB,
+    SegmentOptions, WINDOW_SAMPLES,
   },
   powerset::{powerset_to_speakers, softmax_row, voice_prob},
-  stitch::{frame_to_sample, VoiceStitcher},
+  stitch::{VoiceStitcher, frame_to_sample},
   types::{Action, SpeakerActivity, WindowId},
   window::plan_starts,
 };
@@ -206,6 +206,9 @@ impl Segmenter {
     ];
     let mut voice_per_frame: Vec<f32> = Vec::with_capacity(FRAMES_PER_WINDOW);
 
+    // The index drives slicing of `scores` AND parallel writes into the three
+    // per-slot probability buffers; an iterator would not be cleaner.
+    #[allow(clippy::needless_range_loop)]
     for f in 0..FRAMES_PER_WINDOW {
       let row_start = f * POWERSET_CLASSES;
       let mut row = [0f32; POWERSET_CLASSES];
@@ -284,11 +287,12 @@ impl Segmenter {
         _ => {}
       }
     }
-    if self.finished && self.pending.is_empty() {
-      if let Some(start) = self.voice_run_start.take() {
-        self.emit_voice_span(start, self.total_samples);
-        self.voice_hyst.reset();
-      }
+    if self.finished
+      && self.pending.is_empty()
+      && let Some(start) = self.voice_run_start.take()
+    {
+      self.emit_voice_span(start, self.total_samples);
+      self.voice_hyst.reset();
     }
   }
 
