@@ -34,6 +34,26 @@ impl WindowId {
   }
 }
 
+// Manual `Ord` impl so `WindowId` can serve as a `BTreeMap` key in no_std
+// builds. `mediatime::TimeRange` does not itself impl `Ord`, but every
+// `WindowId` we produce shares `SAMPLE_RATE_TB`, so ordering by
+// `(start_pts, end_pts)` is total and meaningful.
+impl Ord for WindowId {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    self
+      .0
+      .start_pts()
+      .cmp(&other.0.start_pts())
+      .then_with(|| self.0.end_pts().cmp(&other.0.end_pts()))
+  }
+}
+
+impl PartialOrd for WindowId {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
 /// One window-local speaker activity.
 ///
 /// `speaker_slot` ∈ `0..=2` is local to the emitting window — slot identity

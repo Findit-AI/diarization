@@ -20,7 +20,7 @@ pub use options::{
   SegmentOptions, FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS, POWERSET_CLASSES, SAMPLE_RATE_HZ,
   SAMPLE_RATE_TB, WINDOW_SAMPLES,
 };
-// pub use segmenter::Segmenter;
+pub use segmenter::Segmenter;
 pub use types::{Action, Event, SpeakerActivity, WindowId};
 
 // #[cfg(feature = "ort")]
