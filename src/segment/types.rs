@@ -1,10 +1,8 @@
 //! Public types emitted by the segmentation state machine.
 
-use core::num::NonZeroU32;
+extern crate alloc;
 
-use mediatime::{Timebase, TimeRange, Timestamp};
-
-use crate::segment::options::SAMPLE_RATE_TB;
+use mediatime::{TimeRange, Timestamp};
 
 /// Stable correlation handle for one inference round-trip.
 ///
@@ -78,14 +76,11 @@ pub enum Event {
     VoiceSpan(TimeRange),
 }
 
-#[cfg(feature = "std")]
-extern crate alloc;
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::segment::options::SAMPLE_RATE_TB;
 
     fn tr(start: i64, end: i64) -> TimeRange {
         TimeRange::new(start, end, SAMPLE_RATE_TB)
