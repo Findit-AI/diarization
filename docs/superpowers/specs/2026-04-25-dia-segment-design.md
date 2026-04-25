@@ -614,7 +614,21 @@ boundary_frame = min(
 ```
 
 …with one terminal case: if `finished == true` AND `pending` is empty, the
-boundary is `total_frames` (the entire stream is finalizable).
+boundary is `total_frames`, defined as
+
+```
+total_frames = ceil(total_samples_pushed * FRAMES_PER_WINDOW / WINDOW_SAMPLES)
+             = (total_samples_pushed * FRAMES_PER_WINDOW + WINDOW_SAMPLES - 1)
+                / WINDOW_SAMPLES
+```
+
+— i.e. the smallest absolute frame index whose start sample is at or past the
+end of pushed audio.
+
+**Type-width note:** all window-index and sample arithmetic at this call
+site is performed in `u64` (cast `next_window_idx as u64 * step_samples as u64`).
+A pure-`u32` multiplication would overflow at `next_window_idx ≈ 107_374`, i.e.
+roughly 75 hours of audio at default `step_samples = 40_000`.
 
 This is critical for correctness under out-of-order `push_inference`: if
 windows 0, 1, 2 are all pending and the caller's async pipeline returns scores
@@ -672,6 +686,10 @@ End-of-stream span closure (triggered on the LAST `push_inference` after
 3. If the cursor still has `run_start = Some(start_frame)`, emit a final span
    `[start_frame, total_frames)` and clear.
 4. Reset hysteresis to `inactive`.
+5. **Flush the §5.6.5 merge cursor's pending span** (if any). The merge cursor
+   buffers one span waiting to see whether the next span is close enough to
+   merge — at end-of-stream there is no next span, so the buffered span must
+   be emitted (subject to `min_voice_duration`).
 
 #### 5.6.5 Span post-processing (per emission)
 
@@ -1092,22 +1110,28 @@ Added/fixed in Revision 4 (post-review-3):
 - **Revision 4**: review-3 feedback. Generation counter promoted to
   process-wide atomic; finalization boundary made pending-aware; `Sync`
   story corrected against silero/src/session.rs:61; memory math fixed.
-- **Revision 5** (this document): review-4 feedback. The reviewer
-  declared rev 4 "near-qualified" with `frame_index_of` undefined as the
-  one must-fix, and several documentation-quality polish items. All
-  applied. Reviewer's recommendation: ship after this revision.
+- **Revision 5** (this document): review-4 feedback fixed
+  (`frame_index_of`, `push_inference` rustdoc, `total_samples`
+  semantics, Send/Sync wording, etc.). Plus a small post-sign-off polish
+  pass adding items 24-27 to §15 (formal `total_frames` definition,
+  u64-arithmetic note, end-of-stream merge-cursor flush, mediatime
+  const-fn verification). Review 5 verdict: **QUALIFIED. Ship it.** No
+  further revisions planned — implementation feedback rolls into a
+  CHANGELOG, not a Rev 6.
 
 ## 14. Findings rejected (cumulative)
 
 ### From review 4
 
-- **T2-C** (frame index width): not rejected — confirmed `u64` is the
-  right choice. Rev 4 already used `u64`.
 - **T3-B** (generation counter location, `segmenter.rs` vs `types.rs`):
   rejected as a spec-level concern. The static lives where its consumer
   lives; the implementation is free to relocate. Spec stays neutral.
 - **T3-C** (AtomicU64 const init): non-issue. Implementer-confirmation
   note from the reviewer.
+
+(T2-C "frame index width" is not listed here because the reviewer
+*confirmed* `u64`; that's a non-finding, captured implicitly in §5
+where every absolute frame/sample index is already typed `u64`.)
 
 ### From review 3
 
@@ -1161,6 +1185,10 @@ API/documentation cleanups.
 | 21 | Add the `Relaxed`-ordering rationale comment near the `static GENERATION` definition (per §11.9).                                                                                                     | medium   |
 | 22 | Add the compile-time `Send` / `Send + Sync` assertion block from §9 ("Compile-time trait assertions").                                                                                                | medium   |
 | 23 | Document `push_samples(&[])` as no-op in the rustdoc (per §4).                                                                                                                                        | low      |
+| 24 | Implement `total_frames = ceil(total_samples_pushed * FRAMES_PER_WINDOW / WINDOW_SAMPLES)` per §5.4.1 terminal-case definition.                                                                       | low      |
+| 25 | Cast `next_window_idx` and `step_samples` to `u64` at the boundary call site (already done in the current impl; verify on impl review). Per §5.4.1's type-width note.                                  | low      |
+| 26 | At end-of-stream span closure (§5.6 step 5), flush the §5.6.5 merge cursor's pending span before exiting the drain.                                                                                   | low      |
+| 27 | Verify that `mediatime`'s `TimeRange` / `Timestamp` / `core::time::Duration` accessors used by `WindowId` / `SpeakerActivity` / `SegmentOptions` are usable from `const fn` context in `mediatime = "0.1"`. If any aren't, drop `const` from those accessors in §4. | low      |
 
 Items 1, 2, 3, 4, 5, 10, 17 are the correctness must-haves. The rest are
-ergonomic/documentation polish surfaced by reviews 1-4.
+ergonomic/documentation polish surfaced by reviews 1-5.
