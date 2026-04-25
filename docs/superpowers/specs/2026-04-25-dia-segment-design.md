@@ -1,17 +1,21 @@
 # dia — segmentation sub-project design (v0.1.0)
 
-**Revision 4** (2026-04-25, post-third-adversarial-review).
-**Status:** ready for re-review.
+**Revision 5** (2026-04-25, post-fourth-adversarial-review — reviewer
+declared rev 4 "near-qualified" with one must-fix; this revision applies
+that fix plus the line-edit polish items the reviewer flagged).
+
+**Status:** ready for re-review (reviewer suggested this is the last round).
 **Scope:** The `dia::segment` module only. `dia::embed` is a separate sub-project to be specced after this one ships.
 
-> **Revision 4 fixes** the four critical issues review 3 surfaced: the
-> `Sync` claim that contradicted silero's actual source (silero/src/session.rs
-> line 61: "Send but not Sync"); the cross-`Segmenter` `WindowId` generation
-> collision (now solved with a process-wide `AtomicU64`); the
-> finalization-boundary bug where out-of-order `push_inference` could
-> finalize frames before all contributing windows had reported (boundary now
-> incorporates pending starts); and the off-by-2× memory math in §5.4.
-> Plus several smaller corrections — see §14 for a full diff.
+> **Revision 5 changes** (full list in §12 / §15): defines the
+> `frame_index_of(sample) -> u64` companion to `frame_to_sample` with
+> explicit floor rounding for boundary safety (the rev-4 §5.4.1 formula
+> referenced this function without defining it); restores the
+> `push_inference` rustdoc enumeration that was condensed away in rev 4;
+> pins `total_samples` semantics to "cumulative counter, never
+> decremented"; adds `static_assertions`-style compile-time `Send`/`Sync`
+> tests to §9; documents the `Relaxed`-ordering rationale in §11.9;
+> tweaks several wordings.
 
 ## 1. Context
 
@@ -317,13 +321,61 @@ impl Segmenter {
     pub fn new(opts: SegmentOptions) -> Self;
     pub fn options(&self) -> &SegmentOptions;
 
+    /// Append 16 kHz mono float32 PCM. Arbitrary chunk size. Caller must
+    /// enforce sample rate — there is no runtime guard.
+    ///
+    /// `samples.len() == 0` is a no-op: the call is accepted but does NOT
+    /// count as a "non-empty push" for the §11.7 tail-window threshold.
     pub fn push_samples(&mut self, samples: &[f32]);
+
+    /// Drain the next action. `None` means "nothing ready right now"; it
+    /// does NOT mean "done" — the caller decides when the stream ends by
+    /// calling `finish()`.
     pub fn poll(&mut self) -> Option<Action>;
+
+    /// Provide ONNX scores for a previously-yielded `NeedsInference`.
+    /// `scores.len()` must equal `FRAMES_PER_WINDOW * POWERSET_CLASSES = 4123`.
+    ///
+    /// Returns `Error::UnknownWindow` if `id` is not in the pending set.
+    /// This covers four scenarios:
+    /// 1. `id` was never yielded by `poll`.
+    /// 2. `id` was already consumed by an earlier `push_inference` call
+    ///    (each pending entry is consumed exactly once).
+    /// 3. `id` came from a previous stream that was reset by `clear()`
+    ///    (caught by the generation counter — see `WindowId` and §11.9).
+    /// 4. `id` was minted by a different `Segmenter` instance whose sample
+    ///    range happens to match a current pending window's range
+    ///    (different generation; see §11.9).
+    ///
+    /// Returns `Error::InferenceShapeMismatch` if `scores.len() != 4123`.
     pub fn push_inference(&mut self, id: WindowId, scores: &[f32]) -> Result<(), Error>;
+
+    /// Signal end-of-stream. Schedules a tail-anchored window if needed
+    /// (deduplicated against the last regular window's start). The closing
+    /// voice span (if any) is emitted as soon as the last pending inference
+    /// is fulfilled (or immediately, if there is none).
     pub fn finish(&mut self);
+
+    /// Reset to empty state for a new stream:
+    /// - input buffer cleared,
+    /// - pending inferences dropped (their IDs become unknown — see §11.9),
+    /// - voice/hysteresis state reset,
+    /// - `finished` / `tail_emitted` flags cleared,
+    /// - process-wide generation counter advanced.
+    ///
+    /// Internal allocations are reused. Does NOT discard or warm down a
+    /// paired `SegmentModel`.
     pub fn clear(&mut self);
 
+    // Introspection — for backpressure and debugging.
+
+    /// Number of `NeedsInference` actions yielded but not yet fulfilled
+    /// via `push_inference`. Stays at zero in a steady state.
     pub fn pending_inferences(&self) -> usize;
+
+    /// Number of input samples currently buffered (i.e. pushed via
+    /// `push_samples` but not yet released because they're still part of
+    /// some not-yet-scheduled or in-flight window).
     pub fn buffered_samples(&self) -> usize;
 }
 ```
@@ -395,9 +447,11 @@ constructor returns.
 A wrong-architecture model fails at load with `Error::IncompatibleModel`, not
 on first inference.
 
-`SegmentModel` is `Send` but **not `Sync`**, auto-derived from `ort::Session`'s
-own `!Sync`. **Matches `silero::Session` exactly** (silero/src/session.rs line 61
-documents the same property). Use one per worker.
+`SegmentModel` auto-derives `Send`. It does **not auto-derive `Sync`**
+because `ort::Session` is `!Sync` (and therefore at least one field of
+`SegmentModel` is `!Sync`). **Matches `silero::Session` exactly**
+(silero/src/session.rs line 61 documents the same property). Use one per
+worker.
 
 **Scratch ownership:** `SegmentModel` owns the input scratch (`Vec<f32>` reused
 across `infer` calls). Output `Vec<f32>` is allocated per call; reuse is
@@ -462,10 +516,13 @@ For each output frame:
 
 Reference: findit-pyannote-seg/powerset.py, segmenter.py:178-186.
 
-### 5.2 Frame-to-sample conversion
+### 5.2 Frame ↔ sample conversion
 
-Python uses float `SAMPLES_PER_FRAME = 160000 / 589 ≈ 271.6469` and converts via
-`int(round(f * SAMPLES_PER_FRAME))`. Rust uses pure integer arithmetic:
+Python uses float `SAMPLES_PER_FRAME = 160000 / 589 ≈ 271.6469` and converts
+frame → sample via `int(round(f * SAMPLES_PER_FRAME))`. Rust uses pure integer
+arithmetic.
+
+#### 5.2.1 frame → sample (rounded)
 
 ```rust
 const fn frame_to_sample(frame_idx: u32) -> u32 {
@@ -478,6 +535,32 @@ const fn frame_to_sample(frame_idx: u32) -> u32 {
 Bit-for-bit equivalent to `round(f * 160000 / 589)` for any integer `f` —
 `f * 160000` cannot land exactly on a half-integer multiple of `589` (589 is
 odd), so the rounding mode is unambiguous.
+
+#### 5.2.2 sample → frame (floor)
+
+For computing the finalization boundary in §5.4.1 we need the inverse
+direction. The boundary's correctness condition is "no future or pending
+window can still contribute to a frame at or below the boundary." That
+demands **floor** rounding — anything else either over-finalizes (admits a
+frame that a future window will still touch) or under-finalizes (delays
+draining without need).
+
+```rust
+const fn frame_index_of(sample_idx: u64) -> u64 {
+    sample_idx * (FRAMES_PER_WINDOW as u64) / (WINDOW_SAMPLES as u64)
+}
+```
+
+Worked example exposing the half-integer collision (where the sample-domain
+position lands exactly between two frames):
+- `step_samples = 40_000`, window-start at `k * step_samples`.
+- For `k = 2`: `sample = 80_000`. `80_000 * 589 / 160_000 = 47_120_000 /
+  160_000 = 294.5`. **Floor = 294.** Round-half-up would give 295,
+  banker's-rounding 294. Floor is the only safe choice for boundary
+  computation, and we use it here.
+
+This direction is **not** the inverse of `frame_to_sample`; the two are an
+asymmetric pair, and that is intentional.
 
 ### 5.3 Hysteresis
 
@@ -748,6 +831,30 @@ just `cargo run --example stream_from_wav -- path/to/audio.wav`.
 shape (slots in 0..3, voice spans monotonic). Does NOT assert specific
 content — model output on noise is unspecified.
 
+### Compile-time trait assertions
+
+Add a small block (e.g. `tests/trait_bounds.rs` or a `cfg(test)` module
+in `lib.rs`) that fails the build if the auto-derive story drifts:
+
+```rust
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<dia::segment::Segmenter>();
+
+    #[cfg(feature = "ort")]
+    assert_send::<dia::segment::SegmentModel>();
+};
+```
+
+The `!Sync` property of `SegmentModel` is enforced by `ort::Session`'s
+own `!Sync`-ness; if a future field change accidentally gives
+`SegmentModel` a `Sync` impl, asserting the negative is awkward without
+the `static_assertions` crate. We accept that risk in v0.1.0 — the spec
+inherits silero's posture and any drift would be a deliberate code change
+caught in review.
+
 ### Benches
 
 `benches/segment.rs` — Layer 1 throughput on one minute of audio with
@@ -759,9 +866,10 @@ synthetic scores.
   `Send + Sync`. Primarily driven through `&mut self` so `Sync` is incidental.
   Differs from `silero::Session` (which is `!Sync` because of
   `ort::Session`) — see §2.1 table.
-- **`SegmentModel`** (Layer 2): auto-derived `Send`, **NOT `Sync`**. Wraps
-  `ort::Session` which is `!Sync`. **Matches `silero::Session` exactly**
-  (silero/src/session.rs line 61: "Send but not Sync"). Use one per worker.
+- **`SegmentModel`** (Layer 2): auto-derives `Send`; **does NOT auto-derive
+  `Sync`** because `ort::Session` is `!Sync`. **Matches `silero::Session`
+  exactly** (silero/src/session.rs line 61: "Send but not Sync"). Use one
+  per worker.
 - No internal locks. No async. Callers wrap with their own runtime if desired.
 - `clear()` resets `Segmenter` state, increments the process-wide generation
   counter, but does **not** discard or reload the paired `SegmentModel`.
@@ -815,11 +923,18 @@ A clip shorter than `WINDOW_SAMPLES` is handled by `finish()`: a tail
 window is anchored at sample 0 with available samples followed by zero
 padding, and inference runs on the padded buffer.
 
-The threshold rule: **a tail window is scheduled iff at least one
-non-empty `push_samples` call has been made before `finish()`.** Concretely:
-`finish()` checks `total_samples > 0` (where `total_samples` is set from
-the input buffer length at `finish` time). An empty stream — zero
-`push_samples` calls, or all-empty calls — produces zero windows.
+**Threshold rule:** the segmenter maintains a private cumulative counter
+`total_samples_pushed: u64` that is incremented on every `push_samples`
+call by `samples.len()`. The counter is **never decremented** —
+window-driven trimming of the input buffer (which removes consumed
+samples) does not affect it. `finish()` schedules a tail window iff
+`total_samples_pushed > 0`.
+
+Equivalent formulation: at least one non-empty `push_samples` call must
+have happened before `finish()`. An empty stream — zero `push_samples`
+calls, or only empty-slice calls — produces zero windows.
+
+`clear()` resets `total_samples_pushed` to 0.
 
 ### 11.8 Multi-stream `clear()` warmup
 
@@ -833,6 +948,13 @@ The dia process holds one `static GENERATION: AtomicU64 = AtomicU64::new(0)`
 counter. Every `Segmenter::new` and every `Segmenter::clear` performs
 `GENERATION.fetch_add(1, Relaxed)` and stores the result on `self`. Each
 yielded `WindowId` carries that current value.
+
+**Memory ordering:** `Relaxed` is sufficient because the counter values are
+not used to synchronize any other memory; their only purpose is to provide
+a unique token. Each `Segmenter` reads the value once at construction or
+clear, stores it in a local field, and consults it from then on under
+`&mut self`. There is no happens-before relationship across `Segmenter`
+instances that needs to be established by the atomic.
 
 `push_inference` checks `id.generation == self.generation`. Mismatch ⇒
 `Error::UnknownWindow`. This closes both corruption scenarios:
@@ -896,6 +1018,33 @@ Added/fixed in Revision 3 (post-review-2):
   documented.
 - `ort` types re-exported.
 
+Added/fixed in Revision 5 (post-review-4):
+- §5.2 gains a `frame_index_of(sample) -> u64` definition with explicit
+  floor rounding and a worked example exposing the half-integer collision
+  for window starts at multiples of `step_samples`. Rev 4's §5.4.1
+  boundary formula referenced this function without defining it.
+- §4 `push_inference` rustdoc restored — the four `UnknownWindow`
+  scenarios (never-yielded / already-consumed / stale-after-clear /
+  cross-segmenter-collision) are now spelled out at the API definition,
+  not only buried in §11.9. Rev 4 had condensed this away.
+- §11.7 threshold rule pinned to a precise `total_samples_pushed: u64`
+  cumulative counter that is never decremented and resets only on
+  `clear()`. Rev 4's "input buffer length" wording was ambiguous about
+  whether window-driven trimming counted.
+- §9 gains a compile-time `Send + Sync` assertion block for `Segmenter`
+  and a `Send` assertion for `SegmentModel`. The `!Sync` of
+  `SegmentModel` rides on `ort::Session` and is not asserted explicitly
+  (would require `static_assertions` dev-dep — not worth it).
+- §11.9 spells out why `Relaxed` ordering is correct (the counter only
+  provides uniqueness; no other memory is synchronized through it).
+- §10 + §4 wording: "auto-derives `Send`; does NOT auto-derive `Sync`"
+  replaces "auto-derived `Send`, NOT `Sync`" — the previous phrasing read
+  as if `!Sync` were being actively asserted, which auto-derive does not do.
+- §4 `push_samples` docstring: explicit "empty slice is a no-op and does
+  NOT count toward the §11.7 tail-window threshold."
+- §15 #10 rewords "Send + !Sync" (which would be invalid Rust syntax) to
+  "Send (and not Sync)".
+
 Added/fixed in Revision 4 (post-review-3):
 - **Generation counter is now process-wide via `AtomicU64`**, not per-Segmenter,
   so cross-segmenter ID collisions are also rejected (§11.9).
@@ -940,12 +1089,27 @@ Added/fixed in Revision 4 (post-review-3):
 - **Revision 3**: review-2 feedback — generation counter, per-frame
   stitching, latency bound corrected, static asserts dropped, thiserror
   restored, serde deferred.
-- **Revision 4** (this document): review-3 feedback. The four critical
-  corrections detailed in §12 above. Implementation patches in §15.
+- **Revision 4**: review-3 feedback. Generation counter promoted to
+  process-wide atomic; finalization boundary made pending-aware; `Sync`
+  story corrected against silero/src/session.rs:61; memory math fixed.
+- **Revision 5** (this document): review-4 feedback. The reviewer
+  declared rev 4 "near-qualified" with `frame_index_of` undefined as the
+  one must-fix, and several documentation-quality polish items. All
+  applied. Reviewer's recommendation: ship after this revision.
 
-## 14. Findings rejected from review 3
+## 14. Findings rejected (cumulative)
 
-For traceability:
+### From review 4
+
+- **T2-C** (frame index width): not rejected — confirmed `u64` is the
+  right choice. Rev 4 already used `u64`.
+- **T3-B** (generation counter location, `segmenter.rs` vs `types.rs`):
+  rejected as a spec-level concern. The static lives where its consumer
+  lives; the implementation is free to relocate. Spec stays neutral.
+- **T3-C** (AtomicU64 const init): non-issue. Implementer-confirmation
+  note from the reviewer.
+
+### From review 3
 
 - **CONSENSUS-C (`ExecutionProviderDispatch` re-export gratuitous)**:
   partially rejected. We keep the re-export because the public API takes
@@ -983,13 +1147,20 @@ API/documentation cleanups.
 | 7  | Add `Segmenter::pending_inferences()` and `buffered_samples()`. (§4)                              | high     |
 | 8  | Add `SegmentModelOptions` with `with_optimization_level`, `with_providers`, `with_intra_op_num_threads`, `with_inter_op_num_threads`; re-export `GraphOptimizationLevel` and `ExecutionProviderDispatch` from `dia::segment`. (§4) | high     |
 | 9  | Restore `#[derive(thiserror::Error)]` on `Error`; remove manual `Display`/`std::error::Error` impls. (§4)                                                                                            | high     |
-| 10 | **`SegmentModel` should be `Send + !Sync`**, matching silero. The current impl is auto-derived from `ort::Session` which is already `!Sync`, so confirm rather than change. **No PhantomData needed for either type** (Segmenter stays `Send + Sync` via auto-derive). (§10) | high     |
+| 10 | **`SegmentModel` should be `Send` (and not `Sync`)**, matching silero. The current impl is auto-derived from `ort::Session` which is already `!Sync`, so confirm rather than change. **No `PhantomData` needed for either type** (`Segmenter` stays `Send + Sync` via auto-derive). (§10) | high     |
 | 11 | `Cargo.toml` revert to `thiserror = "2"` (drop `default-features = false`). (§7)                  | medium   |
 | 12 | Simplify `WindowId::Ord` to `(generation, start_pts)`; document cross-generation ordering as deterministic-but-not-semantic. (§4)                                                                    | medium   |
 | 13 | Make `WindowId::duration()` `const fn`; **remove the `pub fn generation()` accessor** (keep generation visible via `Debug` only). (§4)                                                               | medium   |
 | 14 | Remove the `alloc` Cargo feature. The `serde` Cargo feature stays out of v0.1.0. (§7)             | medium   |
 | 15 | Add the streaming-specific tests listed in §9: out-of-order `push_inference`, cross-segmenter id collision, exact-step-boundary tail dedup, voice-span exact-boundary closure on `finish`.            | medium   |
 | 16 | Document `push_inference` semantics, `clear()` drops pending, canonical backpressure pattern in rustdoc. (§4, §11.2)                                                                                  | low      |
+| 17 | Implement `frame_index_of(sample) -> u64` (floor) per §5.2.2. Add a unit test pinning the half-integer collision case: `frame_index_of(80_000) == 294`.                                              | critical |
+| 18 | The `push_inference` rustdoc must enumerate the four `UnknownWindow` scenarios (never-yielded / already-consumed / stale-after-clear / cross-segmenter-collision). Verbatim from §4.                  | high     |
+| 19 | Implement `total_samples_pushed: u64` cumulative counter on `Segmenter`; increment on every `push_samples`; reset on `clear()`; never decrement. Use it for the §11.7 threshold check.                | high     |
+| 20 | **Verify** `pub use ort::execution_providers::ExecutionProviderDispatch;` resolves on `ort = "2.0.0-rc.12"`. The path was not exercised by silero (which only re-exports `GraphOptimizationLevel`); if rc.12 has shifted the module, find the correct path. | high     |
+| 21 | Add the `Relaxed`-ordering rationale comment near the `static GENERATION` definition (per §11.9).                                                                                                     | medium   |
+| 22 | Add the compile-time `Send` / `Send + Sync` assertion block from §9 ("Compile-time trait assertions").                                                                                                | medium   |
+| 23 | Document `push_samples(&[])` as no-op in the rustdoc (per §4).                                                                                                                                        | low      |
 
-Items 1, 2, 3, 4, 5, 10 are the correctness must-haves. The rest are
-ergonomic/documentation polish surfaced by reviews 1-3.
+Items 1, 2, 3, 4, 5, 10, 17 are the correctness must-haves. The rest are
+ergonomic/documentation polish surfaced by reviews 1-4.
