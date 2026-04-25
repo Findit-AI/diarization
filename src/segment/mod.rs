@@ -21,7 +21,7 @@ pub use options::{
     SAMPLE_RATE_TB, SegmentOptions, WINDOW_SAMPLES,
 };
 // pub use segmenter::Segmenter;
-// pub use types::{Action, Event, SpeakerActivity, WindowId};
+pub use types::{Action, Event, SpeakerActivity, WindowId};
 
 // #[cfg(feature = "ort")]
 // #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
