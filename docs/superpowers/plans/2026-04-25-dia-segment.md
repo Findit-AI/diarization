@@ -540,137 +540,15 @@ cd /Users/user/Develop/findit-studio/dia && \
 
 ---
 
-## Task 4: Error type
+## Task 4: Public types — WindowId, SpeakerActivity, Action, Event
 
-**Files:**
-- Modify: `src/segment/error.rs`, `src/segment/mod.rs`
-
-- [ ] **Step 4.1: Write src/segment/error.rs**
-
-```rust
-//! Error type for the segmentation module.
-
-use core::fmt;
-
-#[cfg(feature = "std")]
-use std::path::PathBuf;
-
-use crate::segment::types::WindowId;
-
-/// All errors produced by `dia::segment`.
-#[derive(Debug)]
-pub enum Error {
-    /// Construction-time validation failure for `SegmentOptions`.
-    InvalidOptions(&'static str),
-
-    /// `push_inference` received a `scores` slice of the wrong length.
-    InferenceShapeMismatch {
-        /// Expected element count: `FRAMES_PER_WINDOW * POWERSET_CLASSES`.
-        expected: usize,
-        /// Actual length received.
-        got: usize,
-    },
-
-    /// `push_inference` was called with a `WindowId` that wasn't yielded by
-    /// `poll` (or that has already been consumed).
-    UnknownWindow {
-        /// The unknown id.
-        id: WindowId,
-    },
-
-    /// The `ort::Session` failed to load the model file.
-    #[cfg(feature = "ort")]
-    LoadModel {
-        /// Path passed to `from_file`.
-        path: PathBuf,
-        /// Underlying ort error.
-        source: ort::Error,
-    },
-
-    /// Generic ort runtime error from `SegmentModel::infer` or session ops.
-    #[cfg(feature = "ort")]
-    Ort(ort::Error),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidOptions(msg) => write!(f, "invalid segment options: {msg}"),
-            Self::InferenceShapeMismatch { expected, got } => {
-                write!(f, "inference scores length {got}, expected {expected}")
-            }
-            Self::UnknownWindow { id } => {
-                write!(f, "inference scores received for unknown WindowId {id:?}")
-            }
-            #[cfg(feature = "ort")]
-            Self::LoadModel { path, source } => {
-                write!(f, "failed to load model from {}: {source}", path.display())
-            }
-            #[cfg(feature = "ort")]
-            Self::Ort(e) => write!(f, "ort runtime error: {e}"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            #[cfg(feature = "ort")]
-            Self::LoadModel { source, .. } => Some(source),
-            #[cfg(feature = "ort")]
-            Self::Ort(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(feature = "ort")]
-impl From<ort::Error> for Error {
-    fn from(e: ort::Error) -> Self { Self::Ort(e) }
-}
-```
-
-We don't use `thiserror` here because `WindowId` from `types.rs` is forward-referenced and we want zero macro magic in the no-std path. (Switch to `thiserror` later if it proves cleaner; both compile fine.)
-
-- [ ] **Step 4.2: Uncomment the Error re-export in mod.rs**
-
-Edit `src/segment/mod.rs` and change:
-
-```rust
-// pub use error::Error;
-```
-
-to:
-
-```rust
-pub use error::Error;
-```
-
-- [ ] **Step 4.3: Verify build**
-
-```bash
-cd /Users/user/Develop/findit-studio/dia && cargo build --no-default-features --features std
-```
-
-Expected: still builds. (`Error::LoadModel` / `Error::Ort` variants vanish without `ort`.)
-
-- [ ] **Step 4.4: Commit**
-
-```bash
-cd /Users/user/Develop/findit-studio/dia && \
-  git add src/segment/error.rs src/segment/mod.rs && \
-  git commit -m "feat(segment): Error type"
-```
-
----
-
-## Task 5: Public types — WindowId, SpeakerActivity, Action, Event
+> Note: Tasks 4 and 5 were swapped after the original plan was written. The
+> error type references `WindowId` from this module, so types must land first.
 
 **Files:**
 - Modify: `src/segment/types.rs`, `src/segment/mod.rs`
 
-- [ ] **Step 5.1: Write the type definitions and tests**
+- [ ] **Step 4.1: Write the type definitions and tests**
 
 Replace `/Users/user/Develop/findit-studio/dia/src/segment/types.rs` with:
 
@@ -797,7 +675,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 5.2: Uncomment the type re-exports in mod.rs**
+- [ ] **Step 4.2: Uncomment the type re-exports in mod.rs**
 
 In `src/segment/mod.rs`, change:
 
@@ -811,7 +689,7 @@ to:
 pub use types::{Action, Event, SpeakerActivity, WindowId};
 ```
 
-- [ ] **Step 5.3: Run the type tests**
+- [ ] **Step 4.3: Run the type tests**
 
 ```bash
 cd /Users/user/Develop/findit-studio/dia && cargo test --no-default-features --features std types::tests
@@ -819,12 +697,137 @@ cd /Users/user/Develop/findit-studio/dia && cargo test --no-default-features --f
 
 Expected: 3 tests pass.
 
-- [ ] **Step 5.4: Commit**
+- [ ] **Step 4.4: Commit**
 
 ```bash
 cd /Users/user/Develop/findit-studio/dia && \
   git add src/segment/types.rs src/segment/mod.rs && \
   git commit -m "feat(segment): public types — WindowId, SpeakerActivity, Action, Event"
+```
+
+---
+
+## Task 5: Error type
+
+**Files:**
+- Modify: `src/segment/error.rs`, `src/segment/mod.rs`
+
+- [ ] **Step 5.1: Write src/segment/error.rs**
+
+```rust
+//! Error type for the segmentation module.
+
+use core::fmt;
+
+#[cfg(feature = "std")]
+use std::path::PathBuf;
+
+use crate::segment::types::WindowId;
+
+/// All errors produced by `dia::segment`.
+#[derive(Debug)]
+pub enum Error {
+    /// Construction-time validation failure for `SegmentOptions`.
+    InvalidOptions(&'static str),
+
+    /// `push_inference` received a `scores` slice of the wrong length.
+    InferenceShapeMismatch {
+        /// Expected element count: `FRAMES_PER_WINDOW * POWERSET_CLASSES`.
+        expected: usize,
+        /// Actual length received.
+        got: usize,
+    },
+
+    /// `push_inference` was called with a `WindowId` that wasn't yielded by
+    /// `poll` (or that has already been consumed).
+    UnknownWindow {
+        /// The unknown id.
+        id: WindowId,
+    },
+
+    /// The `ort::Session` failed to load the model file.
+    #[cfg(feature = "ort")]
+    LoadModel {
+        /// Path passed to `from_file`.
+        path: PathBuf,
+        /// Underlying ort error.
+        source: ort::Error,
+    },
+
+    /// Generic ort runtime error from `SegmentModel::infer` or session ops.
+    #[cfg(feature = "ort")]
+    Ort(ort::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidOptions(msg) => write!(f, "invalid segment options: {msg}"),
+            Self::InferenceShapeMismatch { expected, got } => {
+                write!(f, "inference scores length {got}, expected {expected}")
+            }
+            Self::UnknownWindow { id } => {
+                write!(f, "inference scores received for unknown WindowId {id:?}")
+            }
+            #[cfg(feature = "ort")]
+            Self::LoadModel { path, source } => {
+                write!(f, "failed to load model from {}: {source}", path.display())
+            }
+            #[cfg(feature = "ort")]
+            Self::Ort(e) => write!(f, "ort runtime error: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "ort")]
+            Self::LoadModel { source, .. } => Some(source),
+            #[cfg(feature = "ort")]
+            Self::Ort(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "ort")]
+impl From<ort::Error> for Error {
+    fn from(e: ort::Error) -> Self { Self::Ort(e) }
+}
+```
+
+We don't use `thiserror` here because `WindowId` from `types.rs` is forward-referenced and we want zero macro magic in the no-std path. (Switch to `thiserror` later if it proves cleaner; both compile fine.)
+
+- [ ] **Step 5.2: Uncomment the Error re-export in mod.rs**
+
+Edit `src/segment/mod.rs` and change:
+
+```rust
+// pub use error::Error;
+```
+
+to:
+
+```rust
+pub use error::Error;
+```
+
+- [ ] **Step 5.3: Verify build**
+
+```bash
+cd /Users/user/Develop/findit-studio/dia && cargo build --no-default-features --features std
+```
+
+Expected: still builds. (`Error::LoadModel` / `Error::Ort` variants vanish without `ort`.)
+
+- [ ] **Step 5.4: Commit**
+
+```bash
+cd /Users/user/Develop/findit-studio/dia && \
+  git add src/segment/error.rs src/segment/mod.rs && \
+  git commit -m "feat(segment): Error type"
 ```
 
 ---
