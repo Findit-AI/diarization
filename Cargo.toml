@@ -13,15 +13,12 @@ readme = "README.md"
 [features]
 default = ["std", "ort"]
 std = []
-alloc = []
 ort = ["dep:ort"]
-serde = ["dep:serde", "mediatime/serde"]
 
 [dependencies]
 mediatime = "0.1"
 thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
-serde = { version = "1", optional = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 anyhow = "1"

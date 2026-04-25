@@ -9,6 +9,8 @@ use alloc::{
   vec::Vec,
 };
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use mediatime::TimeRange;
 
 use crate::segment::{
@@ -19,73 +21,109 @@ use crate::segment::{
     SegmentOptions, WINDOW_SAMPLES,
   },
   powerset::{powerset_to_speakers, softmax_row, voice_prob},
-  stitch::{VoiceStitcher, frame_to_sample},
+  stitch::{VoiceStitcher, frame_index_of, frame_to_sample},
   types::{Action, SpeakerActivity, WindowId},
   window::plan_starts,
 };
 
+/// Process-wide generation counter for `WindowId` minting. Bumped on every
+/// [`Segmenter::new`] and every [`Segmenter::clear`]. Each `Segmenter`
+/// captures its current value and stamps every `WindowId` it yields with
+/// it.
+///
+/// `Relaxed` ordering is sufficient because the counter values are not
+/// used to synchronize any other memory; their only purpose is to provide
+/// a unique opaque token. Each `Segmenter` reads the value once at
+/// construction or `clear`, stores it locally, and consults it from then
+/// on under `&mut self`. There is no happens-before relationship across
+/// `Segmenter` instances that needs to be established by the atomic.
+///
+/// Wraps at `2^64` (~600 years at 10⁹ clears/s); overflow is treated as
+/// not-a-concern.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// Sans-I/O speaker segmentation state machine.
 ///
-/// See the module docs for the high-level data flow. In short:
+/// See the module docs and the design spec for the full data flow. Brief:
 ///
 /// 1. Caller appends PCM via [`push_samples`](Self::push_samples).
 /// 2. Caller drains [`Action`]s via [`poll`](Self::poll). When it sees
-///    [`Action::NeedsInference`], it runs the model on the supplied samples
-///    and calls [`push_inference`](Self::push_inference) with the scores.
-/// 3. After all PCM is delivered, caller calls [`finish`](Self::finish) and
-///    drains remaining actions.
+///    [`Action::NeedsInference`], it runs the model on the supplied
+///    samples and calls [`push_inference`](Self::push_inference) with the
+///    scores.
+/// 3. After all PCM is delivered, caller calls [`finish`](Self::finish)
+///    and drains remaining actions.
 ///
-/// `Segmenter` is `Send` but not `Sync`: use one per stream.
+/// `Segmenter` auto-derives `Send + Sync`. State-machine calls all need
+/// `&mut self`, so `Sync` is incidental — sharing one `Segmenter` between
+/// threads buys nothing. Use one per concurrent stream.
 pub struct Segmenter {
   pub(crate) opts: SegmentOptions,
+
+  /// Generation token for every `WindowId` this segmenter mints.
+  /// Initialized at construction; refreshed on `clear()`.
+  pub(crate) generation: u64,
 
   /// Rolling sample buffer. Index 0 corresponds to absolute sample
   /// `consumed_samples`.
   pub(crate) input: VecDeque<f32>,
   pub(crate) consumed_samples: u64,
 
-  /// Index of the next window to schedule (== how many windows already
-  /// scheduled). Window k covers `[k * step_samples, k * step_samples + WINDOW_SAMPLES)`
-  /// in absolute samples — *unless* it's the tail anchor.
+  /// Cumulative count of samples ever delivered via `push_samples`.
+  /// Never decremented (window-driven trimming of `input` does not
+  /// affect this). Resets only on `clear()`.
+  pub(crate) total_samples_pushed: u64,
+
+  /// Index of the next window to schedule (== how many windows have
+  /// been emitted). Window k covers
+  /// `[k * step_samples, k * step_samples + WINDOW_SAMPLES)` in absolute
+  /// samples, except for the final tail-anchor window.
   pub(crate) next_window_idx: u32,
 
-  /// Pending inference round-trips: id → (window-start sample).
+  /// Pending inference round-trips: id → window-start sample.
   pub(crate) pending: BTreeMap<WindowId, u64>,
 
   /// Output queue.
   pub(crate) pending_actions: VecDeque<Action>,
 
-  /// Stream-indexed voice-probability accumulator.
+  /// Per-frame voice-probability accumulator.
   pub(crate) stitcher: VoiceStitcher,
 
-  /// Online hysteresis cursor for the voice timeline.
+  /// Streaming hysteresis cursor for the global voice timeline.
   pub(crate) voice_hyst: Hysteresis,
-  /// If voice is currently active, when did the run start?
+  /// Frame index where the currently-open voice run started (if any).
   pub(crate) voice_run_start: Option<u64>,
 
-  /// Once `finish()` has been called we may schedule the tail window.
+  /// Pending span buffered by the merge cursor — emitted when the next
+  /// span is farther than `voice_merge_gap` away, or at end-of-stream.
+  pub(crate) merge_pending: Option<(u64, u64)>,
+
+  /// `finish()` has been called.
   pub(crate) finished: bool,
-  /// Final tail window has been emitted as `NeedsInference`.
+  /// Tail anchor window has been emitted.
   pub(crate) tail_emitted: bool,
   /// Total stream length latched at `finish()`.
   pub(crate) total_samples: u64,
 }
 
 impl Segmenter {
-  /// Construct a new segmenter.
+  /// Construct a new segmenter. Consumes one process-wide generation token.
   pub fn new(opts: SegmentOptions) -> Self {
     let onset = opts.onset_threshold();
     let offset = opts.offset_threshold();
     Self {
       opts,
+      generation: GENERATION.fetch_add(1, Ordering::Relaxed),
       input: VecDeque::new(),
       consumed_samples: 0,
+      total_samples_pushed: 0,
       next_window_idx: 0,
       pending: BTreeMap::new(),
       pending_actions: VecDeque::new(),
       stitcher: VoiceStitcher::new(),
       voice_hyst: Hysteresis::new(onset, offset),
       voice_run_start: None,
+      merge_pending: None,
       finished: false,
       tail_emitted: false,
       total_samples: 0,
@@ -99,29 +137,36 @@ impl Segmenter {
 
   /// Append 16 kHz mono float32 PCM samples. Arbitrary chunk size.
   ///
-  /// Calling after [`finish`](Self::finish) is a programming bug; the call
-  /// is silently ignored in release builds and panics in debug.
+  /// **Caller must enforce sample rate** — there is no runtime guard.
+  ///
+  /// `samples.len() == 0` is a no-op: the call is accepted but does NOT
+  /// count toward the §11.7 tail-window threshold (a tail is scheduled
+  /// only if at least one non-empty `push_samples` happened before
+  /// `finish()`).
+  ///
+  /// Calling after [`finish`](Self::finish) is a programming bug; the
+  /// call is silently ignored in release builds and panics in debug.
   pub fn push_samples(&mut self, samples: &[f32]) {
     debug_assert!(!self.finished, "push_samples after finish");
-    if self.finished {
+    if self.finished || samples.is_empty() {
       return;
     }
     self.input.extend(samples.iter().copied());
+    self.total_samples_pushed += samples.len() as u64;
     self.schedule_ready_windows();
   }
 
-  /// Schedule any regular windows that are now fully buffered. Tail
-  /// scheduling happens in `finish()`.
+  /// Schedule any regular windows fully covered by buffered audio. Tail
+  /// scheduling happens in [`finish`](Self::finish).
   fn schedule_ready_windows(&mut self) {
     let step = self.opts.step_samples() as u64;
     let win = WINDOW_SAMPLES as u64;
     loop {
       let start = self.next_window_idx as u64 * step;
       let end = start + win;
-      // Buffered samples cover [consumed_samples, consumed_samples + input.len()).
       let buffered_end = self.consumed_samples + self.input.len() as u64;
       if buffered_end < end {
-        return; // not enough audio yet
+        return;
       }
       self.emit_window(start);
       self.next_window_idx += 1;
@@ -134,9 +179,6 @@ impl Segmenter {
   pub(crate) fn emit_window(&mut self, start: u64) {
     let win = WINDOW_SAMPLES as u64;
     let buffered_end = self.consumed_samples + self.input.len() as u64;
-
-    // Copy samples [start, min(start+W, buffered_end)) from `input`. Anything
-    // beyond `buffered_end` is zero-padded below.
     let mut samples: Vec<f32> = Vec::with_capacity(WINDOW_SAMPLES as usize);
     let avail_end = buffered_end.min(start + win);
 
@@ -145,24 +187,23 @@ impl Segmenter {
     for i in copy_from..copy_until {
       samples.push(self.input[i]);
     }
-    // Zero-pad tail if the buffer didn't reach `start + win`.
     while samples.len() < WINDOW_SAMPLES as usize {
       samples.push(0.0);
     }
 
-    let id = WindowId::new(TimeRange::new(
-      start as i64,
-      (start + win) as i64,
-      SAMPLE_RATE_TB,
-    ));
+    let id = WindowId::new(
+      TimeRange::new(start as i64, (start + win) as i64, SAMPLE_RATE_TB),
+      self.generation,
+    );
     self.pending.insert(id, start);
     self.pending_actions.push_back(Action::NeedsInference {
       id,
       samples: Box::from(samples.as_slice()),
     });
 
-    // Trim samples that no future window will need. Next window (if any)
-    // starts at next_window_idx * step. Anything before that can go.
+    // Drop samples no future regular window will need. The next window
+    // starts at (next_window_idx + 1) * step_samples; everything before
+    // that can go.
     let next_start = (self.next_window_idx + 1) as u64 * self.opts.step_samples() as u64;
     self.trim_input_to(next_start);
   }
@@ -177,14 +218,31 @@ impl Segmenter {
   }
 
   /// Drain the next pending action.
+  ///
+  /// Returns `None` when nothing is currently ready. `None` does NOT
+  /// imply end-of-stream — the caller signals that with
+  /// [`finish`](Self::finish).
   pub fn poll(&mut self) -> Option<Action> {
     self.pending_actions.pop_front()
   }
 
   /// Provide ONNX inference results for a previously-yielded window.
   ///
-  /// `scores` must have length `FRAMES_PER_WINDOW * POWERSET_CLASSES = 4123`
-  /// (powerset logits for each output frame).
+  /// `scores.len()` must equal `FRAMES_PER_WINDOW * POWERSET_CLASSES = 4123`.
+  ///
+  /// Returns [`Error::UnknownWindow`] if `id` is not in the pending set.
+  /// This covers four scenarios:
+  ///
+  /// 1. `id` was never yielded by [`poll`](Self::poll).
+  /// 2. `id` was already consumed by an earlier `push_inference` call —
+  ///    each pending entry is consumed exactly once.
+  /// 3. `id` came from a previous stream that was reset by
+  ///    [`clear`](Self::clear) (caught by the generation counter).
+  /// 4. `id` was minted by a different `Segmenter` instance whose sample
+  ///    range happens to match a current pending window's range
+  ///    (different generation; rejected).
+  ///
+  /// Returns [`Error::InferenceShapeMismatch`] if `scores.len()` is wrong.
   pub fn push_inference(&mut self, id: WindowId, scores: &[f32]) -> Result<(), Error> {
     let expected = FRAMES_PER_WINDOW * POWERSET_CLASSES;
     if scores.len() != expected {
@@ -206,8 +264,8 @@ impl Segmenter {
     ];
     let mut voice_per_frame: Vec<f32> = Vec::with_capacity(FRAMES_PER_WINDOW);
 
-    // The index drives slicing of `scores` AND parallel writes into the three
-    // per-slot probability buffers; an iterator would not be cleaner.
+    // The index drives slicing of `scores` AND parallel writes into the
+    // three per-slot probability buffers; an iterator would not be cleaner.
     #[allow(clippy::needless_range_loop)]
     for f in 0..FRAMES_PER_WINDOW {
       let row_start = f * POWERSET_CLASSES;
@@ -224,10 +282,10 @@ impl Segmenter {
     // Emit per-window speaker activities.
     self.emit_speaker_activities(id, start, &speaker_probs);
 
-    // Feed voice probabilities into the stitcher.
-    self.stitcher.add_window(start, &voice_per_frame);
+    // Feed voice probabilities into the per-frame stitcher.
+    let start_frame = frame_index_of(start);
+    self.stitcher.add_window(start_frame, &voice_per_frame);
 
-    // Finalize voice probabilities and emit any closed voice spans.
     self.process_voice_finalization();
     Ok(())
   }
@@ -243,15 +301,26 @@ impl Segmenter {
     let min_dur = self.opts.min_activity_duration();
     let min_samples = duration_to_samples(min_dur);
 
+    // Tail windows (post-finish) may extend beyond actual audio; their
+    // activities must be clamped to `total_samples`. Regular windows have
+    // already been validated against buffered audio so no clamp is needed,
+    // but applying it unconditionally when `finished` is harmless.
+    let clamp_max = if self.finished {
+      self.total_samples
+    } else {
+      u64::MAX
+    };
+
     for slot in 0..MAX_SPEAKER_SLOTS {
       let probs = &speaker_probs[slot as usize];
-      // Per-window hysteresis (no carry — slots are window-local).
       let mut h = Hysteresis::new(onset, offset);
       let mask: Vec<bool> = probs.iter().map(|&p| h.push(p)).collect();
       for (f0, f1) in runs_of_true(&mask) {
-        let s0 = window_start + frame_to_sample(f0 as u32) as u64;
-        let s1 = window_start + frame_to_sample(f1 as u32) as u64;
-        if s1 - s0 < min_samples {
+        let s0_raw = window_start + frame_to_sample(f0 as u32) as u64;
+        let s1_raw = window_start + frame_to_sample(f1 as u32) as u64;
+        let s0 = s0_raw.min(clamp_max);
+        let s1 = s1_raw.min(clamp_max);
+        if s1 <= s0 || s1 - s0 < min_samples {
           continue;
         }
         let range = TimeRange::new(s0 as i64, s1 as i64, SAMPLE_RATE_TB);
@@ -262,56 +331,115 @@ impl Segmenter {
     }
   }
 
-  /// Pull finalized voice probabilities out of the stitcher and run them
-  /// through the streaming hysteresis cursor, emitting closed voice spans.
+  /// Drain finalizable frames from the stitcher, run streaming hysteresis,
+  /// and emit voice spans.
   fn process_voice_finalization(&mut self) {
     let up_to = self.next_finalization_boundary();
-    let probs = if up_to > self.stitcher.base_sample() {
+    let probs = if up_to > self.stitcher.base_frame() {
       self.stitcher.take_finalized(up_to)
     } else {
       Vec::new()
     };
-    let base_after = self.stitcher.base_sample();
+    let base_after = self.stitcher.base_frame();
     let base_before = base_after - probs.len() as u64;
+
     for (i, p) in probs.iter().enumerate() {
-      let abs = base_before + i as u64;
+      let abs_frame = base_before + i as u64;
       let was_active = self.voice_hyst.is_active();
       let now_active = self.voice_hyst.push(*p);
       match (was_active, now_active) {
-        (false, true) => self.voice_run_start = Some(abs),
+        (false, true) => self.voice_run_start = Some(abs_frame),
         (true, false) => {
-          if let Some(start) = self.voice_run_start.take() {
-            self.emit_voice_span(start, abs);
+          if let Some(start_frame) = self.voice_run_start.take() {
+            self.feed_merge_cursor_frames(start_frame, abs_frame);
           }
         }
         _ => {}
       }
     }
-    if self.finished
-      && self.pending.is_empty()
-      && let Some(start) = self.voice_run_start.take()
-    {
-      self.emit_voice_span(start, self.total_samples);
-      self.voice_hyst.reset();
+
+    if self.finished && self.pending.is_empty() {
+      // End-of-stream span closure (spec §5.6 step 3-5). Convert the
+      // run's start frame to a sample index, but use `total_samples`
+      // directly for the end (don't round-trip through `frame_to_sample`,
+      // which can overshoot — e.g. for total_samples=250_000, total_frames
+      // rounds to 921 and frame_to_sample(921) = 250_187).
+      if let Some(start_frame) = self.voice_run_start.take() {
+        let s0 = frame_to_sample(start_frame.min(u32::MAX as u64) as u32) as u64;
+        let s0 = s0.min(self.total_samples);
+        self.feed_merge_cursor(s0, self.total_samples);
+        self.voice_hyst.reset();
+      }
+      // Step 5: flush any pending merge buffer.
+      self.flush_merge_pending();
     }
   }
 
-  /// Largest absolute sample finalized after current windows are processed.
-  /// Pre-finish: no future regular window contributes to samples
-  /// `< next_window_idx * step`. Post-finish (and after the tail window's
-  /// scores are pushed), the boundary is `total_samples`.
+  /// Smallest absolute frame index that no future or pending window can
+  /// still contribute to.
+  ///
+  /// - **Pre-finish:** `min(next_window_start_frame, min over pending of
+  ///   start_frame)`. Without the second term, an out-of-order
+  ///   `push_inference` (windows 0/1/2 pending; scores for 2 arrive first)
+  ///   would advance the boundary past frames whose other contributing
+  ///   windows haven't reported yet, corrupting their running mean.
+  /// - **Post-finish + pending empty:** `total_frames` (entire stream
+  ///   finalized).
   fn next_finalization_boundary(&self) -> u64 {
     if self.finished && self.pending.is_empty() {
-      return self.total_samples;
+      return total_frames_of(self.total_samples);
     }
     let step = self.opts.step_samples() as u64;
-    self.next_window_idx as u64 * step
+    let next_window_start = self.next_window_idx as u64 * step;
+    let next_window_start_frame = frame_index_of(next_window_start);
+    let earliest_pending_frame = self
+      .pending
+      .values()
+      .copied()
+      .map(frame_index_of)
+      .min()
+      .unwrap_or(u64::MAX);
+    next_window_start_frame.min(earliest_pending_frame)
+  }
+
+  /// Receive one `[start_frame, end_frame)` span from the streaming
+  /// hysteresis state machine, convert to samples, apply the merge-gap
+  /// rule (§5.6.5).
+  fn feed_merge_cursor_frames(&mut self, start_frame: u64, end_frame: u64) {
+    let s0 = frame_to_sample(start_frame.min(u32::MAX as u64) as u32) as u64;
+    let s1 = frame_to_sample(end_frame.min(u32::MAX as u64) as u32) as u64;
+    self.feed_merge_cursor(s0, s1);
+  }
+
+  fn feed_merge_cursor(&mut self, start_sample: u64, end_sample: u64) {
+    let merge_gap = duration_to_samples(self.opts.voice_merge_gap());
+    match self.merge_pending.take() {
+      Some((p_start, p_end)) => {
+        if start_sample.saturating_sub(p_end) <= merge_gap {
+          // Merge: extend the pending span.
+          self.merge_pending = Some((p_start, end_sample.max(p_end)));
+        } else {
+          // Gap too large: emit the pending span, buffer the new one.
+          self.emit_voice_span(p_start, p_end);
+          self.merge_pending = Some((start_sample, end_sample));
+        }
+      }
+      None => {
+        self.merge_pending = Some((start_sample, end_sample));
+      }
+    }
+  }
+
+  fn flush_merge_pending(&mut self) {
+    if let Some((p_start, p_end)) = self.merge_pending.take() {
+      self.emit_voice_span(p_start, p_end);
+    }
   }
 
   fn emit_voice_span(&mut self, start_sample: u64, end_sample: u64) {
-    let dur_samples = end_sample - start_sample;
+    let dur_samples = end_sample.saturating_sub(start_sample);
     let min = duration_to_samples(self.opts.min_voice_duration());
-    if dur_samples < min {
+    if dur_samples < min || dur_samples == 0 {
       return;
     }
     let range = TimeRange::new(start_sample as i64, end_sample as i64, SAMPLE_RATE_TB);
@@ -319,56 +447,101 @@ impl Segmenter {
   }
 
   /// Signal end-of-stream. Schedules a tail-anchored window if needed and
-  /// causes any open voice span to close on subsequent `poll`s.
+  /// flushes any open voice span (the actual emission happens lazily as
+  /// the tail's `push_inference` arrives, or immediately if no inference
+  /// is pending).
   pub fn finish(&mut self) {
     if self.finished {
       return;
     }
     self.finished = true;
-    self.total_samples = self.consumed_samples + self.input.len() as u64;
+    self.total_samples = self.total_samples_pushed;
 
-    if self.tail_emitted {
-      return;
-    }
-    if self.total_samples == 0 {
-      return; // nothing to do
+    if !self.tail_emitted && self.total_samples_pushed > 0 {
+      let starts = plan_starts(self.total_samples_pushed, self.opts.step_samples());
+      let regular_emitted = self.next_window_idx as usize;
+      for &start in starts.iter().skip(regular_emitted) {
+        self.emit_window(start);
+      }
+      self.tail_emitted = true;
     }
 
-    let starts = plan_starts(self.total_samples, self.opts.step_samples());
-    let regular_emitted = self.next_window_idx as usize;
-    // Anything in `starts` past what we've already emitted is the tail (or
-    // a missed regular window plus tail; we just emit them in order).
-    for &start in starts.iter().skip(regular_emitted) {
-      self.emit_window(start);
-    }
-    self.tail_emitted = true;
-    // If no tail was scheduled (e.g. total_samples is an exact multiple of
-    // step that already produced a regular window covering the end), no
-    // future `push_inference` will run, so flush voice finalization here.
+    // Flush voice finalization. If pending is empty, this drains everything
+    // and closes the open span. If pending is non-empty (tail just
+    // scheduled), the boundary stalls and we'll close on the tail's
+    // push_inference.
     self.process_voice_finalization();
   }
 
-  /// Reset to empty state. Internal allocations are reused.
+  /// Reset to empty state for a new stream.
+  ///
+  /// - input buffer cleared,
+  /// - pending inferences dropped,
+  /// - voice/hysteresis state reset,
+  /// - `finished`/`tail_emitted` flags cleared,
+  /// - `total_samples_pushed` reset to 0,
+  /// - **a fresh process-wide generation token consumed**, so any stale
+  ///   `WindowId` from before the `clear()` will fail
+  ///   [`push_inference`](Self::push_inference) with
+  ///   [`Error::UnknownWindow`].
+  ///
+  /// Internal allocations are reused. Does NOT discard or warm down a
+  /// paired `SegmentModel`.
   pub fn clear(&mut self) {
+    self.generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     self.input.clear();
     self.consumed_samples = 0;
+    self.total_samples_pushed = 0;
     self.next_window_idx = 0;
     self.pending.clear();
     self.pending_actions.clear();
     self.stitcher.clear();
     self.voice_hyst.reset();
     self.voice_run_start = None;
+    self.merge_pending = None;
     self.finished = false;
     self.tail_emitted = false;
     self.total_samples = 0;
+  }
+
+  /// Number of [`Action::NeedsInference`] yielded but not yet fulfilled
+  /// via [`push_inference`](Self::push_inference). Stays at zero in steady
+  /// state.
+  pub fn pending_inferences(&self) -> usize {
+    self.pending.len()
+  }
+
+  /// Number of input samples currently buffered (pushed via
+  /// [`push_samples`](Self::push_samples) but not yet released because
+  /// they're still part of some not-yet-scheduled or in-flight window).
+  ///
+  /// Useful for detecting pathological backpressure: a steady increase
+  /// despite calls to [`poll`](Self::poll) means the caller's inference
+  /// loop has fallen behind. Canonical pattern:
+  ///
+  /// ```ignore
+  /// const MAX_PENDING: usize = 16;
+  /// if seg.pending_inferences() > MAX_PENDING {
+  ///     // throttle the audio source until inference catches up
+  /// }
+  /// ```
+  pub fn buffered_samples(&self) -> usize {
+    self.input.len()
   }
 }
 
 #[inline]
 fn duration_to_samples(d: core::time::Duration) -> u64 {
   let nanos = d.as_nanos();
-  // 16_000 samples/sec ⇒ samples = nanos * 16_000 / 1e9.
   (nanos * SAMPLE_RATE_HZ as u128 / 1_000_000_000u128) as u64
+}
+
+/// `total_frames = ceil(total_samples * FRAMES_PER_WINDOW / WINDOW_SAMPLES)`
+/// — the smallest absolute frame index whose start sample is at or past
+/// `total_samples`. See spec §5.4.1 terminal-case definition.
+#[inline]
+fn total_frames_of(total_samples: u64) -> u64 {
+  (total_samples * FRAMES_PER_WINDOW as u64).div_ceil(WINDOW_SAMPLES as u64)
 }
 
 #[cfg(test)]
@@ -380,19 +553,17 @@ mod tests {
     SegmentOptions::default()
   }
 
-  /// Build synthetic powerset logits where speaker A is "active" (class 1
-  /// dominates) for frames in `active_frames`, otherwise silence (class 0
-  /// dominates). All other classes are negligible.
+  /// Synthetic powerset logits: speaker A "dominant" (class 1) for frames
+  /// in `active_frames`, otherwise silence (class 0).
   fn synth_logits(active_frames: core::ops::Range<usize>) -> Vec<f32> {
     let mut out = vec![0.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
     for f in 0..FRAMES_PER_WINDOW {
       let row_start = f * POWERSET_CLASSES;
-      // Strong negative for everything, then boost the chosen class.
       for c in 0..POWERSET_CLASSES {
         out[row_start + c] = -10.0;
       }
       let active = active_frames.contains(&f);
-      let dominant = if active { 1 } else { 0 }; // 1 = A only, 0 = silence
+      let dominant = if active { 1 } else { 0 };
       out[row_start + dominant] = 10.0;
     }
     out
@@ -402,35 +573,34 @@ mod tests {
   fn empty_no_actions() {
     let mut s = Segmenter::new(opts());
     assert!(s.poll().is_none());
+    assert_eq!(s.pending_inferences(), 0);
+    assert_eq!(s.buffered_samples(), 0);
   }
 
   #[test]
   fn first_window_emits_after_full_window_buffered() {
     let mut s = Segmenter::new(opts());
-    // Push 80_000 samples — half a window. No action yet.
     s.push_samples(&vec![0.1f32; 80_000]);
     assert!(s.poll().is_none());
-    // Push another 80_000 — now we have a full window.
+    assert_eq!(s.buffered_samples(), 80_000);
     s.push_samples(&vec![0.2f32; 80_000]);
     match s.poll() {
       Some(Action::NeedsInference { id, samples }) => {
         assert_eq!(samples.len(), WINDOW_SAMPLES as usize);
         assert_eq!(id.range(), TimeRange::new(0, 160_000, SAMPLE_RATE_TB));
-        // First half is 0.1, second half is 0.2.
         assert!((samples[0] - 0.1).abs() < 1e-6);
         assert!((samples[80_000] - 0.2).abs() < 1e-6);
       }
       other => panic!("expected NeedsInference, got {other:?}"),
     }
-    assert!(s.poll().is_none());
+    assert_eq!(s.pending_inferences(), 1);
   }
 
   #[test]
   fn second_window_emits_after_one_step_more_audio() {
     let mut s = Segmenter::new(opts());
     s.push_samples(&vec![0.0f32; 160_000]);
-    let _first = s.poll();
-    // After 200_000 total samples we have second window covering [40_000, 200_000).
+    let _ = s.poll();
     s.push_samples(&vec![0.0f32; 40_000]);
     match s.poll() {
       Some(Action::NeedsInference { id, .. }) => {
@@ -444,8 +614,7 @@ mod tests {
   fn push_inference_wrong_length_errors() {
     let mut s = Segmenter::new(opts());
     s.push_samples(&vec![0.0; 160_000]);
-    let action = s.poll().unwrap();
-    let id = match action {
+    let id = match s.poll().unwrap() {
       Action::NeedsInference { id, .. } => id,
       _ => unreachable!(),
     };
@@ -462,11 +631,76 @@ mod tests {
   #[test]
   fn push_inference_unknown_window_errors() {
     let mut s = Segmenter::new(opts());
-    let bogus_id = WindowId::new(TimeRange::new(0, 160_000, SAMPLE_RATE_TB));
+    let bogus_id = WindowId::new(TimeRange::new(0, 160_000, SAMPLE_RATE_TB), 999);
     let scores = vec![0.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
     match s.push_inference(bogus_id, &scores) {
       Err(Error::UnknownWindow { .. }) => {}
       other => panic!("unexpected: {other:?}"),
+    }
+  }
+
+  /// Calling push_inference twice with the same id: first succeeds, second
+  /// returns UnknownWindow because the entry was consumed.
+  #[test]
+  fn push_inference_twice_with_same_id() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.0; 160_000]);
+    let id = match s.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    let scores = synth_logits(0..0);
+    s.push_inference(id, &scores).expect("first call ok");
+    match s.push_inference(id, &scores) {
+      Err(Error::UnknownWindow { .. }) => {}
+      other => panic!("expected UnknownWindow on second call, got {other:?}"),
+    }
+  }
+
+  /// Stale-id from before clear() is rejected (spec §11.9).
+  #[test]
+  fn push_inference_stale_after_clear() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.0; 160_000]);
+    let stale_id = match s.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    s.clear();
+    s.push_samples(&vec![0.0; 160_000]);
+    let _ = s.poll(); // discard the new id
+    let scores = vec![0.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    match s.push_inference(stale_id, &scores) {
+      Err(Error::UnknownWindow { .. }) => {}
+      other => panic!("expected UnknownWindow on stale id, got {other:?}"),
+    }
+  }
+
+  /// Cross-Segmenter id collision (spec §11.9 #2): two `Segmenter`s both
+  /// yield ids with the same TimeRange but different generations. Using
+  /// one's id with the other returns UnknownWindow.
+  #[test]
+  fn push_inference_cross_segmenter_collision() {
+    let mut a = Segmenter::new(opts());
+    let mut b = Segmenter::new(opts());
+    a.push_samples(&vec![0.0; 160_000]);
+    b.push_samples(&vec![0.0; 160_000]);
+    let id_a = match a.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    let id_b = match b.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    // Both ids cover the same sample range (0..160_000) but their
+    // generations differ.
+    assert_eq!(id_a.range(), id_b.range());
+    assert_ne!(id_a, id_b);
+    let scores = vec![0.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    match b.push_inference(id_a, &scores) {
+      Err(Error::UnknownWindow { .. }) => {}
+      other => panic!("expected UnknownWindow on cross-segmenter id, got {other:?}"),
     }
   }
 
@@ -478,12 +712,9 @@ mod tests {
       Action::NeedsInference { id, .. } => id,
       _ => unreachable!(),
     };
-    // Speaker A active for a contiguous block of frames.
     let scores = synth_logits(100..200);
     s.push_inference(id, &scores).unwrap();
 
-    // Drain actions; expect at least one Activity for slot 0 within
-    // window [0, 160_000).
     let mut saw_activity = false;
     while let Some(a) = s.poll() {
       if let Action::Activity(act) = a {
@@ -499,14 +730,12 @@ mod tests {
   #[test]
   fn finish_short_clip_schedules_tail_window() {
     let mut s = Segmenter::new(opts());
-    s.push_samples(&vec![0.0; 50_000]); // less than one window
+    s.push_samples(&vec![0.0; 50_000]);
     assert!(s.poll().is_none());
     s.finish();
     match s.poll() {
       Some(Action::NeedsInference { samples, .. }) => {
         assert_eq!(samples.len(), WINDOW_SAMPLES as usize);
-        // The 50_000 buffered samples should be at the start; the
-        // rest is zero-padded.
         for i in 0..50_000 {
           assert_eq!(samples[i], 0.0);
         }
@@ -518,6 +747,48 @@ mod tests {
     }
   }
 
+  /// Empty stream: finish() after no push_samples (or only empty pushes)
+  /// produces zero actions. Spec §11.10.
+  #[test]
+  fn empty_stream_no_actions() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&[]);
+    s.finish();
+    assert!(s.poll().is_none());
+    assert_eq!(s.pending_inferences(), 0);
+    assert_eq!(s.buffered_samples(), 0);
+  }
+
+  /// Tail-window activity range is clamped to total_samples (spec §5.5).
+  #[test]
+  fn tail_window_activity_clamped_to_total_samples() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.0; 50_000]);
+    s.finish();
+    let id = match s.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    // All frames "speaker A active" — without clamping, activity would
+    // span [0, 160_000) sample-wise.
+    let scores = synth_logits(0..FRAMES_PER_WINDOW);
+    s.push_inference(id, &scores).unwrap();
+    let mut saw_activity = false;
+    while let Some(a) = s.poll() {
+      if let Action::Activity(act) = a {
+        let r = act.range();
+        // Range must be clamped at total_samples = 50_000.
+        assert!(
+          r.end_pts() <= 50_000,
+          "activity end {} exceeds total_samples 50000",
+          r.end_pts()
+        );
+        saw_activity = true;
+      }
+    }
+    assert!(saw_activity);
+  }
+
   #[test]
   fn clear_resets_state() {
     let mut s = Segmenter::new(opts());
@@ -525,7 +796,8 @@ mod tests {
     let _ = s.poll();
     s.clear();
     assert!(s.poll().is_none());
-    // Push again — first window starts at sample 0 fresh.
+    assert_eq!(s.pending_inferences(), 0);
+    assert_eq!(s.buffered_samples(), 0);
     s.push_samples(&vec![0.0; 160_000]);
     match s.poll().unwrap() {
       Action::NeedsInference { id, .. } => {
@@ -543,15 +815,12 @@ mod tests {
       Action::NeedsInference { id, .. } => id,
       _ => unreachable!(),
     };
-    // All frames "voiced" via class 1 (speaker A) — voice prob ≈ 1.0.
     let scores = synth_logits(0..FRAMES_PER_WINDOW);
     s.push_inference(id, &scores).unwrap();
     s.finish();
-    // Tail window (anchored at 0) needs inference too.
     if let Some(Action::NeedsInference { id: tail_id, .. }) = s.poll() {
       s.push_inference(tail_id, &scores).unwrap();
     }
-
     let mut found_voice = false;
     while let Some(a) = s.poll() {
       if matches!(a, Action::VoiceSpan(_)) {
@@ -559,5 +828,44 @@ mod tests {
       }
     }
     assert!(found_voice, "expected a closing voice span on finish");
+  }
+
+  /// Out-of-order push_inference must NOT advance boundary past frames
+  /// whose earlier-pending windows haven't reported. Spec §5.4.1 / T1-A.
+  #[test]
+  fn out_of_order_push_inference_holds_boundary() {
+    let mut s = Segmenter::new(opts());
+    // Push enough audio for windows 0, 1, 2 to all schedule.
+    s.push_samples(&vec![0.0; 240_000]); // 0..240_000 covers 0..3 windows
+    let mut ids: Vec<WindowId> = Vec::new();
+    while let Some(a) = s.poll() {
+      if let Action::NeedsInference { id, .. } = a {
+        ids.push(id);
+      }
+    }
+    assert_eq!(ids.len(), 3, "expected 3 pending NeedsInference");
+
+    let scores = synth_logits(0..FRAMES_PER_WINDOW);
+    // Push window 2's inference first.
+    s.push_inference(ids[2], &scores).unwrap();
+    // Boundary should be clamped at window 0's start frame (= 0); no
+    // VoiceSpan should be emitted yet.
+    let mut spans_after_2 = 0;
+    while let Some(a) = s.poll() {
+      if matches!(a, Action::VoiceSpan(_)) {
+        spans_after_2 += 1;
+      }
+    }
+    assert_eq!(
+      spans_after_2, 0,
+      "voice span emitted prematurely before earlier windows reported"
+    );
+
+    // Now push window 0's and 1's inferences.
+    s.push_inference(ids[0], &scores).unwrap();
+    s.push_inference(ids[1], &scores).unwrap();
+    // After all three, boundary should advance to next_window_idx * step.
+    // We don't strictly assert a span here (depends on hysteresis crossing
+    // a boundary); just confirm the pipeline ran without error.
   }
 }

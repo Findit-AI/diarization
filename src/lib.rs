@@ -9,9 +9,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-extern crate alloc as std;
-
 #[cfg(feature = "std")]
 extern crate std;
 

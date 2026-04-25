@@ -1,8 +1,14 @@
 //! Overlap-add stitching of per-window voice probabilities.
 //!
-//! Each window contributes `FRAMES_PER_WINDOW` voice probabilities expanded
-//! over its `WINDOW_SAMPLES` sample span. Overlapping windows are averaged
-//! sample-by-sample.
+//! Storage and computation happen at **frame rate** (one entry per
+//! `FRAMES_PER_WINDOW`-th of `WINDOW_SAMPLES`), not sample rate.
+//! Per-hour-of-audio storage is ~1.7 MB at frame rate vs ~460 MB if we
+//! expanded each frame to its sample range. See spec §5.4.
+//!
+//! Each window contributes `FRAMES_PER_WINDOW` voice probabilities to a
+//! stream-indexed `(sum, count)` accumulator, anchored at
+//! `frame_index_of(window.start_sample)`. Overlapping windows are averaged
+//! sample-by-frame (yes, frame, not sample) on drain.
 
 extern crate alloc;
 
@@ -11,90 +17,94 @@ use alloc::{collections::VecDeque, vec::Vec};
 use crate::segment::options::{FRAMES_PER_WINDOW, WINDOW_SAMPLES};
 
 /// Convert a frame index in `0..=FRAMES_PER_WINDOW` to a sample offset in
-/// `0..=WINDOW_SAMPLES` using rounded integer arithmetic.
+/// `0..=WINDOW_SAMPLES` using rounded integer arithmetic. Bit-for-bit
+/// equivalent to `round(frame_idx * 160000 / 589)` for any integer
+/// `frame_idx` (see spec §5.2.1).
 #[inline]
 pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
-  // (frame_idx * WINDOW_SAMPLES + FRAMES_PER_WINDOW/2) / FRAMES_PER_WINDOW
   let n = frame_idx as u64 * WINDOW_SAMPLES as u64;
   let half = (FRAMES_PER_WINDOW as u64) / 2;
   ((n + half) / FRAMES_PER_WINDOW as u64) as u32
 }
 
-/// Stream-indexed accumulator for voice probability. Windows contribute via
-/// [`add_window`]; finalized samples are exposed via [`take_finalized`].
+/// Convert an absolute sample index to an absolute frame index using
+/// **floor** rounding. The boundary in §5.4.1 demands floor: a frame is
+/// "below boundary" only if NO future window can contribute to it, and any
+/// rounding mode other than floor either over-finalizes (admits a frame a
+/// future window will still touch) or under-finalizes (delays drain).
+///
+/// At step boundaries the conversion can land exactly on a half-integer
+/// (e.g. sample 80_000 → 80_000 × 589 / 160_000 = 294.5). Floor returns 294.
+#[inline]
+pub(crate) const fn frame_index_of(sample_idx: u64) -> u64 {
+  sample_idx * (FRAMES_PER_WINDOW as u64) / (WINDOW_SAMPLES as u64)
+}
+
+/// Stream-indexed per-frame voice-probability accumulator. Windows
+/// contribute via [`Self::add_window`]; finalized frames are drained via
+/// [`Self::take_finalized`].
 pub(crate) struct VoiceStitcher {
-  /// First absolute sample index represented in `sum` / `count`.
-  base_sample: u64,
-  /// Per-sample contribution sum.
+  /// First absolute frame index represented in `sum` / `count`.
+  base_frame: u64,
+  /// Per-frame contribution sum.
   sum: VecDeque<f32>,
-  /// Per-sample contribution count.
+  /// Per-frame contribution count.
   count: VecDeque<u32>,
 }
 
 impl VoiceStitcher {
   pub(crate) fn new() -> Self {
     Self {
-      base_sample: 0,
+      base_frame: 0,
       sum: VecDeque::new(),
       count: VecDeque::new(),
     }
   }
 
   pub(crate) fn clear(&mut self) {
-    self.base_sample = 0;
+    self.base_frame = 0;
     self.sum.clear();
     self.count.clear();
   }
 
   /// Add one window of per-frame voice probabilities (length
-  /// `FRAMES_PER_WINDOW`) starting at absolute sample `start_sample`.
+  /// [`FRAMES_PER_WINDOW`]) anchored at absolute `start_frame`.
   ///
-  /// If `start_sample` is before the stitcher's `base_sample` (which can
-  /// happen for an end-of-stream tail-anchor window that overlaps
-  /// already-finalized samples), the prefix that lies in the finalized
-  /// region is silently skipped — only the suffix `[base_sample, end)`
-  /// contributes.
-  pub(crate) fn add_window(&mut self, start_sample: u64, voice_per_frame: &[f32]) {
+  /// If the window's frame range overlaps the already-finalized region
+  /// (i.e. `start_frame < base_frame`, possible for an end-of-stream
+  /// tail-anchor window), the prefix in the finalized region is silently
+  /// dropped — only the suffix contributes.
+  pub(crate) fn add_window(&mut self, start_frame: u64, voice_per_frame: &[f32]) {
     debug_assert_eq!(voice_per_frame.len(), FRAMES_PER_WINDOW);
 
-    // Entirely in the finalized region → nothing to do.
-    let end_sample = start_sample + WINDOW_SAMPLES as u64;
-    if end_sample <= self.base_sample {
-      return;
+    let end_frame = start_frame + FRAMES_PER_WINDOW as u64;
+    if end_frame <= self.base_frame {
+      return; // entirely in finalized region
     }
 
-    // Ensure capacity covers [base_sample, end_sample).
-    let needed_len = (end_sample - self.base_sample) as usize;
+    // Ensure the buffer covers [base_frame, end_frame).
+    let needed_len = (end_frame - self.base_frame) as usize;
     while self.sum.len() < needed_len {
       self.sum.push_back(0.0);
       self.count.push_back(0);
     }
 
-    // Expand each frame across its sample range, clipping to base_sample.
-    // The index `f` is used both to compute frame->sample boundaries and to
-    // pick the per-frame probability; iterator form is not cleaner here.
-    #[allow(clippy::needless_range_loop)]
-    for f in 0..FRAMES_PER_WINDOW {
-      let s0 = frame_to_sample(f as u32) as u64;
-      let s1 = frame_to_sample(f as u32 + 1) as u64;
-      let p = voice_per_frame[f];
-      for s in s0..s1 {
-        let abs = start_sample + s;
-        if abs < self.base_sample {
-          continue;
-        }
-        let idx = (abs - self.base_sample) as usize;
-        self.sum[idx] += p;
-        self.count[idx] += 1;
+    for (f, &p) in voice_per_frame.iter().enumerate() {
+      let abs = start_frame + f as u64;
+      if abs < self.base_frame {
+        continue;
       }
+      let idx = (abs - self.base_frame) as usize;
+      self.sum[idx] += p;
+      self.count[idx] += 1;
     }
   }
 
-  /// Drain finalized samples up to but not including `up_to_sample`.
-  /// Returns per-sample averaged voice probabilities and advances the base.
-  pub(crate) fn take_finalized(&mut self, up_to_sample: u64) -> Vec<f32> {
-    debug_assert!(up_to_sample >= self.base_sample);
-    let n = (up_to_sample.saturating_sub(self.base_sample)) as usize;
+  /// Drain finalized frames in `[base_frame, up_to_frame)` and return their
+  /// averaged voice probabilities. Advances `base_frame`.
+  pub(crate) fn take_finalized(&mut self, up_to_frame: u64) -> Vec<f32> {
+    debug_assert!(up_to_frame >= self.base_frame);
+    let n = (up_to_frame.saturating_sub(self.base_frame)) as usize;
     let n = n.min(self.sum.len());
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
@@ -102,12 +112,12 @@ impl VoiceStitcher {
       let c = self.count.pop_front().unwrap();
       out.push(if c == 0 { 0.0 } else { s / c as f32 });
     }
-    self.base_sample += n as u64;
+    self.base_frame += n as u64;
     out
   }
 
-  pub(crate) fn base_sample(&self) -> u64 {
-    self.base_sample
+  pub(crate) fn base_frame(&self) -> u64 {
+    self.base_frame
   }
 }
 
@@ -139,45 +149,92 @@ mod tests {
   }
 
   #[test]
+  fn frame_index_of_endpoints() {
+    assert_eq!(frame_index_of(0), 0);
+    assert_eq!(
+      frame_index_of(WINDOW_SAMPLES as u64),
+      FRAMES_PER_WINDOW as u64
+    );
+  }
+
+  /// Half-integer collision case from spec §5.2.2: sample 80_000 lands
+  /// exactly between frames 294 and 295. Floor must give 294.
+  #[test]
+  fn frame_index_of_floor_at_half_integer() {
+    // 80_000 * 589 / 160_000 = 47_120_000 / 160_000 = 294.5 → floor = 294
+    assert_eq!(frame_index_of(80_000), 294);
+    // 40_000 * 589 / 160_000 = 23_560_000 / 160_000 = 147.25 → floor = 147
+    assert_eq!(frame_index_of(40_000), 147);
+    // 120_000 * 589 / 160_000 = 70_680_000 / 160_000 = 441.75 → floor = 441
+    assert_eq!(frame_index_of(120_000), 441);
+    // 160_000 * 589 / 160_000 = 589.0 → 589
+    assert_eq!(frame_index_of(160_000), 589);
+  }
+
+  #[test]
   fn single_window_finalize_all() {
     let mut s = VoiceStitcher::new();
     s.add_window(0, &ones_window());
-    let out = s.take_finalized(WINDOW_SAMPLES as u64);
-    assert_eq!(out.len(), WINDOW_SAMPLES as usize);
+    let out = s.take_finalized(FRAMES_PER_WINDOW as u64);
+    assert_eq!(out.len(), FRAMES_PER_WINDOW);
     for v in out {
       assert!((v - 1.0).abs() < 1e-6);
     }
-    assert_eq!(s.base_sample(), WINDOW_SAMPLES as u64);
+    assert_eq!(s.base_frame(), FRAMES_PER_WINDOW as u64);
   }
 
   #[test]
   fn two_overlapping_windows_average() {
+    // Window 0 starts at frame 0 (= sample 0). Window 1 starts at sample
+    // 40_000, which is frame_index_of(40_000) = 147.
     let mut s = VoiceStitcher::new();
-    s.add_window(0, &ones_window()); // covers [0, 160_000)
-    s.add_window(40_000, &zeros_window()); // covers [40_000, 200_000)
-    // [0, 40_000) only window 1 contributed → 1.0
-    // [40_000, 160_000) overlap → 0.5
-    // [160_000, 200_000) only window 2 → 0.0
-    let out = s.take_finalized(200_000);
+    s.add_window(0, &ones_window()); // covers frames [0, 589)
+    s.add_window(147, &zeros_window()); // covers frames [147, 736)
+    let out = s.take_finalized(736);
+    // [0, 147): only window 0 → 1.0
+    // [147, 589): overlap → 0.5
+    // [589, 736): only window 1 → 0.0
     assert!((out[0] - 1.0).abs() < 1e-6);
-    assert!((out[39_999] - 1.0).abs() < 1e-6);
-    assert!((out[40_000] - 0.5).abs() < 1e-6);
-    assert!((out[159_999] - 0.5).abs() < 1e-6);
-    assert!(out[160_000].abs() < 1e-6);
-    assert!(out[199_999].abs() < 1e-6);
+    assert!((out[146] - 1.0).abs() < 1e-6);
+    assert!((out[147] - 0.5).abs() < 1e-6);
+    assert!((out[588] - 0.5).abs() < 1e-6);
+    assert!(out[589].abs() < 1e-6);
+    assert!(out[735].abs() < 1e-6);
   }
 
   #[test]
   fn partial_finalize_advances_base() {
     let mut s = VoiceStitcher::new();
     s.add_window(0, &ones_window());
-    let part = s.take_finalized(40_000);
-    assert_eq!(part.len(), 40_000);
-    assert_eq!(s.base_sample(), 40_000);
-    // Remaining samples still reachable.
-    let rest = s.take_finalized(WINDOW_SAMPLES as u64);
-    assert_eq!(rest.len(), 120_000);
-    assert_eq!(s.base_sample(), WINDOW_SAMPLES as u64);
+    let part = s.take_finalized(100);
+    assert_eq!(part.len(), 100);
+    assert_eq!(s.base_frame(), 100);
+    let rest = s.take_finalized(FRAMES_PER_WINDOW as u64);
+    assert_eq!(rest.len(), FRAMES_PER_WINDOW - 100);
+    assert_eq!(s.base_frame(), FRAMES_PER_WINDOW as u64);
+  }
+
+  #[test]
+  fn tail_window_overlap_with_finalized_skipped() {
+    // Drain [0, 100) first, then add a "tail" window starting at frame 50
+    // (overlaps the finalized region).
+    let mut s = VoiceStitcher::new();
+    s.add_window(0, &ones_window());
+    let _ = s.take_finalized(100);
+    assert_eq!(s.base_frame(), 100);
+    // Now add a window at start_frame=50 — frames 50..100 are already
+    // finalized and should be dropped; frames 100..639 contribute.
+    s.add_window(50, &zeros_window());
+    // Drain everything available (window 0 covered [0, 589), so frames
+    // 100..589 still in buffer with count=1 each from window 0; the tail
+    // adds count for [100, 639), so frames [100, 589) have count=2 and
+    // frames [589, 639) have count=1 from the tail only).
+    let out = s.take_finalized(639);
+    // Frame 100..589 average = (1.0 + 0.0) / 2 = 0.5
+    assert!((out[0] - 0.5).abs() < 1e-6);
+    assert!((out[488] - 0.5).abs() < 1e-6);
+    // Frame 589..639 average = 0.0 / 1 = 0.0
+    assert!(out[489].abs() < 1e-6);
   }
 
   #[test]
@@ -185,7 +242,7 @@ mod tests {
     let mut s = VoiceStitcher::new();
     s.add_window(0, &ones_window());
     s.clear();
-    assert_eq!(s.base_sample(), 0);
+    assert_eq!(s.base_frame(), 0);
     assert!(s.take_finalized(100).is_empty());
   }
 }

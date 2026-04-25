@@ -1,83 +1,82 @@
 //! Error type for the segmentation module.
 
-use core::fmt;
-
 #[cfg(all(feature = "std", feature = "ort"))]
 use std::path::PathBuf;
+
+use thiserror::Error;
 
 use crate::segment::types::WindowId;
 
 /// All errors produced by `dia::segment`.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-  /// Construction-time validation failure for `SegmentOptions`.
+  /// Construction-time validation failure for [`SegmentOptions`].
+  ///
+  /// Reserved for future eager validation; not currently emitted by
+  /// v0.1.0 (which stores option values verbatim).
+  ///
+  /// [`SegmentOptions`]: crate::segment::SegmentOptions
+  #[error("invalid segment options: {0}")]
   InvalidOptions(&'static str),
 
   /// `push_inference` received a `scores` slice of the wrong length.
+  ///
+  /// Expected length is [`FRAMES_PER_WINDOW`] × [`POWERSET_CLASSES`] = 4123.
+  ///
+  /// [`FRAMES_PER_WINDOW`]: crate::segment::FRAMES_PER_WINDOW
+  /// [`POWERSET_CLASSES`]: crate::segment::POWERSET_CLASSES
+  #[error("inference scores length {got}, expected {expected}")]
   InferenceShapeMismatch {
-    /// Expected element count: `FRAMES_PER_WINDOW * POWERSET_CLASSES`.
+    /// Expected element count.
     expected: usize,
     /// Actual length received.
     got: usize,
   },
 
-  /// `push_inference` was called with a `WindowId` that wasn't yielded by
-  /// `poll` (or that has already been consumed).
+  /// `push_inference` was called with a [`WindowId`] that is not in the
+  /// pending set.
+  ///
+  /// See [`Segmenter::push_inference`] rustdoc for the four scenarios this
+  /// covers (never-yielded, already-consumed, stale-after-`clear`,
+  /// cross-segmenter-collision).
+  ///
+  /// [`Segmenter::push_inference`]: crate::segment::Segmenter::push_inference
+  #[error("inference scores received for unknown WindowId {id:?}")]
   UnknownWindow {
     /// The unknown id.
     id: WindowId,
   },
 
+  /// A loaded ONNX model's input or output dimensions don't match what
+  /// `dia::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
+  /// output, where `*` is a free batch dimension).
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("model {tensor} dims {got:?}, expected {expected:?}")]
+  IncompatibleModel {
+    /// Which tensor (`"input"` or `"output"`).
+    tensor: &'static str,
+    /// Expected dimension list. `-1` indicates a dynamic dimension.
+    expected: &'static [i64],
+    /// Actual dimensions reported by the loaded model.
+    got: Vec<i64>,
+  },
+
   /// The `ort::Session` failed to load the model file.
   #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("failed to load model from {path}: {source}", path = path.display())]
   LoadModel {
     /// Path passed to `from_file`.
     path: PathBuf,
     /// Underlying ort error.
+    #[source]
     source: ort::Error,
   },
 
   /// Generic ort runtime error from `SegmentModel::infer` or session ops.
   #[cfg(feature = "ort")]
-  Ort(ort::Error),
-}
-
-impl fmt::Display for Error {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::InvalidOptions(msg) => write!(f, "invalid segment options: {msg}"),
-      Self::InferenceShapeMismatch { expected, got } => {
-        write!(f, "inference scores length {got}, expected {expected}")
-      }
-      Self::UnknownWindow { id } => {
-        write!(f, "inference scores received for unknown WindowId {id:?}")
-      }
-      #[cfg(feature = "ort")]
-      Self::LoadModel { path, source } => {
-        write!(f, "failed to load model from {}: {source}", path.display())
-      }
-      #[cfg(feature = "ort")]
-      Self::Ort(e) => write!(f, "ort runtime error: {e}"),
-    }
-  }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Error {
-  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-    match self {
-      #[cfg(feature = "ort")]
-      Self::LoadModel { source, .. } => Some(source),
-      #[cfg(feature = "ort")]
-      Self::Ort(e) => Some(e),
-      _ => None,
-    }
-  }
-}
-
-#[cfg(feature = "ort")]
-impl From<ort::Error> for Error {
-  fn from(e: ort::Error) -> Self {
-    Self::Ort(e)
-  }
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error(transparent)]
+  Ort(#[from] ort::Error),
 }

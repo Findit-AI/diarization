@@ -6,45 +6,75 @@ use mediatime::{TimeRange, Timestamp};
 
 /// Stable correlation handle for one inference round-trip.
 ///
-/// Equal to the window's sample range in `SAMPLE_RATE_TB`. Two `WindowId`s
-/// with the same start and end compare equal and hash to the same value, so
-/// it is safe to use as a `HashMap` key.
+/// Carries the window's sample range in `SAMPLE_RATE_TB` plus an opaque
+/// generation token minted from a process-wide counter (see §11.9 of the
+/// design spec). Two `WindowId`s compare equal iff both their range AND
+/// generation match.
+///
+/// The generation counter eliminates two corruption scenarios:
+///
+/// 1. **Within one segmenter**, a stale `push_inference` from before a
+///    `clear()` cannot match a new pending entry with the same range.
+/// 2. **Across segmenters in the same process**, an `id` accidentally
+///    fed to the wrong `Segmenter` cannot match because each
+///    `Segmenter::new` consumes a fresh counter value.
+///
+/// The generation value is intentionally not exposed on the public API.
+/// `Debug` shows it for diagnostics. `Ord`/`PartialOrd` order by
+/// `(generation, start_pts)`; cross-generation ordering is deterministic
+/// (suitable for `BTreeMap` lookup) but semantically meaningless — do not
+/// use it for sample-position comparisons across cleared / different streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WindowId(TimeRange);
+pub struct WindowId {
+  range: TimeRange,
+  generation: u64,
+}
 
 impl WindowId {
-  pub(crate) const fn new(range: TimeRange) -> Self {
-    Self(range)
+  pub(crate) const fn new(range: TimeRange, generation: u64) -> Self {
+    Self { range, generation }
   }
+
   /// Sample-range covered by the window in `SAMPLE_RATE_TB`.
   pub const fn range(&self) -> TimeRange {
-    self.0
+    self.range
   }
+
   /// Window start as a `Timestamp`.
   pub const fn start(&self) -> Timestamp {
-    self.0.start()
+    self.range.start()
   }
+
   /// Window end as a `Timestamp`.
   pub const fn end(&self) -> Timestamp {
-    self.0.end()
+    self.range.end()
   }
+
   /// Window duration (always 10 s for v0.1.0).
-  pub fn duration(&self) -> core::time::Duration {
-    self.0.duration()
+  pub const fn duration(&self) -> core::time::Duration {
+    self.range.duration()
+  }
+
+  /// Internal accessor for the generation token. Crate-private and used
+  /// only by tests; the public-facing diagnostic surface is `Debug`.
+  /// Callers must not depend on this value being stable across releases.
+  #[cfg(test)]
+  pub(crate) const fn generation(&self) -> u64 {
+    self.generation
   }
 }
 
-// Manual `Ord` impl so `WindowId` can serve as a `BTreeMap` key in no_std
-// builds. `mediatime::TimeRange` does not itself impl `Ord`, but every
-// `WindowId` we produce shares `SAMPLE_RATE_TB`, so ordering by
-// `(start_pts, end_pts)` is total and meaningful.
+// Order by (generation, start_pts). End-PTS adds no information because
+// `end == start + WINDOW_SAMPLES` for every window we produce. Within a
+// single generation, ordering is "by sample position" and meaningful;
+// across generations, ordering is deterministic (suitable for `BTreeMap`)
+// but semantically meaningless.
 impl Ord for WindowId {
   fn cmp(&self, other: &Self) -> core::cmp::Ordering {
     self
-      .0
-      .start_pts()
-      .cmp(&other.0.start_pts())
-      .then_with(|| self.0.end_pts().cmp(&other.0.end_pts()))
+      .generation
+      .cmp(&other.generation)
+      .then_with(|| self.range.start_pts().cmp(&other.range.start_pts()))
   }
 }
 
@@ -89,13 +119,18 @@ impl SpeakerActivity {
 }
 
 /// One output of the Layer-1 state machine.
+///
+/// Style note: enum-variant fields (`id`, `samples`) are public because they
+/// participate in pattern matching, which is the standard Rust enum idiom.
+/// Structs with invariants (`WindowId`, `SpeakerActivity`) use private
+/// fields with accessors. The two conventions coexist deliberately.
 #[derive(Debug, Clone)]
 pub enum Action {
   /// The caller must run ONNX inference on `samples` and call
   /// [`Segmenter::push_inference`](crate::segment::Segmenter::push_inference)
   /// with the same `id`.
   NeedsInference {
-    /// Correlation handle (the window's sample range).
+    /// Correlation handle (the window's sample range plus generation).
     id: WindowId,
     /// Always `WINDOW_SAMPLES = 160_000` mono float32 samples at 16 kHz,
     /// zero-padded if the input stream is shorter.
@@ -103,7 +138,8 @@ pub enum Action {
   },
   /// A decoded window-local speaker activity.
   Activity(SpeakerActivity),
-  /// A finalized speaker-agnostic voice region.
+  /// A finalized speaker-agnostic voice region. Emit-only — never
+  /// retracted once produced.
   VoiceSpan(TimeRange),
 }
 
@@ -126,27 +162,58 @@ mod tests {
     TimeRange::new(start, end, SAMPLE_RATE_TB)
   }
 
-  #[test]
-  fn window_id_accessors() {
-    let id = WindowId::new(tr(0, 160_000));
-    assert_eq!(id.range(), tr(0, 160_000));
-    assert_eq!(id.start().pts(), 0);
-    assert_eq!(id.end().pts(), 160_000);
-    assert_eq!(id.duration(), core::time::Duration::from_secs(10));
+  fn id(start: i64, end: i64, generation: u64) -> WindowId {
+    WindowId::new(tr(start, end), generation)
   }
 
   #[test]
-  fn window_id_hash_eq_value_semantic() {
+  fn window_id_accessors() {
+    let w = id(0, 160_000, 7);
+    assert_eq!(w.range(), tr(0, 160_000));
+    assert_eq!(w.start().pts(), 0);
+    assert_eq!(w.end().pts(), 160_000);
+    assert_eq!(w.duration(), core::time::Duration::from_secs(10));
+    assert_eq!(w.generation(), 7);
+  }
+
+  #[test]
+  fn window_id_eq_includes_generation() {
+    assert_eq!(id(0, 160_000, 0), id(0, 160_000, 0));
+    assert_ne!(id(0, 160_000, 0), id(0, 160_000, 1));
+  }
+
+  #[test]
+  fn window_id_hash_includes_generation() {
     use std::collections::HashSet;
     let mut s = HashSet::new();
-    s.insert(WindowId::new(tr(0, 160_000)));
-    assert!(s.contains(&WindowId::new(tr(0, 160_000))));
-    assert!(!s.contains(&WindowId::new(tr(40_000, 200_000))));
+    s.insert(id(0, 160_000, 0));
+    assert!(s.contains(&id(0, 160_000, 0)));
+    assert!(!s.contains(&id(0, 160_000, 1)));
+    assert!(!s.contains(&id(40_000, 200_000, 0)));
+  }
+
+  #[test]
+  fn window_id_ord_by_generation_then_start() {
+    use core::cmp::Ordering;
+    // Same generation: ordered by start.
+    assert_eq!(
+      id(0, 160_000, 0).cmp(&id(40_000, 200_000, 0)),
+      Ordering::Less
+    );
+    // Different generation: ordered by generation.
+    assert_eq!(
+      id(0, 160_000, 1).cmp(&id(40_000, 200_000, 0)),
+      Ordering::Greater
+    );
+    assert_eq!(
+      id(40_000, 200_000, 0).cmp(&id(0, 160_000, 1)),
+      Ordering::Less
+    );
   }
 
   #[test]
   fn speaker_activity_accessors() {
-    let win = WindowId::new(tr(0, 160_000));
+    let win = id(0, 160_000, 0);
     let act = SpeakerActivity::new(win, 1, tr(8_000, 24_000));
     assert_eq!(act.window_id(), win);
     assert_eq!(act.speaker_slot(), 1);

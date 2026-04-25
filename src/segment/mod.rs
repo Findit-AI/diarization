@@ -25,4 +25,32 @@ pub use types::{Action, Event, SpeakerActivity, WindowId};
 
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
-pub use model::SegmentModel;
+pub use model::{SegmentModel, SegmentModelOptions};
+
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use ort::execution_providers::ExecutionProviderDispatch;
+/// Re-exported ort types used by [`SegmentModelOptions`] builders.
+///
+/// We re-export so callers can compose provider/optimization configurations
+/// without importing `ort` directly. `GraphOptimizationLevel` mirrors what
+/// silero exposes; `ExecutionProviderDispatch` is dia's deliberate
+/// divergence — silero hard-codes provider selection, but dia exposes a
+/// `with_providers` builder so we have to re-export the type it takes.
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use ort::session::builder::GraphOptimizationLevel;
+
+// Compile-time trait assertions (spec §9). Catch a future field-type
+// change that would silently regress Send/Sync auto-derive.
+const _: fn() = || {
+  fn assert_send_sync<T: Send + Sync>() {}
+  assert_send_sync::<Segmenter>();
+
+  #[cfg(feature = "ort")]
+  fn assert_send<T: Send>() {}
+  // SegmentModel: Send (auto-derived). The !Sync property rides on
+  // ort::Session and is not asserted here without static_assertions.
+  #[cfg(feature = "ort")]
+  assert_send::<SegmentModel>();
+};
