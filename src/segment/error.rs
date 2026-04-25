@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "ort"))]
 use std::path::PathBuf;
 
 use crate::segment::types::WindowId;

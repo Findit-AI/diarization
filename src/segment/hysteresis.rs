@@ -46,6 +46,10 @@ impl Hysteresis {
 }
 
 /// Apply hysteresis to a probability sequence (no carried state).
+///
+/// Bulk-mode helper used by tests; the segmenter uses [`Hysteresis::push`]
+/// directly to maintain streaming state.
+#[cfg(test)]
 pub(crate) fn binarize(probs: &[f32], onset: f32, offset: f32) -> Vec<bool> {
   let mut h = Hysteresis::new(onset, offset);
   probs.iter().map(|&p| h.push(p)).collect()

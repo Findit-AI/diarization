@@ -23,6 +23,6 @@ pub use options::{
 pub use segmenter::Segmenter;
 pub use types::{Action, Event, SpeakerActivity, WindowId};
 
-// #[cfg(feature = "ort")]
-// #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
-// pub use model::SegmentModel;
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use model::SegmentModel;
