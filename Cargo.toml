@@ -1,35 +1,43 @@
 [package]
-name = "template-rs"
-version = "0.0.0"
-edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
-license = "MIT OR Apache-2.0"
+name = "dia"
+version = "0.1.0"
+edition = "2024"
 rust-version = "1.95"
-
-[[bench]]
-path = "benches/foo.rs"
-name = "foo"
-harness = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/al8n/dia"
+homepage = "https://github.com/al8n/dia"
+documentation = "https://docs.rs/dia"
+description = "Sans-I/O speaker diarization for streaming audio (segmentation; embedding to follow)."
+readme = "README.md"
 
 [features]
-default = ["std"]
-alloc = []
+default = ["std", "ort"]
 std = []
+alloc = []
+ort = ["dep:ort"]
+serde = ["dep:serde", "mediatime/serde"]
 
 [dependencies]
+mediatime = "0.1"
+thiserror = "2"
+ort = { version = "2.0.0-rc.12", optional = true }
+serde = { version = "1", optional = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.8"
 tempfile = "3"
+hound = "3"
+
+[[bench]]
+path = "benches/segment.rs"
+name = "segment"
+harness = false
 
 [profile.bench]
 opt-level = 3
 debug = false
 codegen-units = 1
-lto = 'thin'
+lto = "thin"
 incremental = false
 debug-assertions = false
 overflow-checks = false
@@ -42,6 +50,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
+missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(all_tests)',
   'cfg(tarpaulin)',
