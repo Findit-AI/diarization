@@ -33,9 +33,11 @@ mod spectral;
 #[cfg(test)]
 mod tests;
 
-// Compile-time trait assertions.
+// Compile-time trait assertions. Catches a future field-type change that
+// would silently regress Send/Sync auto-derive on the public types.
 const _: fn() = || {
   fn assert_send_sync<T: Send + Sync>() {}
+  assert_send_sync::<Clusterer>();
   assert_send_sync::<ClusterOptions>();
   assert_send_sync::<OfflineClusterOptions>();
   assert_send_sync::<ClusterAssignment>();

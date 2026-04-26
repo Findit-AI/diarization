@@ -377,4 +377,51 @@ mod tests {
     assert!(ids.contains(&0));
     assert!(ids.contains(&1));
   }
+
+  /// Property: after any number of assignments the centroid stays
+  /// approximately L2-normalized (|centroid|₂ ≈ 1.0).
+  #[test]
+  fn centroid_stays_normalized_after_many_submissions() {
+    let opts = ClusterOptions::new()
+      .with_similarity_threshold(0.0) // always match speaker 0
+      .with_max_speakers(1)
+      .with_update_strategy(UpdateStrategy::Ema(0.3));
+    let mut c = Clusterer::new(opts);
+    // Submit 50 unit embeddings across different dimensions.
+    for i in 0..50usize {
+      let e = unit_embedding(i % EMBEDDING_DIM);
+      c.submit(e).unwrap();
+    }
+    let s0 = &c.speakers[0];
+    let n2: f32 = s0.centroid.as_array().iter().map(|x| x * x).sum();
+    assert!(
+      (n2 - 1.0).abs() < 1e-4,
+      "centroid not normalized: ||c||² = {n2}"
+    );
+  }
+
+  /// Property: under `RollingMean`, the accumulator components are bounded
+  /// by `assignment_count` (each component is a sum of values in `[-1, 1]`).
+  #[test]
+  fn rolling_mean_accumulator_magnitude_bounded() {
+    let opts = ClusterOptions::new()
+      .with_similarity_threshold(0.0)
+      .with_max_speakers(1)
+      .with_update_strategy(UpdateStrategy::RollingMean);
+    let mut c = Clusterer::new(opts);
+    for i in 0..30usize {
+      let e = unit_embedding(i % EMBEDDING_DIM);
+      c.submit(e).unwrap();
+    }
+    let s0 = &c.speakers[0];
+    let n = s0.assignment_count as f32;
+    // Each component is a sum of at most `n` values each in [-1, 1],
+    // so each component must satisfy |acc[k]| ≤ n.
+    for &val in s0.accumulator.iter() {
+      assert!(
+        val.abs() <= n + 1e-4,
+        "accumulator component {val} exceeds bound {n}"
+      );
+    }
+  }
 }
