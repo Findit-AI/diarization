@@ -54,6 +54,14 @@ impl Embedding {
   }
 }
 
+/// Free-function form of [`Embedding::similarity`] for callers who
+/// prefer it. Both styles are public; pick whichever reads more
+/// naturally at the call site. **Bit-exactly equivalent** to the
+/// method (same component-order dot product, no FMA rearrangement).
+pub fn cosine_similarity(a: &Embedding, b: &Embedding) -> f32 {
+  a.similarity(b)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -132,5 +140,20 @@ mod tests {
     let ea = Embedding::normalize_from(a).unwrap();
     let eb = Embedding::normalize_from(b).unwrap();
     assert!((ea.similarity(&eb) - eb.similarity(&ea)).abs() < 1e-7);
+  }
+
+  #[test]
+  fn cosine_similarity_matches_method() {
+    let mut a = [0.0; EMBEDDING_DIM];
+    let mut b = [0.0; EMBEDDING_DIM];
+    for (i, (av, bv)) in a.iter_mut().zip(b.iter_mut()).enumerate() {
+      *av = (i as f32 * 0.01).sin();
+      *bv = (i as f32 * 0.013).cos();
+    }
+    let ea = Embedding::normalize_from(a).unwrap();
+    let eb = Embedding::normalize_from(b).unwrap();
+    // Free fn must equal method bit-exactly (same dot product,
+    // same component order — no fma rearrangement).
+    assert_eq!(cosine_similarity(&ea, &eb), ea.similarity(&eb));
   }
 }
