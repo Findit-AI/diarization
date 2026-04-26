@@ -52,7 +52,7 @@ pub enum OverflowStrategy {
   /// not meet the similarity threshold. This is the default.
   #[default]
   AssignClosest,
-  /// Reject the embedding and return [`Error::TooManySpeakers`].
+  /// Reject the embedding and return [`Error::TooManySpeakers`](crate::cluster::Error::TooManySpeakers).
   Reject,
 }
 
