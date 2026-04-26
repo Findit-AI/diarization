@@ -24,6 +24,8 @@ ort = { version = "2.0.0-rc.12", optional = true }
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
+rand = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 tempfile = "3"
 
 [[bench]]
