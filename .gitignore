@@ -17,3 +17,11 @@
 /target
 Cargo.lock
 /models/*.onnx
+
+# Spike-specific (kaldi-native-fbank parity)
+spikes/kaldi_fbank/python/.venv/
+spikes/kaldi_fbank/python/__pycache__/
+spikes/kaldi_fbank/python/*.egg-info/
+spikes/kaldi_fbank/python/uv.lock
+spikes/kaldi_fbank/rust.csv
+spikes/kaldi_fbank/python.csv
