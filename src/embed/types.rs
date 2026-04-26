@@ -1,5 +1,7 @@
 //! Public output types for `dia::embed`. All types are `Send + Sync`.
 
+use core::time::Duration;
+
 use crate::embed::options::{EMBEDDING_DIM, NORM_EPSILON};
 
 /// A 256-d L2-normalized speaker embedding.
@@ -89,6 +91,79 @@ impl<A, T> EmbeddingMeta<A, T> {
   pub fn with_correlation_id(mut self, id: u64) -> Self {
     self.correlation_id = Some(id);
     self
+  }
+
+  pub fn audio_id(&self) -> &A {
+    &self.audio_id
+  }
+
+  pub fn track_id(&self) -> &T {
+    &self.track_id
+  }
+
+  pub fn correlation_id(&self) -> Option<u64> {
+    self.correlation_id
+  }
+}
+
+/// Result of one `EmbedModel::embed*` call.
+///
+/// Carries the embedding plus observability fields:
+/// - `source_duration`: actual length of the source clip (NOT padded/cropped)
+/// - `windows_used`: number of 2 s windows averaged (1 for clips ≤ 2 s)
+/// - `total_weight`: sum of per-window weights
+/// - `audio_id`/`track_id`/`correlation_id`: caller-supplied metadata
+#[derive(Debug, Clone)]
+pub struct EmbeddingResult<A = (), T = ()> {
+  embedding: Embedding,
+  source_duration: Duration,
+  windows_used: u32,
+  total_weight: f32,
+  audio_id: A,
+  track_id: T,
+  correlation_id: Option<u64>,
+}
+
+impl<A, T> EmbeddingResult<A, T> {
+  /// Construct (typically from inside `EmbedModel`).
+  #[allow(dead_code)] // used in tests; EmbedModel added in a later phase
+  pub(crate) fn new(
+    embedding: Embedding,
+    source_duration: Duration,
+    windows_used: u32,
+    total_weight: f32,
+    meta: EmbeddingMeta<A, T>,
+  ) -> Self {
+    let EmbeddingMeta {
+      audio_id,
+      track_id,
+      correlation_id,
+    } = meta;
+    Self {
+      embedding,
+      source_duration,
+      windows_used,
+      total_weight,
+      audio_id,
+      track_id,
+      correlation_id,
+    }
+  }
+
+  pub fn embedding(&self) -> &Embedding {
+    &self.embedding
+  }
+
+  pub fn source_duration(&self) -> Duration {
+    self.source_duration
+  }
+
+  pub fn windows_used(&self) -> u32 {
+    self.windows_used
+  }
+
+  pub fn total_weight(&self) -> f32 {
+    self.total_weight
   }
 
   pub fn audio_id(&self) -> &A {
@@ -219,5 +294,39 @@ mod tests {
   fn embedding_meta_with_correlation_id() {
     let m = EmbeddingMeta::new((), ()).with_correlation_id(123);
     assert_eq!(m.correlation_id(), Some(123));
+  }
+
+  #[test]
+  fn embedding_result_unit_meta_construction() {
+    let mut v = [0.0; EMBEDDING_DIM];
+    v[0] = 1.0;
+    let e = Embedding::normalize_from(v).unwrap();
+    let r: EmbeddingResult = EmbeddingResult::new(
+      e,
+      Duration::from_millis(1500),
+      1,
+      1.0,
+      EmbeddingMeta::default(),
+    );
+    assert_eq!(r.embedding(), &e);
+    assert_eq!(r.windows_used(), 1);
+    assert!((r.total_weight() - 1.0).abs() < 1e-7);
+  }
+
+  #[test]
+  fn embedding_result_typed_meta() {
+    let mut v = [0.0; EMBEDDING_DIM];
+    v[0] = 1.0;
+    let e = Embedding::normalize_from(v).unwrap();
+    let r = EmbeddingResult::new(
+      e,
+      Duration::from_millis(2000),
+      2,
+      1.5,
+      EmbeddingMeta::new("clip_3".to_string(), 9u32).with_correlation_id(42),
+    );
+    assert_eq!(r.audio_id(), "clip_3");
+    assert_eq!(r.track_id(), &9u32);
+    assert_eq!(r.correlation_id(), Some(42));
   }
 }

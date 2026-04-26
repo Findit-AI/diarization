@@ -16,6 +16,4 @@ pub use options::{
   EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, HOP_SAMPLES, MIN_CLIP_SAMPLES,
   NORM_EPSILON,
 };
-pub use types::{Embedding, EmbeddingMeta, cosine_similarity};
-// pub use types::EmbeddingResult;
-//                                                              // re-enabled in Task 7
+pub use types::{Embedding, EmbeddingMeta, EmbeddingResult, cosine_similarity};
