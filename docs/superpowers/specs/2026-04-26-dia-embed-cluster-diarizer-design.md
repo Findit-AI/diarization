@@ -1,6 +1,6 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 6** (2026-04-26, scope expansion: pyannote-style reconstruction).
+**Revision 7** (2026-04-26, VAD prerequisite + richer DiarizedSpan).
 **Status:** ready for implementation (pending §15 #43 pre-impl spike).
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`,
 **plus a v0.X bump of `dia::segment` to expose per-window per-speaker per-frame
@@ -13,6 +13,20 @@ raw probabilities** (required for reconstruction):
   argmax, per-cluster RLE-to-spans). Output is one `DiarizedSpan` per closed
   speaker turn — not per-(window, speaker).
 
+> **Revision 7 nails down the VAD-prerequisite contract** that's been
+> implicit since the brainstorm. The user's pipeline is `audio decoder
+> → resample → VAD → dia → downstream`, so dia's input is **VAD-filtered
+> speech**, fed in **variable-length pushes** — not necessarily 2 s, not
+> necessarily 10 s, not necessarily aligned to any window boundary. The
+> rev-6 algorithm already handles this correctly (segment buffers samples
+> lazily, embed accepts 25 ms – any-length clips, reconstruction
+> finalizes per-frame as windows complete) but the spec did not document
+> the contract explicitly. Rev 7 documents it (§3, §11.12), enriches
+> `DiarizedSpan` with quality metrics for downstream storage and analysis
+> (`average_activation`, `activity_count`, `clean_mask_fraction`), adds a
+> `Diarizer::total_samples_pushed()` accessor for caller-side timeline
+> mapping, and adds §9 tests covering the variable-length VAD scenarios.
+>
 > **Revision 6 expands scope** to include pyannote-audio-style reconstruction
 > in `dia::Diarizer`. Per the user, the `pyannote.audio` clustering pipeline
 > "has been verified in prod," so we match its algorithm as closely as is
@@ -141,7 +155,34 @@ User-facing pipeline this spec assumes:
 
 ```
 audio decoder → resample to 16 kHz → VAD → dia::Diarizer → downstream services
+                                      │
+                                      └─ ranges of human speech, variable-length,
+                                         fed to dia incrementally as `process_samples`
+                                         pushes.
 ```
+
+**Critical prerequisite (rev-7).** dia's input is **VAD-filtered speech
+in variable-length chunks**. Each `process_samples(samples)` push can be
+any length:
+- Sub-millisecond (e.g., 16 samples — won't trigger anything; buffered)
+- Sub-clip (e.g., 0.5 s — buffered; spans emit only after enough audio
+  accumulates or `finish_stream` is called)
+- Single-clip (e.g., 2.3 s — typical VAD output for one utterance)
+- Multi-clip (e.g., 30 s of concatenated VAD ranges)
+- Whole-stream (e.g., 60 minutes pushed at once)
+
+The algorithm handles all of these without special-casing — segment
+lazily schedules windows when buffered samples reach
+`k * step + WINDOW`; embed accepts any clip ≥ 25 ms; reconstruction
+finalizes per-frame as the windows that contribute to each frame
+complete. The variable-length contract is formalized in §11.12.
+
+**The caller is responsible for mapping dia's input timeline back to
+original audio time.** dia operates in "samples-pushed" coordinates
+(monotonic from 0 at `clear()`); if the caller fed VAD-filtered audio
+with silences removed, dia's sample positions don't correspond to
+original-audio sample positions. The caller's VAD layer knows the
+mapping; it owns the join.
 
 Inside `Diarizer`, the flow matches `pyannote.audio`'s `SpeakerDiarization
 .apply` pipeline (rev-6 scope expansion), adapted to streaming:
@@ -838,6 +879,12 @@ pub struct CollectedEmbedding {
 /// longer well-defined for a single span. Window-local context
 /// remains available via `Diarizer::collected_embeddings()`.
 ///
+/// **Rev-7 enrichment:** added `average_activation`, `activity_count`,
+/// and `clean_mask_fraction` for downstream storage and analysis (per
+/// the user's "we want all important information" mandate). All three
+/// are computed during reconstruction (§5.11) at zero algorithmic cost
+/// (they're already-available accumulator values).
+///
 /// **Emission timing:** a `DiarizedSpan` for cluster `K` is emitted
 /// when its current per-frame run closes — i.e., the first frame
 /// where cluster `K` is NOT in the top-`count` finalized frames after
@@ -852,12 +899,34 @@ pub struct DiarizedSpan {
     /// `true` iff this is the first time `speaker_id` is emitted in
     /// the current `Diarizer` session (post-`new`/`clear`).
     is_new_speaker: bool,
+    /// Mean per-frame normalized activation for this cluster across
+    /// the span's frames. Each frame's contribution is
+    /// `activation_sum / chunk_count`, so the value is in `[0.0, 1.0]`
+    /// (1.0 = every contributing window said "this speaker active here
+    /// at probability 1.0"). Higher = more confident the cluster was
+    /// active for this turn. Roughly comparable across spans.
+    /// (Rev-7.)
+    average_activation: f32,
+    /// Number of `(WindowId, slot)` segment activities that contributed
+    /// to this span (i.e., that were clustered into this span's
+    /// `speaker_id` and whose frames overlap this span's `range`).
+    /// (Rev-7.)
+    activity_count: u32,
+    /// Of the contributing activities, the fraction whose embedding
+    /// used the `exclude_overlap` clean mask (vs falling back to the
+    /// speaker-only mask). Range `[0.0, 1.0]`. Lower = more
+    /// overlap-contaminated audio → less confident speaker
+    /// attribution. (Rev-7.)
+    clean_mask_fraction: f32,
 }
 
 impl DiarizedSpan {
     pub fn range(&self) -> TimeRange;
     pub fn speaker_id(&self) -> u64;
     pub fn is_new_speaker(&self) -> bool;
+    pub fn average_activation(&self) -> f32;
+    pub fn activity_count(&self) -> u32;
+    pub fn clean_mask_fraction(&self) -> f32;
 }
 
 pub struct Diarizer { /* private */ }
@@ -892,6 +961,10 @@ impl Diarizer {
     ///   per-frame voice timeline cleared, hysteresis state reset.
     /// - Internal `Clusterer` is cleared: all speaker entries removed,
     ///   next assigned `speaker_id` resets to 0.
+    /// - **`total_samples_pushed()` resets to 0** (rev-7); the
+    ///   "samples-pushed" timeline restarts. Caller-side
+    ///   VAD-to-original-time mapping logs (per §11.12) must be
+    ///   reset alongside.
     /// - Audio buffer is drained.
     /// - **Per-frame stitching state is dropped** (rev-6): the
     ///   per-frame per-cluster activation accumulator, per-frame
@@ -918,6 +991,14 @@ impl Diarizer {
     /// (10 s × 100 fps); spikes during pumps that schedule multiple
     /// new windows. Useful for backpressure detection. (Rev-6.)
     pub fn buffered_frames(&self) -> usize;
+    /// Cumulative count of samples passed to `process_samples` since
+    /// the last `clear()` (or since construction). Monotonic, never
+    /// reset by `finish_stream`. Useful for callers mapping dia's
+    /// "samples-pushed" timeline back to original-audio time when
+    /// VAD-filtered audio is fed in: maintain a parallel
+    /// `Vec<(dia_offset, original_offset)>` log keyed by this counter.
+    /// (Rev-7.)
+    pub fn total_samples_pushed(&self) -> u64;
     pub fn num_speakers(&self) -> usize;
     pub fn speakers(&self) -> Vec<SpeakerCentroid>;
 }
@@ -1845,77 +1926,154 @@ struct PerClusterRun {
     /// Last absolute frame where this cluster was in the top-c. Used for
     /// merge-gap logic (see below).
     last_active_frame: Option<u64>,
+
+    // ── Rev-7 quality-metric accumulators (per-run) ──
+    /// Sum over this run's finalized frames of the cluster's
+    /// per-frame normalized activation (= activation_sum / chunk_count).
+    /// On run close, `mean = activation_sum_normalized / frame_count`
+    /// is the `DiarizedSpan::average_activation`.
+    activation_sum_normalized: f64,
+    /// Number of finalized frames included in the run so far.
+    /// On run close, divides `activation_sum_normalized`.
+    frame_count: u32,
+    /// Set of `(WindowId, slot)` activities whose frames have
+    /// contributed to this run. Sized typically <= 10 entries per run.
+    /// On run close, count = `DiarizedSpan::activity_count`.
+    contributing_activities: HashSet<(WindowId, u8)>,
+    /// Of the contributing activities so far, how many used the clean
+    /// mask. On run close, `clean_count / activity_count =
+    /// DiarizedSpan::clean_mask_fraction`.
+    clean_mask_count: u32,
 }
 
 struct ReconstructState {
     // (existing fields from §5.9)
     open_runs: HashMap<u64 /* cluster_id */, PerClusterRun>,
     emitted_speaker_ids: HashSet<u64>,    // for `is_new_speaker` tracking
+    /// Reverse mapping from (window, slot) to the activity's
+    /// `used_clean_mask` flag, populated in §5.8 when activities are
+    /// clustered. Consumed when a run extends through a frame whose
+    /// (window, slot) hasn't been counted yet.
+    activity_clean_flags: HashMap<(WindowId, u8), bool>,
 }
 ```
 
 **Algorithm** (run as part of finalization, after each window is
-integrated in §5.9):
+integrated in §5.9). Updated rev-7 to populate `DiarizedSpan` quality
+metrics; the structural logic is unchanged.
 
 ```
 fn emit_finalized_frames(emit: &mut FnMut(DiarizedSpan)):
     while base_frame < finalization_boundary:
-        let frame_state = activations.pop_front()
-        let frame_count_state = counts.pop_front()
+        let frame_state: HashMap<u64, f32> = activations.pop_front()
+        let frame_count_state: FrameCount   = counts.pop_front()
+        let chunk_count = frame_count_state.chunk_count.max(1) as f32  // avoid /0
 
         let count = finalized_count_at(base_frame).min(max_speakers as u32)
 
         # Pick top-`count` clusters by activation at this frame.
         # (Matches to_diarization line 261-267: argsort(-activations,
         # axis=-1)[:count].)
-        let top: Vec<u64> = if count > 0 {
-            let mut sorted: Vec<(u64, f32)> = frame_state.into_iter().collect()
-            sorted.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal))
+        let top: Vec<(u64, f32)> = if count > 0 {
+            let mut sorted: Vec<(u64, f32)> = frame_state.iter()
+                .map(|(&c, &a)| (c, a)).collect()
             // Tie-break: lower cluster_id wins (deterministic).
             sorted.sort_by(|(a_id, a_v), (b_id, b_v)| {
                 b_v.partial_cmp(a_v).unwrap_or(Ordering::Equal)
                     .then(a_id.cmp(b_id))
             })
-            sorted.into_iter().take(count as usize).map(|(id, _)| id).collect()
+            sorted.into_iter().take(count as usize).collect()
         } else {
             Vec::new()
         }
 
         # For each cluster: extend or open a run if active here; close
         # any open run for clusters not in `top`.
-        let active_set: HashSet<u64> = top.iter().copied().collect()
+        let active_set: HashSet<u64> = top.iter().map(|&(id, _)| id).collect()
 
         # Close runs for clusters that were open but are NOT in top now.
         for (cluster_id, run) in self.open_runs.iter_mut() {
             if !active_set.contains(cluster_id) {
                 if let Some(start) = run.start_frame.take() {
                     let end_frame = run.last_active_frame.unwrap() + 1
-                    let span = make_span(cluster_id, start, end_frame)
-                    if !emitted_speaker_ids.contains(cluster_id) {
-                        emitted_speaker_ids.insert(*cluster_id)
-                        emit(DiarizedSpan { range, speaker_id: *cluster_id, is_new_speaker: true })
-                    } else {
-                        emit(DiarizedSpan { range, speaker_id: *cluster_id, is_new_speaker: false })
-                    }
+                    let range = make_range(start, end_frame)
+                    let is_new = !emitted_speaker_ids.contains(cluster_id)
+                    if is_new { emitted_speaker_ids.insert(*cluster_id); }
+                    emit(DiarizedSpan {
+                        range,
+                        speaker_id: *cluster_id,
+                        is_new_speaker: is_new,
+                        average_activation: (run.activation_sum_normalized
+                                             / run.frame_count.max(1) as f64)
+                                             as f32,
+                        activity_count: run.contributing_activities.len() as u32,
+                        clean_mask_fraction: if run.contributing_activities.is_empty() {
+                            0.0
+                        } else {
+                            run.clean_mask_count as f32
+                                / run.contributing_activities.len() as f32
+                        },
+                    })
+                    // Reset metric accumulators for next run on this cluster.
+                    run.activation_sum_normalized = 0.0
+                    run.frame_count = 0
+                    run.contributing_activities.clear()
+                    run.clean_mask_count = 0
                 }
             }
         }
 
         # Open or extend runs for clusters in `top`.
-        for cluster_id in &active_set {
-            let run = self.open_runs.entry(*cluster_id).or_insert(PerClusterRun {
-                cluster_id: *cluster_id,
+        for &(cluster_id, activation_sum) in &top {
+            let run = self.open_runs.entry(cluster_id).or_insert_with(|| PerClusterRun {
+                cluster_id,
                 start_frame: None,
                 last_active_frame: None,
+                activation_sum_normalized: 0.0,
+                frame_count: 0,
+                contributing_activities: HashSet::new(),
+                clean_mask_count: 0,
             })
             if run.start_frame.is_none() {
                 run.start_frame = Some(base_frame)
             }
             run.last_active_frame = Some(base_frame)
+
+            # Quality-metric accumulation:
+            run.activation_sum_normalized += (activation_sum / chunk_count) as f64
+            run.frame_count += 1
+
+            # Find activities (window, slot) whose frame_range contains base_frame
+            # AND that map to this cluster_id, then add to contributing_activities.
+            for ((window_id, slot), c) in &slot_to_cluster {
+                if *c != cluster_id { continue; }
+                let win = window_starts.get(window_id).expect("window seen during integration")
+                let frame_lo = frame_index_of(*win)
+                let frame_hi = frame_lo + FRAMES_PER_WINDOW as u64
+                if base_frame >= frame_lo && base_frame < frame_hi {
+                    if run.contributing_activities.insert((*window_id, *slot)) {
+                        // Newly inserted — also count toward clean_mask if applicable.
+                        if let Some(&clean) = activity_clean_flags.get(&(*window_id, *slot)) {
+                            if clean { run.clean_mask_count += 1; }
+                        }
+                    }
+                }
+            }
         }
 
         base_frame += 1
 ```
+
+**Note on metric-accumulator memory.** `slot_to_cluster` is bounded by
+`(open_windows × MAX_SPEAKER_SLOTS)` ≈ a few dozen entries during the
+~10 s rolling window of un-finalized frames. Lookups are linear over
+this small set, which is comparable to a HashMap lookup at this scale
+and avoids the hash overhead. `activity_clean_flags` and the
+per-(window_id, slot) entries in `slot_to_cluster` are evicted once
+all frames in their window have finalized AND the run that referenced
+them has closed (eviction is bookkeeping that happens after each
+`emit_finalized_frames` call; not shown in the pseudo-code above for
+clarity).
 
 **End-of-stream flush** (called from `finish_stream` after the segment's
 tail-anchor activities have integrated):
@@ -1925,13 +2083,29 @@ fn flush_open_runs(emit: &mut FnMut(DiarizedSpan)):
     # Force-finalize remaining frames up to total_frames.
     self.finalization_boundary = u64::MAX
     emit_finalized_frames(emit)
-    # Then close every still-open run.
+    # Then close every still-open run with the same quality-metric
+    # population as in emit_finalized_frames above.
     for (cluster_id, mut run) in std::mem::take(&mut self.open_runs) {
         if let Some(start) = run.start_frame {
             let end_frame = run.last_active_frame.unwrap() + 1
             let range = make_range(start, end_frame)
-            ...
-            emit(span)
+            let is_new = !emitted_speaker_ids.contains(&cluster_id)
+            if is_new { emitted_speaker_ids.insert(cluster_id); }
+            emit(DiarizedSpan {
+                range,
+                speaker_id: cluster_id,
+                is_new_speaker: is_new,
+                average_activation: (run.activation_sum_normalized
+                                     / run.frame_count.max(1) as f64)
+                                     as f32,
+                activity_count: run.contributing_activities.len() as u32,
+                clean_mask_fraction: if run.contributing_activities.is_empty() {
+                    0.0
+                } else {
+                    run.clean_mask_count as f32
+                        / run.contributing_activities.len() as f32
+                },
+            })
         }
     }
 ```
@@ -2149,6 +2323,28 @@ Pure-compute tests (no ort, synthetic raw_probs):
 - **Slot-to-cluster mapping correctness**: simulate two windows where the same speaker appears in slot 0 of window 0 and slot 1 of window 1 (clustering puts them in the same cluster). Verify reconstruction max-collapses correctly across the slot reassignment.
 - **Inactive-slot skip**: a slot with raw_probs all < binarize_threshold should NOT appear in slot_to_cluster (no embedding submitted), so reconstruct integration skips it (matches pyannote's `inactive_speakers → -2` throwaway).
 
+VAD-input variable-length tests (rev-7, real `Segmenter` + synthetic inferencer):
+- **Empty push is no-op**: `process_samples(_, _, &[], _)` returns `Ok(())`, no callbacks invoked, no state advances. `total_samples_pushed` unchanged.
+- **Sub-window single push (0.5 s) without finish_stream**: `process_samples` returns `Ok(())`. `pending_inferences == 0`, `buffered_samples == 8000`, `buffered_frames == 0`. No DiarizedSpans emitted yet.
+- **Sub-window single push followed by finish_stream**: tail-anchor schedules at `max(0, total - WINDOW) = 0`, padded window infers, real-audio activities cluster, DiarizedSpan(s) emit covering only the real-audio range (zero-padded frames produce count=0 → no spans).
+- **Sub-MIN_CLIP_SAMPLES single push (10 ms = 160 samples) followed by finish_stream**: padded window's only "real" frames are 1 frame's worth; activities, if any, would have ranges < MIN_CLIP_SAMPLES → embed_model returns `Error::InvalidClip`. Verify the error propagates out of `finish_stream` rather than silently producing garbage.
+- **Multiple short pushes + finish_stream**: `process_samples(0.5 s) → process_samples(0.8 s) → process_samples(1.2 s) → finish_stream`. Total 2.5 s. Tail-anchor at 0, padded window infers, all activities have absolute-sample ranges within `[0, 2.5 s)`. Verify `total_samples_pushed == 2.5 * 16_000 == 40_000`.
+- **Multiple medium pushes**: `process_samples(3 s) × 5 → finish_stream`. Total 15 s. Two regular windows + tail-anchor (or no tail if 15 s ≥ 10 s and last full window is at start = 5 s covering [5 s, 15 s)). Verify `pending_inferences` decrements as expected.
+- **Long single push (60 s) without finish_stream**: many windows process during the single `process_samples` call. Verify `total_samples_pushed == 60 * 16_000`, `pending_inferences == 0` after pump completes (synchronous), and DiarizedSpans emit for already-finalized turns. Some frames remain un-finalized (≈ last 10 s); `buffered_frames > 0`.
+- **Mixed lengths**: `process_samples` calls of `[0.5 s, 3 s, 0.2 s, 10 s, 5 s]` interleaved → no panics, no errors, total accumulates correctly. `finish_stream` flushes everything.
+- **Push that brings total exactly to WINDOW_SAMPLES boundary**: push `10 s` exactly (160_000 samples). One window schedules at start = 0 covering `[0, 10 s)`. Verify activities + scores + integration occur. `pending_inferences` after pump completes = 0.
+- **Consecutive `finish_stream + clear + process_samples` cycle**: simulate caller doing per-VAD-range diarization. After `finish_stream` flushes, `clear()` resets all state including `total_samples_pushed`. New `process_samples` starts fresh from sample 0. Verify speaker IDs reset to 0 (rev-7 confirmed by §4.4 `clear()` rustdoc).
+- **`total_samples_pushed` monotonicity**: across many `process_samples` calls, `total_samples_pushed` is monotonically non-decreasing and equals exactly `sum(samples.len() for each push)`. Reset to 0 only by `clear()`.
+- **Cross-VAD-range activity detection** (caller-driven, not a dia property): pseudo-test that pushes two separated VAD ranges as one stream and verifies that a single dia activity range can span both. Documented as expected behavior; caller's responsibility per §11.12.
+
+DiarizedSpan quality-metric tests (rev-7):
+- **`average_activation` of single-window-isolated turn**: synthetic raw_probs with one slot at 1.0 across all 589 frames; one window, no overlap. Activation per frame = 1.0 (single-chunk count). After RLE, `average_activation ≈ 1.0`.
+- **`average_activation` of multi-window turn**: 4 overlapping windows, each contributing the same speaker at 0.8 average. Activation_sum_normalized per frame = 0.8 (after dividing by chunk_count = 4). After RLE, `average_activation ≈ 0.8`.
+- **`activity_count` matches contributing activities**: synthetic 3-window run, each window contributes 1 activity for the same cluster. After run closes, `activity_count == 3`.
+- **`clean_mask_fraction == 1.0`**: all contributing activities used clean mask (no overlap).
+- **`clean_mask_fraction == 0.5`**: 2 of 4 contributing activities fell back to speaker-only mask (heavy-overlap regions).
+- **`clean_mask_fraction == 0.0` defensible default**: edge case where a run somehow has zero contributing activities (shouldn't happen with correct integration; defensive default for divide-by-zero).
+
 End-to-end ort-gated tests (`#[ignore]` smoke tests, real model):
 - 30-second single-speaker clip → exactly one DiarizedSpan, speaker_id = 0.
 - 30-second two-speaker alternating clip (no overlap) → 2-speaker output, alternating DiarizedSpans.
@@ -2311,6 +2507,97 @@ breaking output stability).
 ### 11.11 Argmax tie-breaking
 
 (Documented in §5.4 — "lowest-index speaker wins.")
+
+### 11.12 Variable-length VAD-filtered input contract (rev-7)
+
+**The Diarizer accepts pushes of any length** via `process_samples`,
+including:
+- Empty pushes (`samples.len() == 0`): no-op, returns immediately.
+- Sub-window pushes (e.g., 0.5 s of VAD speech): samples are buffered;
+  no `Action::NeedsInference` is scheduled until enough samples
+  accumulate. Caller can poll `pending_inferences() == 0` and
+  `buffered_samples() > 0` to detect this state.
+- Single-window pushes (~10 s exact): one window schedules,
+  inference runs, activities + scores emit, integration happens, some
+  frames finalize, possibly a `DiarizedSpan` emits.
+- Multi-window pushes (≫ 10 s): many windows schedule in sequence;
+  reconstruction integrates them in order.
+- Whole-stream pushes (60 minutes pushed at once): equivalent to the
+  multi-window case, just larger; memory budget per §11.5 (≈ 640 KB
+  audio buffer + ≈ 64 KB per-frame accumulator + ≈ 1 KB per
+  `CollectedEmbedding`).
+
+**Lazy window scheduling.** Segment schedules a window with start
+`k * step_samples` only when `total_samples_pushed ≥ k * step + WINDOW
+= k * step + 160 000`. So a caller pushing only 7 seconds of VAD audio
+sees zero windows scheduled until either (a) more samples arrive or
+(b) `finish_stream` is called (which schedules the segment's
+tail-anchor at `total - WINDOW`, padding with zeros if needed).
+
+**No special-casing for clip lengths.** The reconstruction algorithm
+(§5.9–§5.11) is frame-driven, not window-driven. A 0.5-s VAD push
+followed by `finish_stream` produces:
+1. Segment's tail-anchor schedules at `max(0, total - WINDOW) = 0`,
+   covering `[0, 10 s)` with 9.5 s of zero-padding.
+2. Inference runs on the padded window. Voice/speaker probabilities
+   are ~0 for the zero-padded frames (model output on silence).
+3. Reconstruction integrates the window. Activations for zero-padded
+   frames are ~0 → no cluster is in the top-`count` there →
+   `count[f] == 0` → no DiarizedSpan emits for those frames.
+4. Activities for the real 0.5 s emit normally (one or more).
+
+**Activities can span original-VAD-range boundaries.** The segment
+treats all input as contiguous speech. If the caller fed
+`[VAD range A: 0–5 s of original time], [VAD range B: 8–12 s of
+original time]` as one stream, dia sees 9 s of contiguous speech.
+A segment activity can have a range that crosses the VAD-range
+boundary in dia's input timeline (e.g., dia samples
+`[60 000, 100 000)` = original-time `[3.75–5 s, 8–9.25 s]`). **The
+caller is responsible for detecting and handling this** if it matters
+for downstream — they have the VAD-to-original-time mapping; we don't.
+
+**Recommended caller pattern for VAD-aware processing:**
+
+```rust
+let mut dia_to_original: Vec<(u64, u64)> = Vec::new(); // sorted by dia_offset
+for vad_range in vad_layer.ranges_of_speech(audio) {
+    let dia_offset_at_push = diarizer.total_samples_pushed();   // §4.4 accessor (rev-7)
+    dia_to_original.push((dia_offset_at_push, vad_range.start));
+    let speech_samples = audio.slice(vad_range);
+    diarizer.process_samples(&mut seg_model, &mut embed_model, speech_samples,
+        |span| {
+            let original_range = map_dia_range_to_original(
+                span.range(), &dia_to_original
+            );
+            store(original_range, span.speaker_id(), span.average_activation(), ...);
+        }
+    )?;
+}
+diarizer.finish_stream(&mut seg_model, &mut embed_model, |span| {
+    // Same mapping as above.
+    let original_range = map_dia_range_to_original(span.range(), &dia_to_original);
+    store(...);
+})?;
+```
+
+The `map_dia_range_to_original` helper is application code, not
+provided by dia. (Action item §15 #50 considers whether dia should
+ship a `dia::utils::TimelineMap` helper for this — open question;
+might bloat the surface for limited gain.)
+
+**`Diarizer` introspection accessors useful for VAD-aware callers:**
+- `total_samples_pushed() -> u64`: cumulative count of samples ever
+  pushed (rev-7 addition; never decremented except by `clear()`).
+- `pending_inferences() -> usize`: how many windows are queued for
+  inference. Non-zero means more spans will emit on the next pump.
+- `buffered_samples() -> usize`: audio still in the rolling buffer.
+- `buffered_frames() -> usize`: un-finalized frames in the per-frame
+  accumulator (rev-6 addition).
+- `num_speakers() -> usize`: distinct global cluster IDs assigned so far.
+- `speakers() -> Vec<SpeakerCentroid>`: per-cluster summary (centroid
+  + assignment_count) for storage / inspection at any point.
+- `collected_embeddings() -> &[CollectedEmbedding]`: per-(window, slot)
+  granularity output, kept across the session (until `clear_collected`).
 
 ## 12. Decision log
 
@@ -2589,8 +2876,8 @@ From this brainstorm:
     sub-variants (`AudioBufferUnderflow`, `AudioBufferOverrun`) so
     callers debugging real `InvalidClip` errors aren't misled by
     sentinels.
-- **Revision 6** (2026-04-26, this document): scope expansion to
-  match `pyannote.audio`'s reconstruction pipeline. Per the user's
+- **Revision 6** (2026-04-26): scope expansion to match
+  `pyannote.audio`'s reconstruction pipeline. Per the user's
   request — "match pyannote audio behavior as close as possible
   because it has been verified in prod." Diarizer output semantics
   change: spans are stitched per closed speaker turn, not per
@@ -2655,6 +2942,54 @@ From this brainstorm:
     `Action::SpeakerScores`); added `min_cluster_size` cluster
     pruning, VBx clustering, configurable warm_up, configurable
     per-frame `min_duration_on/off`.
+- **Revision 7** (2026-04-26, this document): nails down the
+  VAD-prerequisite contract that's been implicit since the brainstorm
+  but never formalized; enriches `DiarizedSpan` for downstream
+  storage/analysis. No algorithmic changes — the rev-6 algorithm
+  already handled variable-length VAD inputs correctly; rev 7
+  documents that and tests it.
+  - **§1 / §3 / §11.12 (NEW): variable-length VAD-filtered input
+    contract.** dia accepts `process_samples` pushes of any size
+    (empty / sub-clip / multi-clip / whole-stream). Spelled out the
+    behavior for each, the lazy-window-scheduling semantics, and the
+    "activities can span original-VAD-range boundaries" caveat. Added
+    a recommended caller pattern showing how to map dia's
+    "samples-pushed" timeline back to original-audio time using a
+    `Vec<(dia_offset, original_offset)>` log keyed off
+    `Diarizer::total_samples_pushed()`.
+  - **§4.4 `DiarizedSpan` enrichment:** added three quality-metric
+    fields (`average_activation: f32`, `activity_count: u32`,
+    `clean_mask_fraction: f32`). All three are computed during
+    reconstruction at zero algorithmic cost (already-available
+    accumulator values). User mandate: "we want all important
+    information so that we can store the data for analyze or other
+    stuff."
+  - **§4.4 `Diarizer::total_samples_pushed()` accessor:** new
+    introspection method returning the cumulative count of samples
+    ever passed to `process_samples` since the last `clear()`.
+    Caller-side tool for VAD-range timeline mapping.
+  - **§5.11 RLE algorithm extended** to populate the new
+    `DiarizedSpan` fields. State growth: `PerClusterRun` gains
+    `activation_sum_normalized: f64`, `frame_count: u32`,
+    `contributing_activities: HashSet<(WindowId, u8)>`,
+    `clean_mask_count: u32`. `ReconstructState` gains
+    `activity_clean_flags: HashMap<(WindowId, u8), bool>`.
+  - **§9 tests:** ~12 new test cases covering empty pushes,
+    sub-window, sub-MIN_CLIP_SAMPLES, multiple short pushes, multiple
+    medium pushes, long single push, mixed lengths, exactly-window
+    boundary, finish_stream + clear cycle,
+    `total_samples_pushed` monotonicity, cross-VAD-range activity
+    detection, plus 6 quality-metric tests for the three new
+    DiarizedSpan fields.
+  - **§15 #50 (deferred):** open question whether dia should ship a
+    `dia::utils::TimelineMap` helper for VAD-to-original timeline
+    mapping. Defer to v0.1.1+ pending real-world need.
+  - **No algorithmic changes.** The rev-6 algorithm already handled
+    variable-length VAD-filtered input correctly (segment buffers
+    samples lazily, embed accepts 25 ms – any-length clips,
+    reconstruction finalizes per-frame as windows complete). Rev 7
+    is documentation + observability + tests — no behavior change
+    for any existing caller.
 
 ## 14. Findings rejected from reviews
 
@@ -2760,3 +3095,5 @@ These don't block v0.1.0 but should be tracked:
 | 47 | (rev-6) **Configurable speaker-count `warm_up`**: rev-6 hardcodes `(0.1, 0.1)` to match pyannote default. Expose via `DiarizerOptions::with_speaker_count_warm_up_ratio` if user tuning becomes a real ask. | low |
 | 48 | (rev-6) **Configurable `min_duration_on/off`** for per-cluster RLE: rev-6 emits any closed run as a DiarizedSpan. Pyannote applies `min_duration_on`/`min_duration_off` thresholds in `to_annotation`. Adding ours is straightforward but defer until we have user feedback on whether tiny spans / micro-gaps cause downstream issues. | low |
 | 49 | (rev-6) **Mask-aware embedding ONNX export**: WeSpeaker ONNX export currently takes only waveform. Pyannote's mask is consumed inside the model. We approximate via per-window mean weighting in `embed_weighted`. If we ever re-export WeSpeaker with a mask input, switch the §5.8 mask path to feed it directly to the model — closer to pyannote behavior. Significant scope (re-export + maintain alongside the current export). | medium |
+| 50 | (rev-7) **`dia::utils::TimelineMap` helper for VAD-to-original mapping**: caller-side `Vec<(dia_offset, original_offset)>` log + `map_dia_range_to_original(TimeRange) -> TimeRange` helper. Currently the caller writes this themselves (~30 lines, see §11.12 example). Could ship a small `dia::utils::TimelineMap` struct with `record(dia_offset, original_offset)` / `lookup(dia_range)` API. Defer until we have evidence that >1 caller has implemented this independently — premature standardization. | low |
+| 51 | (rev-7) **Per-VAD-range diarization with shared speakers**: API for callers who want each VAD range to produce its own clean DiarizedSpans (no spans crossing original-VAD-range boundaries) while keeping speaker IDs consistent across ranges. Currently requires manual mid-level orchestration. Could provide `Diarizer::checkpoint() / restore_after_clear` or `Diarizer::process_chunk_isolated(samples)` that finishes-then-resumes without speaker-state loss. Defer; the §11.12 caller pattern (concatenate + post-process) is sufficient for v0.1.0. | medium |
