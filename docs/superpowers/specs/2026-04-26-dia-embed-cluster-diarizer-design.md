@@ -1,22 +1,35 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 2** (2026-04-26, post-first-adversarial-review).
+**Revision 3** (2026-04-26, post-second-adversarial-review).
 **Status:** ready for re-review.
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`:
 - `dia::embed` — speaker fingerprint generation (port of `findit-speaker-embedding` + improvements)
 - `dia::cluster` — cross-window speaker linking (online streaming + offline batch)
 - `dia::Diarizer` — top-level orchestrator combining segment + embed + cluster
 
-> **Revision 2 fixes** (full list in §13 / §15): renames `WINDOW_SAMPLES`
-> to `EMBED_WINDOW_SAMPLES` so it doesn't collide with the segment
-> constant; rewrites the online clusterer's centroid math to use an
-> unnormalized accumulator (the rev-1 formula could produce NaN on
-> antipodal updates); drops `Linkage::Ward` (mathematically invalid with
-> cosine distance) and `Affinity::Gaussian` (no defensible default);
-> caps the eigengap auto-K and adds an all-zero-affinity precondition
-> check for spectral; flips `OverflowStrategy` default to `Reject` and
-> changes `AssignClosest` to not update centroids on forced assignments;
-> adds a deterministic K-means seed; matches Python's `1e-12` epsilon;
+> **Revision 3 fixes the rev-2 audio-buffer regression** (the trim bound
+> mistakenly used the *embed* window size when it should use the
+> *segment* window size — would underflow on the first push that
+> triggers a non-zero-start segment window). Plus a tighter spectral
+> precondition (catches isolated nodes, not just all-zero affinity);
+> N ≤ 1 / N == 2 fast paths in spectral; explicit K-means seed source
+> (`Option<u64>` with `None` → constant `0`); explicit K-means
+> convergence criterion; lazy-cached-centroid semantics on degenerate
+> updates; expanded `clear()` rustdoc; `set_*` mutating builder methods
+> for parity with `dia::segment`; explicit method enumeration on
+> `EmbedModelOptions`; new `DegenerateEmbedding` error variant in both
+> `dia::embed::Error` and `dia::cluster::Error` for zero-norm cases
+> (rev 2 misnamed these as `NonFiniteInput`).
+>
+> **Revision 2 changes** (preserved from prior review): renamed
+> `WINDOW_SAMPLES` to `EMBED_WINDOW_SAMPLES` so it doesn't collide with
+> the segment constant; rewrote the online clusterer's centroid math to
+> use an unnormalized accumulator (the rev-1 formula could produce NaN
+> on antipodal updates); dropped `Linkage::Ward` (mathematically invalid
+> with cosine distance) and `Affinity::Gaussian` (no defensible
+> default); capped the eigengap auto-K; flipped `OverflowStrategy`
+> default to `Reject` and changed `AssignClosest` to not update
+> centroids on forced assignments; matches Python's `1e-12` epsilon;
 > uses `Option<f32>` for `ClusterAssignment::similarity`; replaces
 > `(TimeRange, Embedding)` tuples with a `CollectedEmbedding` struct
 > carrying full context; documents the sliding-window-vs-Python-center-crop
@@ -46,8 +59,10 @@ same person as slot 0 in window 6). For real-world diarization output —
 The Python project that inspired this work is `findit-speaker-embedding`
 (WeSpeaker ResNet34 ONNX, kaldi-compatible fbank, 200-frame fixed input,
 256-d L2-normalized output). dia v0.1.0 ports the embedding pipeline
-faithfully but improves the long-clip handling and bundles the
-clustering layer that Python deferred to a separate component.
+faithfully but improves the long-clip handling. The clustering layer is
+**novel** — `findit-speaker-embedding` does not provide one; it stops
+at producing fingerprints and leaves cross-window linking to its
+caller.
 
 User-facing pipeline this spec assumes:
 
@@ -135,7 +150,7 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 
 **`dia::Diarizer`:**
 - Builder API: `Diarizer::builder()` with `with_*` setters only (no `options()` setter)
-- Internal audio buffer with bounded retention (`EMBED_WINDOW_SAMPLES` worth — see §5.7)
+- Internal audio buffer with bounded retention (`dia::segment::WINDOW_SAMPLES` worth = 640 KB; see §5.7)
 - `process_samples(seg_model, embed_model, samples, emit)` — synchronous: push → segment → embed → cluster → emit
 - `finish_stream(seg_model, embed_model, emit)` — flush
 - `clear()` — reset for new session
@@ -211,6 +226,12 @@ pub const NORM_EPSILON: f32 = 1e-12;
 
 ```rust
 /// A 256-d L2-normalized speaker embedding.
+///
+/// **Invariant:** `||embedding.as_array()|| > NORM_EPSILON`. The crate
+/// guarantees this — the only public constructor (`normalize_from`)
+/// returns `None` for degenerate inputs. External callers and internal
+/// downstream code (e.g., `Clusterer::submit`) can rely on this for
+/// similarity computations being well-defined.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Embedding(pub(crate) [f32; EMBEDDING_DIM]);
 
@@ -218,16 +239,22 @@ impl Embedding {
     pub const fn as_array(&self) -> &[f32; EMBEDDING_DIM];
     pub fn as_slice(&self) -> &[f32];
 
-    /// Cosine similarity. Both inputs are L2-normalized, so this reduces
-    /// to a dot product. Returns a value in `[-1.0, 1.0]`.
+    /// Cosine similarity. Both inputs are L2-normalized (per the
+    /// `Embedding` invariant), so this reduces to a dot product. Returns
+    /// a value in `[-1.0, 1.0]`.
     pub fn similarity(&self, other: &Embedding) -> f32;
 
     /// L2-normalize a raw 256-d inference output and wrap it.
-    /// Returns `None` if `||raw|| < NORM_EPSILON` (degenerate input).
-    /// Use after `EmbedModel::embed_features_batch` + custom aggregation.
+    /// Returns `None` if `||raw|| < NORM_EPSILON` (degenerate input —
+    /// callers should treat this as a bug or as input not meaningfully
+    /// different from silence). Use after
+    /// `EmbedModel::embed_features_batch` + custom aggregation.
     pub fn normalize_from(raw: [f32; EMBEDDING_DIM]) -> Option<Self>;
 }
 
+/// Free-function form of [`Embedding::similarity`] for callers who
+/// prefer it. Both styles are public; pick whichever reads more
+/// naturally at the call site.
 pub fn cosine_similarity(a: &Embedding, b: &Embedding) -> f32;
 
 /// Optional metadata that flows through `embed_with_meta` /
@@ -293,9 +320,15 @@ pub enum Error {
     #[error("all windows had effectively zero voice-activity weight")]
     AllSilent,
 
-    /// Input contains NaN or non-finite values.
+    /// Input contains NaN or infinity.
     #[error("input contains non-finite values (NaN or infinity)")]
     NonFiniteInput,
+
+    /// Input contains a zero-norm (or near-zero-norm, < `NORM_EPSILON`)
+    /// embedding. Zero IS finite — kept distinct from `NonFiniteInput`
+    /// so callers debugging real NaN/inf cases aren't misled.
+    #[error("input contains a zero-norm or degenerate embedding")]
+    DegenerateEmbedding,
 
     #[error("inference scores length {got}, expected {expected}")]
     InferenceShapeMismatch { expected: usize, got: usize },
@@ -331,7 +364,22 @@ pub fn compute_fbank(
 
 ```rust
 #[cfg(feature = "ort")]
-pub struct EmbedModelOptions { /* mirrors SegmentModelOptions */ }
+#[derive(Default)]
+pub struct EmbedModelOptions { /* private */ }
+
+#[cfg(feature = "ort")]
+impl EmbedModelOptions {
+    pub fn new() -> Self;
+    pub fn with_optimization_level(self, level: GraphOptimizationLevel) -> Self;
+    pub fn with_providers(self, providers: Vec<ExecutionProviderDispatch>) -> Self;
+    pub fn with_intra_op_num_threads(self, n: usize) -> Self;
+    pub fn with_inter_op_num_threads(self, n: usize) -> Self;
+    // Mutating variants for parity with silero / dia::segment.
+    pub fn set_optimization_level(&mut self, level: GraphOptimizationLevel) -> &mut Self;
+    pub fn set_providers(&mut self, providers: Vec<ExecutionProviderDispatch>) -> &mut Self;
+    pub fn set_intra_op_num_threads(&mut self, n: usize) -> &mut Self;
+    pub fn set_inter_op_num_threads(&mut self, n: usize) -> &mut Self;
+}
 
 #[cfg(feature = "ort")]
 pub struct EmbedModel { /* private; owns ort::Session + scratch */ }
@@ -451,6 +499,11 @@ impl ClusterOptions {
     pub fn with_update_strategy(self, s: UpdateStrategy) -> Self;
     pub fn with_max_speakers(self, n: u32) -> Self;
     pub fn with_overflow_strategy(self, s: OverflowStrategy) -> Self;
+    // Mutating variants for parity with silero / dia::segment.
+    pub fn set_similarity_threshold(&mut self, t: f32) -> &mut Self;
+    pub fn set_update_strategy(&mut self, s: UpdateStrategy) -> &mut Self;
+    pub fn set_max_speakers(&mut self, n: u32) -> &mut Self;
+    pub fn set_overflow_strategy(&mut self, s: OverflowStrategy) -> &mut Self;
 }
 ```
 
@@ -474,9 +527,19 @@ pub enum Error {
     #[error("input contains NaN or non-finite values")]
     NonFiniteInput,
 
-    /// All pairwise similarities ≤ 0 → spectral clustering's affinity
-    /// matrix is all-zero, Laplacian undefined.
-    #[error("all pairwise similarities are non-positive; spectral clustering undefined")]
+    /// Input contains a zero-norm or near-zero-norm embedding
+    /// (||e|| < `NORM_EPSILON`). Distinct from `NonFiniteInput` (which
+    /// is for NaN/inf). Almost certainly caller error: a real embedding
+    /// produced by `EmbedModel::embed` is L2-normalized and cannot be
+    /// degenerate. Likely cause: caller hand-constructed an embedding
+    /// or read it from a corrupted store.
+    #[error("input contains a zero-norm or degenerate embedding")]
+    DegenerateEmbedding,
+
+    /// All pairwise similarities ≤ 0, OR at least one node is isolated
+    /// (its degree D_ii < `NORM_EPSILON`) → spectral clustering's
+    /// normalized Laplacian is undefined. See §5.5 step 2.
+    #[error("affinity graph has an isolated node or all-zero similarities; spectral clustering undefined")]
     AllDissimilar,
 
     #[error("eigendecomposition failed (matrix likely singular or pathological)")]
@@ -513,9 +576,22 @@ pub struct OfflineClusterOptions {
     method: OfflineMethod,            // Spectral (default)
     similarity_threshold: f32,        // DEFAULT_SIMILARITY_THRESHOLD
     target_speakers: Option<u32>,     // None (auto-detect)
-    /// K-means seed for spectral clustering. `None` = derive
-    /// deterministically from a hash of the input embeddings; `Some(s)`
-    /// = use `s` directly. Default: `None` (deterministic by input).
+    /// K-means seed for spectral clustering.
+    ///
+    /// - `None` (default): use the constant `0` as the seed. This gives
+    ///   deterministic output for a given input AND deterministic K-means
+    ///   initialization across calls. Matches Python NumPy's
+    ///   `np.random.RandomState(0)` convention for reproducibility.
+    /// - `Some(s)`: use `s` directly. Useful when running multiple
+    ///   independent clusterings on the same data (e.g., for
+    ///   reproducibility studies) where varying seed checks robustness.
+    ///
+    /// We do NOT derive the seed from a hash of the input — doing so
+    /// would require committing to a specific hash function (FxHash,
+    /// SipHash, FNV, …), which is a public API decision the spec
+    /// shouldn't take lightly. The constant default is simpler, equally
+    /// deterministic for "same input → same output," and avoids the
+    /// dependency / version-stability question.
     seed: Option<u64>,
 }
 
@@ -543,6 +619,11 @@ impl OfflineClusterOptions {
     pub fn with_similarity_threshold(self, t: f32) -> Self;
     pub fn with_target_speakers(self, n: u32) -> Self;
     pub fn with_seed(self, s: u64) -> Self;
+    // Mutating variants.
+    pub fn set_method(&mut self, m: OfflineMethod) -> &mut Self;
+    pub fn set_similarity_threshold(&mut self, t: f32) -> &mut Self;
+    pub fn set_target_speakers(&mut self, n: u32) -> &mut Self;
+    pub fn set_seed(&mut self, s: u64) -> &mut Self;
 }
 
 /// Cluster a batch of embeddings; returns one global speaker id per
@@ -569,6 +650,9 @@ impl DiarizerOptions {
     pub fn with_segment_options(self, opts: SegmentOptions) -> Self;
     pub fn with_cluster_options(self, opts: ClusterOptions) -> Self;
     pub fn with_collect_embeddings(self, on: bool) -> Self;
+    pub fn set_segment_options(&mut self, opts: SegmentOptions) -> &mut Self;
+    pub fn set_cluster_options(&mut self, opts: ClusterOptions) -> &mut Self;
+    pub fn set_collect_embeddings(&mut self, on: bool) -> &mut Self;
 }
 
 /// Per-activity context retained during a diarization session.
@@ -629,6 +713,21 @@ impl Diarizer {
         emit: F,
     ) -> Result<(), Error>;
 
+    /// Reset the Diarizer for a new session. After this call:
+    ///
+    /// - Internal `Segmenter` is cleared (`Segmenter::clear`): pending
+    ///   inferences invalidated via generation-counter bump,
+    ///   sample-position counter reset to 0, sample buffer drained,
+    ///   per-frame voice timeline cleared, hysteresis state reset.
+    /// - Internal `Clusterer` is cleared: all speaker entries removed,
+    ///   next assigned `speaker_id` resets to 0.
+    /// - Audio buffer is drained.
+    /// - `collected_embeddings()` is **NOT** cleared by `clear()` —
+    ///   call `clear_collected()` separately if you want to drop the
+    ///   accumulated context (this matches how callers may want to
+    ///   keep collected embeddings around for offline refinement
+    ///   *after* the streaming session ends).
+    /// - Configured options (segment / cluster / collect_embeddings) are preserved.
     pub fn clear(&mut self);
 
     pub fn collected_embeddings(&self) -> &[CollectedEmbedding];
@@ -702,8 +801,18 @@ elif len(samples) <= EMBED_WINDOW_SAMPLES:
     raw = onnx(features)
     return l2_normalize(raw, eps=NORM_EPSILON)
 else:
-    # multiple overlapping windows, equal-weighted mean
-    starts = [k * HOP_SAMPLES for k in 0..K-1] + [len(samples) - EMBED_WINDOW_SAMPLES]
+    # multiple overlapping windows, equal-weighted mean.
+    #
+    # Regular hop count: as many full windows as fit before the end.
+    # k_max = floor((len - EMBED_WINDOW_SAMPLES) / HOP_SAMPLES)
+    # gives k in {0, 1, ..., k_max}. The window starting at
+    # k_max * HOP_SAMPLES is fully contained but may not end at len.
+    #
+    # Then append a tail-anchored window at len - EMBED_WINDOW_SAMPLES
+    # so the very end of the clip is covered. Dedup handles the case
+    # where a regular hop already lands exactly on the tail anchor.
+    let k_max = (len(samples) - EMBED_WINDOW_SAMPLES) / HOP_SAMPLES;  # integer floor
+    starts = [k * HOP_SAMPLES for k in 0..=k_max] ++ [len(samples) - EMBED_WINDOW_SAMPLES]
     starts = dedup_and_sort(starts)
     sum = [0.0; 256]
     for s in starts:
@@ -713,8 +822,15 @@ else:
     return l2_normalize(sum, eps=NORM_EPSILON)
 ```
 
-The `+ [len - EMBED_WINDOW_SAMPLES]` and dedup ensures the last window
-aligns with end-of-clip.
+The trailing `[len - EMBED_WINDOW_SAMPLES]` plus dedup ensures the last
+window covers the end of the clip, even when `len` isn't a clean
+multiple of `HOP_SAMPLES`.
+
+Worked examples (for the test cases in §9):
+- `len = 32 000` (2.0 s): single-window path; `windows_used = 1`.
+- `len = 48 000` (3.0 s): `k_max = 1` → starts `[0, 16 000]`, tail anchor `[16 000]`, dedup → `[0, 16 000]`; `windows_used = 2`.
+- `len = 56 000` (3.5 s): `k_max = 1` → starts `[0, 16 000]`, tail anchor `[24 000]`, dedup → `[0, 16 000, 24 000]`; `windows_used = 3`.
+- `len = 64 000` (4.0 s): `k_max = 2` → starts `[0, 16 000, 32 000]`, tail anchor `[32 000]`, dedup → `[0, 16 000, 32 000]`; `windows_used = 3`.
 
 ### 5.2 Voice-weighted variant
 
@@ -746,13 +862,21 @@ struct SpeakerEntry {
     speaker_id: u64,
     /// Unnormalized running accumulator. Centroid = L2-normalize(this).
     accumulator: [f32; EMBEDDING_DIM],
+    /// Last-known-good L2-normalized centroid. Updated atomically with
+    /// `accumulator` whenever the post-update accumulator norm is
+    /// `>= NORM_EPSILON`. Held at the prior good value when the
+    /// post-update accumulator is degenerate (see "Degenerate update"
+    /// below). Initialized to the first submitted embedding (which is
+    /// itself L2-normalized by `Embedding`'s invariant), so `cached_centroid`
+    /// is always populated from the moment a SpeakerEntry exists.
+    cached_centroid: [f32; EMBEDDING_DIM],
     assignment_count: u32,
 }
 ```
 
-**Public-facing `SpeakerCentroid`** carries the L2-normalized centroid
-derived on demand from the internal accumulator. Callers see clean
-unit vectors; the accumulator is hidden.
+**Public-facing `SpeakerCentroid`** wraps `cached_centroid` (via
+`Embedding`'s `pub(crate)` constructor). Callers see L2-normalized unit
+vectors; the accumulator and the lazy-update bookkeeping are hidden.
 
 **Update strategies:**
 
@@ -760,40 +884,58 @@ unit vectors; the accumulator is hidden.
 RollingMean (on assignment of new embedding e):
     accumulator += e            // pure addition; e is L2-normalized
     assignment_count += 1
-    centroid_for_query = l2_normalize(accumulator, NORM_EPSILON)
+    update_cached_centroid()    // see "Degenerate update" below
 
 Ema(α) (on assignment of new embedding e):
     accumulator = (1 - α) * accumulator + α * e
     assignment_count += 1
-    centroid_for_query = l2_normalize(accumulator, NORM_EPSILON)
+    update_cached_centroid()
 ```
 
-If `||accumulator|| < NORM_EPSILON` after update, the centroid is
-degenerate; the speaker entry retains the previous centroid (last good
-value cached). This handles the antipodal case gracefully.
+**Degenerate update** (handles antipodal accumulators):
+
+```
+fn update_cached_centroid(&mut self):
+    let norm = l2_norm(&self.accumulator)
+    if norm >= NORM_EPSILON:
+        self.cached_centroid = self.accumulator / norm
+    // else: leave cached_centroid at its prior value.
+    //
+    // Rationale: the new accumulator is degenerate (e.g., RollingMean
+    // saw an exactly-antipodal pair and summed to 0). Re-normalizing
+    // would return a meaningless direction (or NaN with eps=0). The
+    // prior centroid is the best available estimate of the speaker
+    // until a non-cancelling update arrives.
+```
+
+This is "lazy" in the sense that we don't recompute `cached_centroid`
+from scratch on `speakers()` queries — it's already up to date.
+"Lazy" here refers to the public `SpeakerCentroid` being derived from
+private state on demand, not to deferred computation of
+`cached_centroid` itself.
 
 **Submit algorithm:**
 
 ```
-for each submitted embedding e (L2-normalized):
+for each submitted embedding e (L2-normalized; ||e|| ≈ 1 by Embedding invariant):
     if speakers.is_empty():
-        new_id = 0
         speakers.push(SpeakerEntry {
             speaker_id: 0,
-            accumulator: e,
+            accumulator: e,             // also has unit norm
+            cached_centroid: e,         // first centroid is the embedding itself
             assignment_count: 1,
         })
         return ClusterAssignment {
             speaker_id: 0,
             is_new_speaker: true,
-            similarity: None,        // no prior speakers; sentinel-free
+            similarity: None,           // no prior speakers; sentinel-free
         }
 
-    sims = [centroid_of(s).similarity(e) for s in speakers]
-    (best_idx, best_sim) = argmax_lowest_index(sims)   // tie-breaking: lowest index wins
+    sims = [s.cached_centroid · e for s in speakers]    // dot product = cosine sim (both unit)
+    (best_idx, best_sim) = argmax_lowest_index(sims)    // tie-breaking: lowest index wins
 
     if best_sim >= threshold:
-        speakers[best_idx].update(e, strategy)
+        speakers[best_idx].update(e, strategy)          // also updates cached_centroid
         return ClusterAssignment {
             speaker_id: speakers[best_idx].speaker_id,
             is_new_speaker: false,
@@ -817,6 +959,7 @@ for each submitted embedding e (L2-normalized):
         speakers.push(SpeakerEntry {
             speaker_id: new_id,
             accumulator: e,
+            cached_centroid: e,
             assignment_count: 1,
         })
         return ClusterAssignment {
@@ -833,39 +976,101 @@ wins. Documented for reproducibility.
 ### 5.5 Offline spectral clustering
 
 ```
+0. Validate input (runs FIRST, before any matrix work):
+     if embeddings.is_empty():
+         return Error::EmptyInput
+     if any embedding contains NaN or non-finite component:
+         return Error::NonFiniteInput
+     if any embedding has ||e|| < NORM_EPSILON:
+         return Error::DegenerateEmbedding
+
+   Then resolve target_speakers up front (cheap; informs fast paths):
+     if let Some(k) = target_speakers:
+         if k < 1: return Error::TargetTooSmall
+         if (k as usize) > N: return Error::TargetExceedsInput { target: k, n: N }
+
+0.1. Fast paths for tiny N (BEFORE building A or running eigendecomp):
+     if N == 1:
+         return Ok(vec![0])
+     if N == 2:
+         # Eigengap is degenerate at N=2 (only one gap, no information).
+         # Fall back to threshold check.
+         sim = max(0.0, embeddings[0] · embeddings[1])
+         if let Some(2) = target_speakers:
+             return Ok(vec![0, 1])             // user forced 2
+         if let Some(1) = target_speakers:
+             return Ok(vec![0, 0])             // user forced 1
+         # Auto: threshold decides.
+         return Ok(if sim >= similarity_threshold { vec![0, 0] } else { vec![0, 1] })
+
 1. Build affinity matrix A ∈ R^{N×N}:
      A_ij = max(0, e_i · e_j)    // ReLU of cosine similarity
      A_ii = 0
 
-2. Precondition check:
-     if A.iter().all(|x| x < NORM_EPSILON):
+2. Compute degree matrix D where D_ii = sum_j A_ij.
+   PRECONDITION CHECK (rev-3 fix):
+     if any D_ii < NORM_EPSILON:
+         # An "isolated node": this embedding has no positive cosine
+         # similarity to any other. The normalized Laplacian
+         # L_sym = I - D^{-1/2} A D^{-1/2} contains a 1/sqrt(D_ii)
+         # term, which would explode to infinity (or NaN with eps=0).
+         #
+         # The rev-2 spec checked only `A.iter().all(|x| < eps)`
+         # (i.e., the *whole* affinity matrix is zero). That misses
+         # the case where some pairs have positive similarity but at
+         # least one node is dissimilar to everyone — the matrix is
+         # still partially populated yet the Laplacian is ill-defined.
          return Error::AllDissimilar
 
-3. Compute degree matrix D where D_ii = sum_j A_ij.
-4. Compute normalized graph Laplacian:
+3. Compute normalized graph Laplacian:
      L_sym = I - D^{-1/2} A D^{-1/2}
 
-5. Eigendecompose L_sym; let λ = sorted eigenvalues, U = corresponding eigenvectors.
+4. Eigendecompose L_sym; let λ = sorted eigenvalues (ascending),
+   U = corresponding eigenvectors as columns.
+     if eigendecomp fails or returns NaN:
+         return Error::EigendecompositionFailed
 
-6. Determine K:
+5. Determine K:
      if let Some(k) = target_speakers:
-         if k < 1: return Error::TargetTooSmall
-         if (k as usize) > N: return Error::TargetExceedsInput { target: k, n: N }
-         K = k
+         K = k                                // already validated in step 0
      else:
          # Eigengap heuristic with cap.
-         K_max = min(N - 1, MAX_AUTO_SPEAKERS)
-         K = argmax(λ[k+1] - λ[k] for k in 1..=K_max)
-         K = max(K, 1)
+         K_max = min(N - 1, MAX_AUTO_SPEAKERS as usize)
+         if K_max < 1:
+             K = 1
+         else:
+             # gap[k] = λ[k+1] - λ[k]; pick the k with largest gap.
+             K = 1 + argmax(λ[k+1] - λ[k] for k in 0..K_max)
+             K = max(K, 1)
 
-7. Take U[:, 0..K] (smallest-K eigenvectors).
-8. Row-normalize U.
-9. K-means on rows of U:
-     - K-means++ seeding with deterministic seed:
-         if let Some(s) = seed: use s
-         else: derive from FxHash of input embeddings' bytes
-     - 100 iterations or until convergence.
-10. Return cluster assignments.
+6. Take U[:, 0..K] (smallest-K eigenvectors as columns → N×K matrix).
+7. Row-normalize the N×K matrix (each row to unit L2 norm; rows that
+   are all-zero stay all-zero — they'll cluster arbitrarily and the
+   eigendecomp would have already flagged a real degeneracy via
+   step 2's precondition).
+8. Run K-means on rows of the row-normalized matrix:
+     - **Seed source** (deterministic):
+         let rng_seed: u64 = match opts.seed {
+             Some(s) => s,
+             None    => 0,                    // documented constant default
+         }
+       Use a small, stable PRNG (e.g., `rand_chacha::ChaCha8Rng`,
+       which is `serde`-stable and reproducible across platforms).
+       The choice is an implementation detail of dia::cluster but
+       must NOT be `rand`'s default (`thread_rng`) since that's
+       non-deterministic.
+     - **K-means++ seeding** to pick K initial centroids.
+     - **Lloyd's iterations** with these termination conditions, in order:
+         a. Convergence: every cluster assignment is unchanged from
+            the previous iteration. Equivalently, the per-iteration
+            "move count" is 0.
+         b. Hard iteration cap: 100 iterations.
+       Whichever fires first wins. Both are documented in rustdoc
+       on `OfflineClusterOptions`.
+9. Return per-input cluster labels in `[0, K)`. Labels are NOT
+   guaranteed to be stable across input orderings — caller must not
+   compare label values across two `cluster_offline` calls; use only
+   for grouping.
 ```
 
 ### 5.5.1 Edge cases (NEW in rev 2)
@@ -882,7 +1087,7 @@ For both `cluster_offline` and `Clusterer::submit`:
 | All embeddings identical (offline) | One cluster: `vec![0; N]` |
 | Affinity matrix all-zero (spectral) | `Error::AllDissimilar` |
 | NaN in any embedding | `Error::NonFiniteInput` (validated at entry) |
-| All-zero embedding (norm = 0) | `Error::NonFiniteInput` (we treat zero-norm as invalid since it can't be a real fingerprint) |
+| All-zero embedding (norm < `NORM_EPSILON`) | `Error::DegenerateEmbedding` (validated at entry; zero IS finite — distinct from NaN/inf) |
 | Eigendecomposition NaN-out | `Error::EigendecompositionFailed` |
 
 Tests in §9 cover each row.
@@ -892,22 +1097,48 @@ Tests in §9 cover each row.
 Algorithm (HAC with Average linkage by default):
 
 ```
-1. Validate input (Error::EmptyInput if empty, NonFiniteInput if any NaN/zero).
-2. Compute pairwise distance matrix D ∈ R^{N×N}:
-     D_ij = 1 - cos_similarity(e_i, e_j)   // 0 = identical, 2 = opposite
-3. Initialize: each embedding is its own cluster.
-4. Repeat:
+0. Validate input (runs FIRST, before any distance work):
+     if embeddings.is_empty():
+         return Error::EmptyInput
+     if any embedding contains NaN or non-finite component:
+         return Error::NonFiniteInput
+     if any embedding has ||e|| < NORM_EPSILON:
+         return Error::DegenerateEmbedding
+     if let Some(k) = target_speakers:
+         if k < 1: return Error::TargetTooSmall
+         if (k as usize) > N: return Error::TargetExceedsInput { target: k, n: N }
+
+0.1. Fast paths:
+     if N == 1:
+         return Ok(vec![0])
+     if N == 2:
+         sim = max(0.0, embeddings[0] · embeddings[1])
+         if let Some(2) = target_speakers: return Ok(vec![0, 1])
+         if let Some(1) = target_speakers: return Ok(vec![0, 0])
+         return Ok(if sim >= similarity_threshold { vec![0, 0] } else { vec![0, 1] })
+
+1. Compute pairwise distance matrix D ∈ R^{N×N}:
+     D_ij = 1 - max(0, e_i · e_j)    // 0 = identical, 1 = orthogonal/anti
+                                      // (clamped via ReLU to match spectral)
+2. Initialize: each embedding is its own cluster.
+3. Repeat:
      - Find the two most similar non-merged clusters (smallest D_ij).
-     - if their distance ≥ (1 - threshold) AND target_speakers = None: stop.
+     - if their distance >= (1 - threshold) AND target_speakers = None: stop.
      - if cluster count == target_speakers: stop.
      - Merge them.
      - Update distances per linkage:
-         Single: D[merged, k] = min(D[a, k], D[b, k])
+         Single:   D[merged, k] = min(D[a, k], D[b, k])
          Complete: D[merged, k] = max(D[a, k], D[b, k])
-         Average: weighted by cluster sizes (Lance-Williams formula)
+         Average:  weighted by cluster sizes (Lance-Williams formula)
          (Ward removed: invalid with cosine distance.)
-5. Return labels.
+4. Return labels in `[0, num_clusters)`.
 ```
+
+**Note on validation ordering vs spectral:** §5.5 step 0 and §5.6 step 0
+are intentionally identical — both validate input fully BEFORE any
+matrix computation. Same error variants in the same order. Single
+implementation function `validate_offline_input(...)` shared by both
+(see implementation plan).
 
 ### 5.7 Diarizer audio buffer policy
 
@@ -920,26 +1151,43 @@ buffer retention manually.
 
 After every `process_samples` returns:
 
-- Drop samples below `total_samples_pushed - EMBED_WINDOW_SAMPLES`.
-- Why this bound: the latest emitted activity is in the most recent
-  segment window (covered by the synchronous segment+embed pipeline);
-  the earliest sample we still need is the start of the most-recent
-  embed window (= 2 s back from now).
+- **Drop samples below `total_samples_pushed - dia::segment::WINDOW_SAMPLES`**
+  (i.e., 160 000 samples = 10 s back). **CRITICAL:** The bound is the
+  *segment* window size, not the *embed* window size.
 
-Steady-state memory: `EMBED_WINDOW_SAMPLES * 4 bytes = 128 KB`.
-(Note: the rev-1 spec said 640 KB based on `WINDOW_SAMPLES = 160_000`,
-which was the segment constant. With `EMBED_WINDOW_SAMPLES = 32_000`
-the bound is much smaller. Verified by re-derivation: the segment
-tail-anchor reach-back is irrelevant because by the time
-`process_samples` returns, the segment has already produced any tail
-activity inline.)
+**Why the segment window size, not the embed window size?**
 
-For a `SpeakerActivity` with range `[s0, s1)`, the slice
+The rev-2 spec used `EMBED_WINDOW_SAMPLES` (32 000 = 2 s) here, claiming
+"the earliest sample we still need is the start of the most-recent
+embed window." That reasoning is wrong: it confuses what
+`embed_model.embed(...)` reads from the buffer with what the *next*
+`process_samples` call will need.
+
+The actual constraint comes from `dia::segment::Segmenter`. Its sliding
+windows have a tail-anchored window for end-of-stream coverage (see
+`dia::segment::WINDOW_SAMPLES = 160 000`). When a future
+`process_samples` push triggers a new segment window, that window's
+start sample can be as old as `total_samples_pushed -
+dia::segment::WINDOW_SAMPLES`. The segment's `Action::Activity` then
+exposes a range whose start may extend back to that point, and we need
+the audio in our buffer to slice for `embed_model.embed`. Trimming below
+that bound means a future activity's audio range is unrecoverable.
+
+This is also the bound currently used by `Segmenter` itself for its
+internal sample buffer (see `dia::segment::segmenter.rs`), so we're
+matching its retention guarantee, not exceeding it.
+
+**Steady-state memory:** `dia::segment::WINDOW_SAMPLES * 4 bytes =
+160 000 × 4 = 640 KB`. Plus `Diarizer`'s own `VecDeque` overhead and
+the `CollectedEmbedding` vec (when `collect_embeddings = true`).
+
+For a `SpeakerActivity` with absolute-sample range `[s0, s1)`, the slice
 `audio_buffer[s0 - audio_base..s1 - audio_base]` is fed to
-`embed_model.embed(...)`. **Defensive bounds check**: if the slice
-underflows (e.g., a pathological out-of-order activity from a buggy
-caller), return `Error::Embed(Error::InvalidClip { len: 0, min:
-MIN_CLIP_SAMPLES as usize })` rather than panicking.
+`embed_model.embed(...)`. **Defensive bounds check**: if `s0 <
+audio_base` or `s1 - audio_base > audio_buffer.len()` (e.g., a
+pathological out-of-order activity from a buggy caller), return
+`Error::Embed(Error::InvalidClip { len: 0, min: MIN_CLIP_SAMPLES as
+usize })` rather than panicking.
 
 ### 5.8 Diarizer error handling policy
 
@@ -1020,18 +1268,31 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 
 **`dia::embed`:** as in rev 1, plus:
 - NaN-input rejection: `compute_fbank(&[f32::NAN; 32_000])` → `Error::NonFiniteInput`.
-- Antipodal embedding handling: edge case in `Embedding::normalize_from`.
+- `Embedding::normalize_from(&[0.0; 256])` → `None` (degenerate; below `NORM_EPSILON`).
+- `Embedding::normalize_from` round-trip: an already-normalized vector goes through with `||result|| ≈ 1.0` and per-component diff < `1e-6`.
+- `Embedding::similarity` symmetry: `a.similarity(&b) == b.similarity(&a)` for any constructed embeddings.
+- Free function parity: `cosine_similarity(&a, &b) == a.similarity(&b)` exactly.
+- AllSilent: `embed_weighted` with all-zero `voice_probs` → `Error::AllSilent`.
+- `embed` of a 32 000-sample (= exactly 2 s) clip uses 1 window, `windows_used = 1`.
+- `embed` of a 48 000-sample (= 3 s) clip uses 2 windows (start 0 and start 16 000; start 16 000 is also the tail anchor `48 000 - 32 000`, so dedup leaves 2), `windows_used = 2`.
+- `embed` of a 56 000-sample (= 3.5 s) clip uses 3 windows (start 0, start 16 000, tail anchor at start 24 000 = 56 000 - 32 000), `windows_used = 3`.
 
 **`dia::cluster`:**
 - All §5.5.1 edge cases.
 - Antipodal centroid update: `Clusterer::submit([1,0,...])` then `submit([-1,0,...])` doesn't panic; second submission becomes new speaker (not assigned).
+- Degenerate-update lazy-cache: in `RollingMean`, submit `e1`, force-assign `−e1` (via threshold tweak so it's still assigned to the same speaker), assert `cached_centroid` stays at `e1` (the prior good value) rather than NaN.
 - `OverflowStrategy::AssignClosest` does NOT change centroid (only `assignment_count`).
 - `OverflowStrategy::Reject` returns `Error::TooManySpeakers`.
 - Tie-breaking: two centroids equidistant from query → lowest speaker_id wins.
 - K-means seed reproducibility: same seed → same labels.
-- K-means seed default: same input twice with `seed = None` → same labels.
+- K-means seed default: same input twice with `seed = None` → same labels (= seed `0`).
+- K-means convergence: input where labels stabilize at iteration 5 finishes in ≤ 6 iterations (assert via instrumented PRNG/iter counter).
 - `cluster_offline` agglomerative-vs-spectral on a hand-built 6-embedding 2-cluster set produces the same labels.
 - Eigengap K cap: synthetic `MAX_AUTO_SPEAKERS + 5` clusters → returns `MAX_AUTO_SPEAKERS`.
+- N == 1 fast path: `cluster_offline(&[e], _)` returns `vec![0]` without invoking eigendecomp.
+- N == 2 fast path: `cluster_offline(&[e, e], default)` returns `vec![0, 0]` (above threshold); `cluster_offline(&[e, -e], default)` returns `vec![0, 1]` (below threshold).
+- Isolated-node precondition: 3 embeddings where one is orthogonal to both others → `Error::AllDissimilar` (rev-2 spec would have *not* caught this; rev-3 does via degree-matrix check).
+- Zero-norm rejection: `cluster_offline(&[zero_embedding], _)` → `Error::DegenerateEmbedding`.
 
 **`dia::Diarizer`:**
 - All from rev 1.
@@ -1073,7 +1334,9 @@ const _: fn() = || {
 - **Determinism**: same caveats as `dia::segment` — set
   `intra_op_num_threads = 1` on both `SegmentModelOptions` and
   `EmbedModelOptions` for bit-exact reproducibility. K-means in spectral
-  clustering uses a deterministic seed (default: derived from input).
+  clustering uses a deterministic PRNG (`rand_chacha::ChaCha8Rng` or
+  equivalent reproducible PRNG); the default seed is the literal `0`
+  (see §11.9 and §5.5 step 8).
 
 ## 11. Resolved contracts
 
@@ -1119,9 +1382,28 @@ Same as rev 1.
 
 Same as rev 1.
 
-### 11.5 Diarizer audio buffer is bounded at `EMBED_WINDOW_SAMPLES`
+### 11.5 Diarizer audio buffer is bounded at `dia::segment::WINDOW_SAMPLES`
 
-(Updated bound per §5.7; ~128 KB instead of rev 1's incorrect 640 KB.)
+The audio buffer is trimmed to retain the last
+`dia::segment::WINDOW_SAMPLES` (= 160 000 samples = 10 s) below
+`total_samples_pushed`. **Steady-state memory: 640 KB** (160 000 × 4
+bytes) plus `VecDeque` overhead and the `CollectedEmbedding` vec.
+
+**Why the segment window, not the embed window:** see §5.7. Briefly:
+the segment's tail-anchored sliding window can place the start of a
+future window up to `dia::segment::WINDOW_SAMPLES` behind
+`total_samples_pushed`, and the activity it produces may need any
+sample within that range. Trimming below that bound makes a future
+activity's audio range unrecoverable.
+
+**Rev-history correction:** rev 2 mistakenly tightened this bound to
+`EMBED_WINDOW_SAMPLES` (32 000 = 2 s = 128 KB), claiming the segment's
+tail-anchor reach-back was "irrelevant because by the time
+`process_samples` returns, the segment has already produced any tail
+activity inline." That reasoning was wrong — see §5.7's "Why the
+segment window size, not the embed window size?" for the corrected
+analysis. Rev 1's 640 KB figure was correct (with the wrong bound name
+attached); rev 3 restores the correct figure under the correct name.
 
 ### 11.6 `collected_embeddings` retention
 
@@ -1142,10 +1424,17 @@ Same as rev 1.
 
 ### 11.9 K-means deterministic seeding
 
-`OfflineClusterOptions::seed`: `None` derives a deterministic seed by
-hashing the byte representation of the input embeddings; `Some(s)` uses
-`s` directly. Calling `cluster_offline` twice on the same input with
-default options produces the same speaker IDs.
+`OfflineClusterOptions::seed`:
+- `None` (default): the literal constant `0` is used as the K-means
+  PRNG seed. Same input → same labels, deterministic across runs.
+- `Some(s)`: `s` is used directly.
+
+The PRNG is `rand_chacha::ChaCha8Rng` (or equivalent reproducible
+PRNG); `rand`'s `thread_rng` is **never** used. (See §5.5 step 8.)
+
+Rev-3 change from rev 1: rev 1 proposed deriving the default seed
+from a hash of input bytes. Rev 3 uses the literal `0` instead — same
+determinism, no public commitment to a specific hash function.
 
 ### 11.10 OverflowStrategy semantics
 
@@ -1220,34 +1509,101 @@ From this brainstorm:
 ## 13. Revision history
 
 - **Revision 1** (2026-04-26): initial spec from brainstorming.
-- **Revision 2** (2026-04-26, this document): incorporates first
-  adversarial-review feedback. Critical algorithmic fixes:
-  centroid math (unnormalized accumulator), Ward removal, eigengap K
-  cap, all-zero affinity precondition, K-means seed, OverflowStrategy
-  default flip + no-update-on-forced-assign. API consistency fixes:
+- **Revision 2** (2026-04-26): incorporates first adversarial-review
+  feedback. Critical algorithmic fixes: centroid math (unnormalized
+  accumulator), Ward removal, eigengap K cap, all-zero affinity
+  precondition, K-means seed, OverflowStrategy default flip +
+  no-update-on-forced-assign. API consistency fixes:
   `EMBED_WINDOW_SAMPLES` rename, `Option<f32>` for similarity,
   `CollectedEmbedding` struct, builder API cleanup. Documentation:
   Python center-crop divergence callout, edge-case enumeration,
   Diarizer ownership rationale corrected, sibling comparison table,
   rejected findings (§14), action list (§15).
+  - **Note retracted in rev 3:** rev 2 also tightened the Diarizer
+    audio buffer bound from `WINDOW_SAMPLES` (segment-style 640 KB) to
+    `EMBED_WINDOW_SAMPLES` (~128 KB), claiming the segment's
+    tail-anchor reach-back was irrelevant. That tightening was
+    incorrect; it underflows on real workloads. Rev 3 restores the
+    `dia::segment::WINDOW_SAMPLES` bound (640 KB).
+- **Revision 3** (2026-04-26, this document): incorporates second
+  adversarial-review feedback.
+  - **Critical fix (T1-A):** §5.7 / §11.5 audio buffer trim bound
+    reverted from `EMBED_WINDOW_SAMPLES` to
+    `dia::segment::WINDOW_SAMPLES`; steady-state memory restored to
+    640 KB. Adds explanatory rationale on the segment tail-anchor
+    reach-back.
+  - **Algorithmic fix (T1-B):** §5.5 spectral clustering precondition
+    tightened from "all-of-A < eps" to "any D_ii < eps" (catches
+    isolated nodes, not just the all-zero matrix). Built on top of an
+    explicit degree-matrix computation step.
+  - **Spectral fast paths:** §5.5 / §5.6 add explicit N == 1 and
+    N == 2 short-circuit branches before any matrix work; eigengap
+    is degenerate at N=2.
+  - **Validation timing:** §5.5 / §5.6 explicitly state validation
+    runs first (before matrix computation), with a shared helper.
+  - **K-means seed source + convergence:** §5.5 step 8 specifies
+    `rand_chacha::ChaCha8Rng` (or equivalent reproducible PRNG;
+    `thread_rng` forbidden), and lists the two termination conditions
+    (assignment-unchanged convergence, 100-iteration cap) in order.
+    §11.9 updated: default seed is the literal `0`, not a hash of
+    input bytes.
+  - **Cached centroid semantics (§5.4):** internal `SpeakerEntry`
+    grows a `cached_centroid` field; degenerate-update behavior
+    documented (centroid stays at last-known-good value).
+  - **`Diarizer::clear()` rustdoc (§4.4):** enumerates exactly what
+    is and isn't reset, including the deliberate non-clearing of
+    `collected_embeddings`.
+  - **Builder parity:** `EmbedModelOptions`, `ClusterOptions`,
+    `OfflineClusterOptions`, `DiarizerOptions` all gain `set_*`
+    mutating methods alongside the consuming `with_*` builders, for
+    parity with `silero` and `dia::segment`.
+  - **`Embedding` invariant:** rustdoc on `Embedding` makes the
+    L2-norm > NORM_EPSILON invariant explicit and points to
+    `normalize_from` as the only constructor that can break it
+    (returns `None` instead).
+  - **`DegenerateEmbedding` error variant:** new variant in BOTH
+    `dia::embed::Error` and `dia::cluster::Error` for
+    zero-norm/near-zero-norm cases — rev 2 (in `dia::cluster`) and the
+    initial design (in `dia::embed`) both misnamed these as
+    `NonFiniteInput` (zero IS finite).
+  - **Misc:** §1 wording (`findit-speaker-embedding` does not provide
+    clustering — clustering layer is "novel," not "deferred"), free
+    function `cosine_similarity` rationale.
 
-## 14. Findings rejected from review 1
+## 14. Findings rejected from reviews
 
-For traceability:
+For traceability across both adversarial-review rounds.
+
+### From review 1 (rev 1 → rev 2)
 
 - **T2-C** (drop generic `EmbeddingMeta<A, T>` to "match
-  `dia::segment::Clip`"): **rejected.** There is no `dia::segment::Clip`
-  type — `Segmenter::push_samples(&[f32])` takes raw samples directly.
-  The reviewer's "consistency" argument is based on a type that doesn't
-  exist. More importantly, **the user explicitly requested generic
-  `EmbeddingMeta` during brainstorming** ("Make EmbeddingMeta generic
-  over audio_id and track_id, do not use String directly"). Reverting
-  that based on a false premise would be wrong. The cost the reviewer
-  flags (generics propagating through `EmbeddingResult<A, T>` and the
-  embed methods) is real but bounded — the meta-free path
-  (`embed`, `embed_weighted`) returns concrete `EmbeddingResult` (=
-  `EmbeddingResult<(), ()>`) so typical callers never see the type
-  parameters.
+  `dia::segment::Clip`"): **rejected, sustained in rev 3.** There is
+  no `dia::segment::Clip` type — `Segmenter::push_samples(&[f32])`
+  takes raw samples directly (verified by re-reading
+  `dia/src/segment/segmenter.rs` during rev-3 work). The reviewer's
+  "consistency" argument is based on a type that doesn't exist. More
+  importantly, **the user explicitly requested generic
+  `EmbeddingMeta` during brainstorming** ("Make EmbeddingMeta
+  generic over audio_id and track_id, do not use String directly").
+  Reverting that based on a false premise would be wrong. The cost
+  the reviewer flags (generics propagating through
+  `EmbeddingResult<A, T>` and the embed methods) is real but bounded
+  — the meta-free path (`embed`, `embed_weighted`) returns concrete
+  `EmbeddingResult` (= `EmbeddingResult<(), ()>`) so typical callers
+  never see the type parameters.
+
+### From review 2 (rev 2 → rev 3)
+
+- **None outright rejected.** All twelve items in the second review
+  are accepted in some form, either as direct spec edits (T1-A, T1-B,
+  cached centroid, fast paths, validation timing, K-means seed,
+  builder parity, `clear()` rustdoc, Embedding invariant,
+  `DegenerateEmbedding` variant, §1 wording, `cosine_similarity`
+  rationale) or as v0.1.1+ action items (see §15). Where the
+  reviewer's preferred phrasing differed from what we ended up
+  shipping, we noted the difference inline (e.g., reviewer wrote
+  `NonFiniteInput` for zero-norm cases; we split that into a separate
+  `DegenerateEmbedding` variant since zero IS finite).
 
 ## 15. Action list for v0.1.1+ follow-ups
 
@@ -1263,3 +1619,16 @@ These don't block v0.1.0 but should be tracked:
 | 26 | F1-style numerical parity test plan against `findit-speaker-embedding` Python output on clips ≤ 2 s (where dia and Python should agree, modulo floating-point noise)                                                  | medium |
 | 27 | `Diarizer` integration test on a real multi-speaker recording (e.g., a 5-minute podcast clip with 2-3 speakers) — manual inspection of speaker IDs                                                                    | high |
 | 28 | Investigate sub-quadratic spectral clustering (Nyström approximation or sparse Laplacian) for very long sessions (N > 5000)                                                                                            | low |
+| 29 | (rev-2 review) Property test: `Embedding::similarity` is symmetric and bounded in `[-1, 1]` for any pair of `Embedding`s constructed via `normalize_from`. Quickcheck-style.                                          | low |
+| 30 | (rev-2 review) Stress test: 10 000 streaming `Clusterer::submit` calls with synthetic embeddings drawn from K=5 well-separated clusters; assert eventual recovery of K speakers and per-cluster purity > 0.95.        | medium |
+| 31 | (rev-2 review) Spectral clustering benchmark on N ∈ {10, 100, 500, 1000} with timing budget; flag any super-quadratic blow-up.                                                                                          | low |
+| 32 | (rev-2 review) Cross-platform determinism check: same input → same K-means labels on macOS/Linux/x86_64/aarch64. Pinpoints any non-determinism in `nalgebra`'s eigensolver.                                            | medium |
+| 33 | (rev-2 review) Document the `embed_weighted` AllSilent threshold semantics: clarify in rustdoc that AllSilent triggers when `total_weight < NORM_EPSILON` (not when individual weights are zero).                     | low |
+| 34 | (rev-2 review) Add a Diarizer end-to-end "no audio" test: zero-length input, all-silent input, sub-MIN_CLIP_SAMPLES input — assert no panics, no spurious activities, no embeddings collected.                        | medium |
+| 35 | (rev-2 review) Add a `DiarizerOptions::with_offline_cluster_options` plumbing for callers who want to control the offline-refinement defaults from the top-level builder. Currently they call `cluster_offline` directly with their own `OfflineClusterOptions`.                                                                          | low |
+| 36 | (rev-2 review) Fuzzing pass on `compute_fbank` and `cluster_offline` (cargo-fuzz). Especially valuable on the eigendecomp path which can NaN-out on pathological inputs.                                              | medium |
+| 37 | (rev-2 review) `Clusterer::submit_batch(&[Embedding])` convenience method that loops over `submit` and returns `Vec<Result<ClusterAssignment>>` — saves the caller a hot loop.                                          | low |
+| 38 | (rev-2 review) Documentation: a "porting from `findit-speaker-embedding`" appendix in the README listing every behavioral divergence (sliding-window mean, threshold defaults, error variants, etc.).                  | medium |
+| 39 | (rev-2 review) Property: spectral clustering is invariant under input permutation (cluster *count* and *purity* must match, even if label values differ). Test with shuffle.                                          | medium |
+| 40 | (rev-2 review) Telemetry: optional `tracing` spans inside `Diarizer::process_samples` for per-activity embedding-and-clustering timings. Gated behind a feature flag to avoid forcing the dep on no-tracing users.    | low |
+| 41 | (rev-2 review) Verify `kaldi-native-fbank` numerical agreement with the C++ `knf-rs` binding on a 30-second test clip. If divergent beyond 1e-3, investigate which is more correct vs Python's torchaudio reference. | medium |
