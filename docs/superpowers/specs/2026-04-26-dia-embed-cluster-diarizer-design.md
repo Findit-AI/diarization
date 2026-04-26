@@ -1,6 +1,6 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 8** (2026-04-26, post-fifth-adversarial-review + correctness fixes).
+**Revision 9** (2026-04-27, post-sixth-adversarial-review pseudocode-consistency patch).
 **Status:** ready for implementation (pending §15 #43 pre-impl spike + §15 #52 ChaCha keystream stability).
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`,
 **plus a v0.X bump of `dia::segment` to expose per-window per-speaker per-frame
@@ -638,11 +638,29 @@ impl EmbedModel {
     /// on the gathered audio. Matches pyannote's
     /// `ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__` masked path
     /// (`pyannote/audio/pipelines/speaker_verification.py:568-619`),
-    /// adapted for our fixed-200-frame fbank: pyannote gathers at frame
-    /// rate after fbank; we gather at sample rate before fbank. The two
-    /// are numerically equivalent up to fbank-window-boundary effects when
-    /// mask transitions land on 25 ms boundaries (the kaldi fbank window
-    /// width). Documented divergence; see §5.8.
+    /// adapted for our fixed-200-frame fbank.
+    ///
+    /// **Two layered divergences from pyannote** (rev-9 expanded per
+    /// review-8 T3-B):
+    /// 1. **Mask resolution.** Pyannote interpolates the input mask to
+    ///    fbank-frame rate, binarizes at 0.5, then gathers FRAMES (post
+    ///    -fbank). We gather SAMPLES (pre-fbank) using the input mask
+    ///    directly. Numerically equivalent up to fbank-window-boundary
+    ///    effects when mask transitions land on 25 ms boundaries.
+    /// 2. **Long-clip aggregation.** When `gathered.len() >
+    ///    EMBED_WINDOW_SAMPLES` (= 32 000 samples), our `embed_masked`
+    ///    routes through §5.1's sliding-window mean over the gathered
+    ///    audio. Pyannote runs ONNX once on the variable-length
+    ///    feature sequence (their WeSpeaker ONNX export accepts
+    ///    variable-length input). For typical VAD-filtered single
+    ///    utterances (≤ 2 s after gather) this divergence doesn't
+    ///    matter; for long clips with sparse mask coverage it can
+    ///    produce different embeddings.
+    ///
+    /// Net: short-clip masked embeddings are close to pyannote (one
+    /// divergence — sample-vs-frame-rate gather). Long-clip masked
+    /// embeddings have two layered divergences. §15 #49 tracks the
+    /// fix for divergence #2 (mask-aware ONNX export).
     ///
     /// **Errors:**
     /// - `Error::MaskShapeMismatch` if `keep_mask.len() != samples.len()`.
@@ -652,7 +670,9 @@ impl EmbedModel {
     /// **Caller responsibility:** if `embed_masked` returns `InvalidClip`
     /// because the gathered length was too short, the caller may decide
     /// to fall back (e.g., re-call with a less-restrictive mask). The
-    /// `Diarizer` does this internally — see §5.8 fallback rule.
+    /// `Diarizer` does this internally — see §5.8 fallback rule. After
+    /// the second `InvalidClip`, the Diarizer skips the activity (rev-9
+    /// per review-8 T3-A; matches pyannote's skip-and-continue).
     pub fn embed_masked(
         &mut self, samples: &[f32], keep_mask: &[bool],
     ) -> Result<EmbeddingResult, Error>;
@@ -1008,7 +1028,7 @@ pub struct DiarizedSpan {
     is_new_speaker: bool,
     /// Mean per-frame normalized activation for this cluster across
     /// the span's frames. Each frame's contribution is
-    /// `activation_sum / chunk_count`, so the value is in `[0.0, 1.0]`
+    /// `activation_sum / activation_chunk_count`, so the value is in `[0.0, 1.0]`
     /// (1.0 = every contributing window said "this speaker active here
     /// at probability 1.0"). Higher = more confident the cluster was
     /// active for this turn. Roughly comparable across spans.
@@ -1827,33 +1847,56 @@ for activity in activities:
     let keep_mask = if used_clean { &clean_keep } else { &speaker_keep }
 
     # Embed via gather-and-pad (§4.2 rev-8 embed_masked).
+    # Two-step fallback chain (rev-9 per review-8 T3-A):
+    #   1. Try clean_keep (if used_clean=true).
+    #   2. If InvalidClip, fall back to speaker_keep.
+    #   3. If InvalidClip AGAIN, skip the activity entirely and
+    #      continue (do NOT propagate — matches pyannote's skip).
     let activity_samples = &audio_buffer[s0 - audio_base ..= s1 - audio_base - 1]
+    let mut effective_used_clean = used_clean
+
     let result = match embed_model.embed_masked(activity_samples, keep_mask) {
-        Ok(r) => r,
+        Ok(r) => Some(r),
         Err(Error::InvalidClip { .. }) if used_clean => {
-            # Clean mask was theoretically large enough but the gathered
-            # audio after sample-rate gather was too short (e.g., due to
-            # boundary-rounding: clean_keep counts True values, but
-            # MIN_CLIP_SAMPLES checks actual gathered length). Fall back
-            # to speaker-only mask. This re-call is the only way the
-            # ≤ 2 s + heavy-overlap case becomes an InvalidClip.
-            embed_model.embed_masked(activity_samples, &speaker_keep)?
+            # Clean gather too short. Fall back to speaker-only mask.
+            effective_used_clean = false
+            match embed_model.embed_masked(activity_samples, &speaker_keep) {
+                Ok(r) => Some(r),
+                Err(Error::InvalidClip { .. }) => {
+                    # Even the speaker-only mask gathers fewer than
+                    # MIN_CLIP_SAMPLES. Skip this activity entirely.
+                    # Reconstruction (§5.9) will see no contribution
+                    # for (W.id, s); the frames effectively get
+                    # count=0 from this slot.
+                    #
+                    # Optional: log at debug level (e.g., tracing::debug!).
+                    None
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(Error::InvalidClip { .. }) => {
+            # used_clean was already false (entered the speaker-only
+            # branch). Same skip semantics as above.
+            None
         }
         Err(e) => return Err(e.into()),
     }
+
+    let Some(result) = result else { continue; }   # skip on doubly-failed gather
     let embedding = *result.embedding()
     let assignment = clusterer.submit(&embedding)?
 
     # Track for reconstruction (§5.9), span-quality metrics (§5.11), and observability.
     slot_to_cluster.insert((W.id, s), assignment.speaker_id())
-    activity_clean_flags.insert((W.id, s), used_clean)
+    activity_clean_flags.insert((W.id, s), effective_used_clean)
     if collect_embeddings:
         collected_embeddings.push(CollectedEmbedding {
             range: activity.range,
             embedding,
             online_speaker_id: assignment.speaker_id(),
             speaker_slot: s,
-            used_clean_mask: used_clean,
+            used_clean_mask: effective_used_clean,
         })
 ```
 
@@ -1911,15 +1954,38 @@ struct ReconstructState {
     /// new clusters appear; we just grow the HashMap.
     activations: VecDeque<HashMap<u64, f32>>,
 
-    /// Per-frame bookkeeping for §5.10.
+    /// Per-frame bookkeeping for §5.10 (one `FrameCount` per absolute
+    /// frame, indexed by `frame - base_frame`).
     counts: VecDeque<FrameCount>,
 
-    /// Per-(window_id, slot) → cluster id. Populated as activities are
-    /// clustered in §5.8. Consumed (per window) when that window's
-    /// SpeakerScores arrive and reconstruction integration runs. After
-    /// integration, the (window, slot) entries are evictable but kept
-    /// until the window's last frame is finalized for diagnostic clarity.
+    /// Per-(window_id, slot) → cluster id. Populated in §5.8 when
+    /// activities are clustered. Consumed (per window) when that
+    /// window's `SpeakerScores` arrive and reconstruction integration
+    /// runs (§5.9 step A). Persists across the integration so §5.11
+    /// can attribute open-run frames to contributing activities (used
+    /// to populate `DiarizedSpan::activity_count`). Eviction in §11.13.
     slot_to_cluster: BTreeMap<(WindowId, u8), u64>,
+
+    /// Per-(window_id, slot) → bool flag indicating whether the
+    /// activity used the clean mask. Populated in §5.8, consumed by
+    /// §5.11 to populate `DiarizedSpan::clean_mask_fraction`. Same
+    /// eviction lifecycle as `slot_to_cluster` (§11.13).
+    activity_clean_flags: HashMap<(WindowId, u8), bool>,
+
+    /// Per-window_id → window_start (absolute samples). Populated
+    /// during integration in §5.9 step A; consumed by §5.11 to map
+    /// frame indices back to absolute samples and to determine which
+    /// (window, slot) entries can be evicted (§11.13).
+    window_starts: HashMap<WindowId, u64>,
+
+    /// Per-cluster open-run state. Updated in §5.11 each time
+    /// `emit_finalized_frames` advances `base_frame`.
+    open_runs: HashMap<u64 /* cluster_id */, PerClusterRun>,
+
+    /// Set of `cluster_id`s that have ever been emitted in a
+    /// `DiarizedSpan` since `new()` or `clear()`. Used to set
+    /// `DiarizedSpan::is_new_speaker`.
+    emitted_speaker_ids: HashSet<u64>,
 
     /// Absolute frame below which everything is finalized. Monotonic.
     finalization_boundary: u64,
@@ -1949,25 +2015,15 @@ struct FrameCount {
     /// the integer instantaneous speaker count.
     count_chunk_count: u32,
 }
-
-/// Per-(window_id, slot) → cluster id mapping. Populated in §5.8 when
-/// activities are clustered. Consumed in §5.9 step A. Eviction policy
-/// in §11.13.
-struct ReconstructStateExtras {
-    slot_to_cluster: BTreeMap<(WindowId, u8), u64>,
-    /// Per-(window_id, slot) → bool flag indicating whether the
-    /// activity used the clean mask. Populated in §5.8, consumed by
-    /// §5.11 to compute `DiarizedSpan::clean_mask_fraction`. Same
-    /// eviction lifecycle as `slot_to_cluster` (§11.13).
-    activity_clean_flags: HashMap<(WindowId, u8), bool>,
-    /// Per-window_id → window_start (absolute samples). Populated
-    /// during integration in §5.9 step A; consumed by §5.11 to map
-    /// frame indices back to absolute samples and to determine which
-    /// (window, slot) entries can be evicted (§11.13). Rev-7 omitted
-    /// this field; rev-8 added it per review-7 T2-C.
-    window_starts: HashMap<WindowId, u64>,
-}
 ```
+
+**Rev-9 organization fix.** Rev-8 split this into `ReconstructState`
++ `ReconstructStateExtras` (a holdover from an earlier draft), which
+caused the rev-8 review to flag `slot_to_cluster` and
+`activity_clean_flags` as duplicate-declared. Rev-9 merges everything
+into a single `ReconstructState` so there's one place to read it.
+`PerClusterRun` is defined in §5.11 below; field documentation for
+each member is co-located with its first use.
 
 **Per-window integration** (called from §5.8's pump loop after a
 window's activities have all been clustered AND its `Action::SpeakerScores`
@@ -2106,27 +2162,22 @@ pub const SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT: u32 = 59;
 (These are private constants in `dia::diarizer::reconstruct`. The
 caller never sees them.)
 
-**Computation** (already integrated into §5.9 step C above; copied
-here for clarity):
+**Computation.** Done inline in §5.9 step C; see that block for the
+exact loop. The §5.10-specific bit is the warm-up trimming guard
+(`f_in_window` outside `[SPEAKER_COUNT_WARM_UP_FRAMES_LEFT,
+FRAMES_PER_WINDOW - SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT)`) and the
+counter being `count_chunk_count` (warm-up trimmed) — distinct from
+§5.9 step B's `activation_chunk_count` (un-trimmed).
 
-```
-For each window W and each frame f_in_window in
-[SPEAKER_COUNT_WARM_UP_FRAMES_LEFT, FRAMES_PER_WINDOW - SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT):
-
-    abs_frame = window_start_frame + f_in_window
-    n_active_here = count of slots in 0..MAX_SPEAKER_SLOTS
-                    where raw_probs[slot][f_in_window] > binarize_threshold
-
-    counts[abs_frame].count_sum += n_active_here
-    counts[abs_frame].chunk_count += 1
-```
+(Rev-9 removed a duplicated copy of the integration loop that lived
+here in rev-8; the duplicate had a stale `chunk_count` field name —
+see review-8 T2-A. Single source of truth now lives in §5.9 step C.)
 
 **Finalization** (called from §5.11):
 
 ```
 fn finalized_count_at(frame): u32 {
     let c = counts[frame - base_frame]
-    if c.chunk_count == 0 { return 0 }    // frame in warm-up of all contributing windows
     if c.count_chunk_count == 0 { return 0 }    // frame in warm-up of all contributing windows
     return (c.count_sum / c.count_chunk_count as f32).round() as u32
 }
@@ -2172,16 +2223,11 @@ struct PerClusterRun {
     clean_mask_count: u32,
 }
 
-struct ReconstructState {
-    // (existing fields from §5.9)
-    open_runs: HashMap<u64 /* cluster_id */, PerClusterRun>,
-    emitted_speaker_ids: HashSet<u64>,    // for `is_new_speaker` tracking
-    /// Reverse mapping from (window, slot) to the activity's
-    /// `used_clean_mask` flag, populated in §5.8 when activities are
-    /// clustered. Consumed when a run extends through a frame whose
-    /// (window, slot) hasn't been counted yet.
-    activity_clean_flags: HashMap<(WindowId, u8), bool>,
-}
+// `open_runs`, `emitted_speaker_ids`, and `activity_clean_flags`
+// live on `ReconstructState` declared in §5.9 — see that block for
+// the full layout. (Rev-9 merged the three duplicate `ReconstructState
+// + ReconstructStateExtras` snippets that rev-8 left scattered across
+// §5.9 / §5.11.)
 ```
 
 **Algorithm** (run as part of finalization, after each window is
@@ -2281,8 +2327,11 @@ fn emit_finalized_frames(emit: &mut FnMut(DiarizedSpan)):
             }
             run.last_active_frame = Some(base_frame)
 
-            # Quality-metric accumulation:
-            run.activation_sum_normalized += (activation_sum / chunk_count) as f64
+            # Quality-metric accumulation. Use the un-trimmed
+            # activation_chunk_count (bound at the top of this loop
+            # iteration) for normalization — see §5.10 for why this
+            # is distinct from the warm-up-trimmed count_chunk_count.
+            run.activation_sum_normalized += (activation_sum / activation_chunk_count) as f64
             run.frame_count += 1
 
             # Find activities (window, slot) whose frame_range contains base_frame
@@ -2352,18 +2401,46 @@ fn flush_open_runs(emit: &mut FnMut(DiarizedSpan)):
     }
 ```
 
-**Frame-to-sample conversion** (`make_range`):
+**Frame-to-sample conversion** (`make_range`). Rev-8's changelog
+overstated what the spec actually did — it kept a `as u32`
+truncating cast on `start_frame`/`end_frame` (review-8 T2-B caught
+this). Rev-9 fixes by using a Diarizer-internal `u64`-throughout
+helper that's bit-for-bit equivalent to
+`dia::segment::stitch::frame_to_sample` but doesn't truncate.
 
 ```rust
+/// `dia::diarizer::reconstruct::frame_to_sample_u64`. Internal
+/// helper. Bit-for-bit equivalent of
+/// `dia::segment::stitch::frame_to_sample(frame_idx: u32) -> u32`
+/// (rounded division), but operates on `u64` throughout to avoid
+/// truncating frame indices on long sessions. The segment's
+/// internal helper is `pub(crate)` and signatures u32 → u32 because
+/// segment never produces frame indices > FRAMES_PER_WINDOW × N
+/// for any single window's frame loop. The Diarizer holds an
+/// absolute frame count and needs u64.
+const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
+    let n = frame_idx * WINDOW_SAMPLES as u64;
+    let half = (FRAMES_PER_WINDOW as u64) / 2;
+    (n + half) / FRAMES_PER_WINDOW as u64
+}
+
 fn make_range(start_frame: u64, end_frame: u64) -> TimeRange {
-    let s0 = frame_to_sample(start_frame as u32) as i64
-    let s1 = frame_to_sample(end_frame as u32) as i64
+    let s0 = frame_to_sample_u64(start_frame) as i64;
+    let s1 = frame_to_sample_u64(end_frame) as i64;
     TimeRange::new(s0, s1, SAMPLE_RATE_TB)
 }
 ```
 
-Uses `dia::segment::stitch::frame_to_sample` (already shipped) for
-bit-for-bit equivalence with Python's `int(round(...))` convention.
+Bit-exact equivalence to `dia::segment::stitch::frame_to_sample` is
+asserted by a unit test that runs both functions on `frame_idx in
+0..=FRAMES_PER_WINDOW * 4` (i.e., `0..=2356`, which covers the u32
+input range that segment uses) and checks they produce identical
+outputs after the appropriate u32 → u64 widening.
+
+(Once `dia::segment` adds a `pub(crate) frame_to_sample_u64` helper
+of its own — out of scope for v0.X bump but a v0.1.1 candidate —
+the Diarizer copy can be deleted in favor of segment's. Tracked as
+§15 #54.)
 
 **Tie-break determinism.** When two clusters have exactly equal
 activation at a frame, `sort_by(b_v.cmp(a_v).then(a_id.cmp(b_id)))`
@@ -2375,10 +2452,24 @@ documented behavior.
 
 ### 5.12 Diarizer error handling policy
 
-When `embed_model.embed_weighted(slice, voice_probs)` returns `Err`
-for a particular activity:
-- The error is **propagated** via `process_samples`'s
-  `Result<(), Error>` return.
+When `embed_model.embed_masked(slice, keep_mask)` (rev-8 path; was
+`embed_weighted` in rev-1..rev-7 — review-8 T2-C caught the stale
+reference) returns `Err` for a particular activity:
+- **`Error::InvalidClip` (gathered length too short)** — rev-9 per
+  review-8 T3-A: the Diarizer **does NOT propagate** this error if
+  it fires after the §5.8 fallback chain (clean → speaker-only)
+  has already been exhausted. Instead: the activity is **skipped**
+  (no embedding submitted, no `slot_to_cluster` entry, no
+  `CollectedEmbedding` recorded), and the pump continues to the
+  next activity. This matches pyannote's
+  `speaker_verification.py:611-612` skip-and-continue behavior. The
+  skipped activity's frames will produce zero per-cluster
+  activation in §5.9 step B (no slot mapping → no contribution),
+  so reconstruction degrades gracefully — those frames may be
+  count=0 if no other speakers contribute.
+- **All other errors** — `MaskShapeMismatch`, `NonFiniteInput`,
+  `InferenceShapeMismatch`, ort errors, etc.: the error is
+  **propagated** via `process_samples`'s `Result<(), Error>` return.
 - Activities NOT YET PROCESSED in the same call are lost.
 - The Diarizer's internal state is left consistent (audio buffer
   trimmed up to the failed activity; `Clusterer`,
@@ -3347,7 +3438,7 @@ From this brainstorm:
     reconstruction finalizes per-frame as windows complete). Rev 7
     is documentation + observability + tests — no behavior change
     for any existing caller.
-- **Revision 8** (2026-04-27, this document): incorporates fifth
+- **Revision 8** (2026-04-26): incorporates fifth
   adversarial-review feedback (review 7). Three load-bearing
   correctness fixes plus a fan-out of pseudocode bugs in the rev-6
   reconstruction state machine. The most consequential change: rev-7
@@ -3421,6 +3512,64 @@ From this brainstorm:
     clusterer; actual line is 210, default is `VBxClustering`).
   - **§15 #53 (review-7 T4-A):** new low-severity action item for
     `Action::SpeakerScores` allocation-pool optimization.
+- **Revision 9** (2026-04-27, this document): incorporates sixth
+  adversarial-review feedback. Reviewer's verdict: NEAR-QUALIFIED
+  with three small pseudocode-consistency bugs, all genuine and
+  caught by their cargo-check-by-eye. Plus a graceful retraction of
+  their prior T1-B claim (§14 already had this rejection;
+  reviewer-8 verified independently that VBx IS pyannote's default
+  and apologized). All review-8 items applied; nothing rejected.
+  - **§5.10 finalized_count_at (review-8 T1-A):** removed the stale
+    `if c.chunk_count == 0` guard left over from the rev-8
+    `FrameCount` split. Single guard on `c.count_chunk_count`.
+  - **§5.11 emit_finalized_frames (review-8 T1-B):** the body of
+    the loop referenced an undefined local `chunk_count`; rev-9
+    renames to the bound `activation_chunk_count` (matches the
+    rev-8 split). Same root cause as T1-A — incomplete rename.
+  - **§5.9 / §5.11 ReconstructState organization (review-8 T1-C):**
+    rev-8 had `slot_to_cluster` and `activity_clean_flags` declared
+    in two different structs (`ReconstructState` +
+    `ReconstructStateExtras`), with `§5.11` adding a third stub.
+    Rev-9 merges everything into a single `ReconstructState` in
+    §5.9, deletes `ReconstructStateExtras`, and removes the §5.11
+    duplicate stub. Single source of truth.
+  - **§5.10 stale duplicate (review-8 T2-A):** the "copied here for
+    clarity" computation snippet had the old `chunk_count` field
+    name. Rev-9 removes the duplicate entirely; the canonical loop
+    in §5.9 step C is the single source.
+  - **§5.11 make_range u64 (review-8 T2-B):** rev-8's changelog
+    claimed "u64 everywhere in frame arithmetic," but `make_range`
+    still had `frame_to_sample(start_frame as u32) as i64`. Rev-9
+    introduces a Diarizer-internal `frame_to_sample_u64(u64) -> u64`
+    helper (bit-for-bit equivalent to segment's `u32` version) and
+    routes `make_range` through it. Tracked as §15 #54 to fold
+    back into segment v0.1.1 once that bumps.
+  - **§5.12 stale embed_weighted reference (review-8 T2-C):** the
+    error-handling-policy prose still mentioned `embed_weighted`
+    after rev-8's mechanism switch to `embed_masked`. Rev-9 fixes
+    plus extends the policy per review-8 T3-A.
+  - **§5.8 / §5.12 InvalidClip skip-and-continue (review-8 T3-A):**
+    when both the clean mask AND the speaker-only fallback gather
+    < `MIN_CLIP_SAMPLES` (rare; segment shouldn't produce activities
+    that short, but possible under heavy overlap), the Diarizer
+    now SKIPS the activity and continues the pump rather than
+    propagating `InvalidClip`. Matches pyannote's
+    `speaker_verification.py:611-612` skip-and-continue.
+  - **§4.2 / §5.8 long-clip masked-embed double divergence
+    (review-8 T3-B):** explicit documentation that long-clip
+    masked embeddings have TWO layered divergences from pyannote
+    (sample-vs-frame-rate gather + sliding-window-mean vs
+    variable-length-ONNX). For typical short VAD utterances this
+    doesn't matter. §15 #49 tracks the v0.2 mask-aware ONNX
+    export fix for divergence #2.
+  - **§14 review-8 acknowledgment:** the reviewer-8 explicitly
+    retracted their prior rev-7 T1-B claim ("HMM-GMM is the
+    default") after independent verification. Rev-9 §14 records
+    this in the existing review-7 rejection block.
+  - **§15 #54 (review-8 T2-B follow-up):** new low-severity action
+    item to add `pub(crate) frame_to_sample_u64` to
+    `dia::segment::stitch` in v0.1.1 so the Diarizer can drop its
+    internal copy.
 
 ## 14. Findings rejected from reviews
 
@@ -3510,22 +3659,25 @@ but by a user-mandate scope clarification (VAD-prerequisite contract
   Verified against the actual source file at
   `/Users/user/Develop/findit-studio/pyannote-audio/src/pyannote/audio/pipelines/speaker_diarization.py`:
   line 115 is part of an unrelated docstring/output-formatting
-  block in the `diarize_one` method:
-  ```python
-  exclusive_diarization.append(
-      {
-          "start": round(speech_turn.start, 3),    # ← line 115
-          ...
-      }
-  )
-  ```
-  The actual default at line 210 is:
-  ```python
-  clustering: str = "VBxClustering",
-  ```
-  §15 #44 ("VBx is pyannote-audio's default offline clusterer") is
-  therefore **correct**. The reviewer cited the wrong line. Sustaining
-  the existing spec language; T1-B not applied.
+  block in the `diarize_one` method. The actual default
+  `clustering: str = "VBxClustering"` lives in the `__init__`
+  signature (around line 210 in the working tree at the time of
+  rev-8 verification; line numbers shift with edits so we cite the
+  signature rather than a fixed line). The `Clustering` enum at
+  `clustering.py:853-857` does NOT contain
+  `HiddenMarkovModelClustering` — it has `AgglomerativeClustering`,
+  `KMeansClustering`, `VBxClustering`, `OracleClustering`. §15 #44
+  ("VBx is pyannote-audio's default offline clusterer") is
+  therefore **correct**.
+
+  **Reviewer-8 acknowledged this rejection** in their rev-8
+  review's T4-A: *"Verified independently against current
+  pyannote-audio main (last commit 2025-10-08): the default at the
+  __init__ signature is `clustering: str = "VBxClustering"`. The
+  Clustering enum does NOT contain HiddenMarkovModelClustering...
+  My Rev 7 review's T1-B was wrong; my agent likely cited a
+  stale/non-existent source. The rev-8 author's pushback was
+  correct."* No further action; sustaining the rejection.
 - **All other review-7 items accepted** as rev-8 spec edits. T1-A
   (gather-and-embed via new `embed_masked` API + §5.8 rewrite),
   T1-C (SAMPLES_PER_FRAME math: ≈ 271.65 not 160; ≈ 58.9 fps not
@@ -3551,6 +3703,24 @@ but by a user-mandate scope clarification (VAD-prerequisite contract
   documented as a deliberate improvement in §12 decision log),
   T4-C (§1 divergence list expanded — "one deliberate divergence"
   → bulleted list).
+
+### From review 8 (rev 8 → rev 9) — none rejected
+
+All review-8 items applied as rev-9 spec edits:
+- T1-A (§5.10 stale `chunk_count` guard removed),
+- T1-B (§5.11 `chunk_count` → `activation_chunk_count`),
+- T1-C (`ReconstructStateExtras` merged into single
+  `ReconstructState` in §5.9; §5.11 duplicate stub removed),
+- T2-A (§5.10 stale "copied here" snippet removed; §5.9 step C is
+  the single source),
+- T2-B (rev-8 changelog overstated u64 cleanup; rev-9 actually
+  adds a Diarizer-internal `frame_to_sample_u64` helper),
+- T2-C (§5.12 `embed_weighted` reference → `embed_masked`),
+- T3-A (`InvalidClip` skip-and-continue rather than propagate;
+  matches pyannote `speaker_verification.py:611-612`),
+- T3-B (§4.2 `embed_masked` rustdoc grew explicit "two layered
+  divergences from pyannote" note for long-clip masked embeds).
+- T4-A is acknowledged in §14 review-7 entry.
 
 ## 15. Action list for v0.1.1+ follow-ups
 
@@ -3591,3 +3761,4 @@ These don't block v0.1.0 but should be tracked:
 | 51 | (rev-7) **Per-VAD-range diarization with shared speakers**: API for callers who want each VAD range to produce its own clean DiarizedSpans (no spans crossing original-VAD-range boundaries) while keeping speaker IDs consistent across ranges. Currently requires manual mid-level orchestration. Could provide `Diarizer::checkpoint() / restore_after_clear` or `Diarizer::process_chunk_isolated(samples)` that finishes-then-resumes without speaker-state loss. Defer; the §11.12 caller pattern (concatenate + post-process) is sufficient for v0.1.0. | medium |
 | 52 | (rev-8 review-7 T2-E) **ChaCha8Rng keystream byte-fixture regression test** (PRE-IMPL): assert that `ChaCha8Rng::seed_from_u64(42).next_u64()` (and a small handful of other seeds × draws) produces the exact `u64` values we record now. Test runs under both default features and `default-features = false`. Goal: catch a future `rand_chacha` minor-version bump that quietly changes the cipher's stream output, since our public determinism contract (§11.9) depends on byte-stable output. The fixture is ~6 lines of test code; the alarm value is high (silent reproducibility break across users upgrading dia transitively). | high |
 | 53 | (rev-8 review-7 T4-A) **`Action::SpeakerScores` allocation churn**: the variant carries `Box<[[f32; 589]; 3]>` ≈ 7 KB per emission. For a 60-min stream at default `step_samples = 40_000`, that's ~1440 windows × 7 KB = ~10 MB of allocations through the lifetime, all short-lived (consumed by the Diarizer's pump within the same `process_samples` call). Could pool the buffers (`pub(crate) Segmenter::take_speaker_score_buf` returning a `Box` from a small-pool freelist that the Diarizer returns post-consume) or pass `&[[f32; 589]; 3]` borrowed from segmenter scratch. Defer until profiling shows allocator pressure. | low |
+| 54 | (rev-9 review-8 T2-B) **`dia::segment::stitch::frame_to_sample_u64` helper** in `dia::segment` v0.1.1: add `pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64` alongside the existing `u32`-typed helper. The Diarizer currently carries a copy of this function (§5.11 `make_range`) to avoid the truncating cast. Once segment ships its own `u64` helper, the Diarizer copy can be deleted. Bit-exact equivalence is asserted by a unit test in §9. | low |
