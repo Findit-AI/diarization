@@ -1,12 +1,34 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 4** (2026-04-26, post-third-adversarial-review).
-**Status:** ready for re-review.
+**Revision 5** (2026-04-26, post-fourth-adversarial-review).
+**Status:** ready for implementation (pending §15 #43 pre-impl spike).
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`:
 - `dia::embed` — speaker fingerprint generation (port of `findit-speaker-embedding` + improvements)
 - `dia::cluster` — cross-window speaker linking (online streaming + offline batch)
 - `dia::Diarizer` — top-level orchestrator combining segment + embed + cluster
 
+> **Revision 5 closes the remaining implementation-blocking polish
+> from review 4.** `nalgebra` bumped from 0.33 → 0.34 (verified
+> current). K-means++ algorithm (§5.5 step 8) tightened with exact
+> rand-0.10 calls for all four sources of byte ambiguity left in
+> rev-4 prose: step-1 sampling method, step-2a min reduction order
+> (left-to-right f64), step-2b "uniform from not-yet-chosen" method,
+> step-2c f64 distribution + "crosses" semantics + un-normalized
+> threshold computation. `SpeakerCentroid` gains its missing
+> accessor `impl` block; `ClusterAssignment` converted from `pub`
+> fields to private + accessors for visibility consistency. §5.7 /
+> §11.5 audio-buffer reach-back claim now backed by line-number
+> code-trace verification into shipped `dia::segment::segmenter.rs`
+> (rejecting the reviewer's hypothetical "200 000" but accepting the
+> meta-point that the assertion needed justification). `Diarizer::
+> Error::Internal(AudioBufferUnderflow / AudioBufferOverrun)` variant
+> tree replaces rev-1..rev-4's `InvalidClip { len: 0 }` sentinel.
+> §15 grows a HIGH-severity pre-impl gating spike for `kaldi-native-
+> fbank` (verify against `torchaudio.compliance.kaldi.fbank` BEFORE
+> committing to the dep — the crate is brand-new). Plus assorted
+> polish: numbering disambiguation, property-test wording alignment,
+> per-linkage impact note for the rev-3 distance-clamp change.
+>
 > **Revision 4 closes the implementation-blocking gaps from review 3.**
 > §7 grows `rand = "0.10"` and `rand_chacha = "0.10"` (without these,
 > §5.5 step 8's pinned PRNG was un-implementable). §5.5 step 8 now
@@ -460,6 +482,13 @@ pub use crate::embed::Embedding;
 
 /// Public view of a speaker centroid. The internal accumulator is
 /// hidden — see §5.4 for the algorithmic reasoning.
+///
+/// Field visibility: private fields with accessors. Matches
+/// `EmbeddingResult`, `DiarizedSpan`, and `SpeakerActivity` (sibling
+/// output types across dia). Private fields let us evolve the
+/// internal representation without a breaking API change — e.g., a
+/// future minor version could expose `f64` similarity or carry the
+/// originating window id.
 #[derive(Debug, Clone, Copy)]
 pub struct SpeakerCentroid {
     speaker_id: u64,
@@ -467,15 +496,45 @@ pub struct SpeakerCentroid {
     assignment_count: u32,
 }
 
+impl SpeakerCentroid {
+    /// Global speaker ID assigned by the `Clusterer`.
+    pub fn speaker_id(&self) -> u64;
+
+    /// L2-normalized centroid (the public-facing best estimate of
+    /// this speaker's fingerprint).
+    pub fn centroid(&self) -> &Embedding;
+
+    /// Number of `submit` calls assigned to this speaker (including
+    /// `OverflowStrategy::AssignClosest` forced assignments, even
+    /// though those don't update the centroid — see §5.4).
+    pub fn assignment_count(&self) -> u32;
+}
+
+/// Result of one `Clusterer::submit` call.
+///
+/// Field visibility: private fields with accessors, mirroring
+/// `SpeakerCentroid` (rev-5 alignment; rev-1..rev-4 had `pub` fields,
+/// which mixed two visibility patterns within the same module).
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterAssignment {
-    pub speaker_id: u64,
-    pub is_new_speaker: bool,
+    speaker_id: u64,
+    is_new_speaker: bool,
+    similarity: Option<f32>,
+}
+
+impl ClusterAssignment {
+    pub fn speaker_id(&self) -> u64;
+    pub fn is_new_speaker(&self) -> bool;
+
     /// Cosine similarity to the assigned centroid, computed pre-update.
     /// `None` for the first-ever assignment (no centroids existed to
     /// compare against). For new speakers beyond the first, this is
     /// the maximum similarity to any existing centroid.
-    pub similarity: Option<f32>,
+    ///
+    /// **Invariant:** `similarity().is_none()` iff this is the
+    /// first-ever assignment in the `Clusterer`'s lifetime (post
+    /// `new()` or post `clear()`).
+    pub fn similarity(&self) -> Option<f32>;
 }
 
 #[derive(Debug, Clone)]
@@ -785,6 +844,43 @@ pub enum Error {
     Embed(#[from] crate::embed::Error),
     #[error(transparent)]
     Cluster(#[from] crate::cluster::Error),
+
+    /// An invariant of the Diarizer's internal state was violated.
+    /// Distinct from `Embed`/`Segment`/`Cluster` because those wrap
+    /// errors *from* the underlying state machines; `Internal` covers
+    /// the integration glue itself (audio buffer indexing, activity
+    /// range reconciliation). Almost certainly a bug in dia or a
+    /// pathological caller (e.g., a custom mid-level composition that
+    /// supplies out-of-order activities).
+    #[error(transparent)]
+    Internal(InternalError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InternalError {
+    /// An emitted activity's range start is older than the audio
+    /// buffer's earliest retained sample. Should never fire in
+    /// practice — the §5.7 trim bound is exactly tight against the
+    /// `dia::segment::Segmenter` reach-back. If this fires, either
+    /// (a) Segmenter's reach-back contract regressed, (b) caller is
+    /// using a hand-rolled mid-level composition that supplies
+    /// out-of-order activities, or (c) the Diarizer's audio buffer
+    /// was externally corrupted.
+    #[error("activity range start {activity_start} is below audio buffer base {audio_base} (delta = {} samples)", audio_base - activity_start)]
+    AudioBufferUnderflow {
+        activity_start: u64,
+        audio_base: u64,
+    },
+
+    /// An emitted activity's range end exceeds the audio buffer's
+    /// latest sample. Should also never fire — the segment only emits
+    /// activities for windows whose samples have been fully pushed.
+    /// Same diagnosis space as `AudioBufferUnderflow`.
+    #[error("activity range end {activity_end} exceeds audio buffer end {audio_end}")]
+    AudioBufferOverrun {
+        activity_end: u64,
+        audio_end: u64,
+    },
 }
 ```
 
@@ -793,6 +889,14 @@ so callers can use `?` cleanly. Multi-error rationale: each module is
 independently usable (and shippable to crates.io as a sub-crate someday),
 so each owns its own error type. The Diarizer's wrapper is the integration
 point.
+
+**Rev-5 change:** rev-1..rev-4 returned `Error::Embed(Error::InvalidClip
+{ len: 0, min: ... })` when the audio buffer underflowed for a
+pathological activity range. That used `len: 0` as a sentinel for "this
+isn't actually a clip-length issue, this is internal Diarizer state
+inconsistency." Rev 5 splits that into a dedicated
+`Error::Internal(InternalError::AudioBufferUnderflow)` so callers
+debugging real `InvalidClip` errors aren't misled by sentinels.
 
 ## 5. Algorithm semantics (load-bearing decisions)
 
@@ -1088,30 +1192,74 @@ wins. Documented for reproducibility.
        non-deterministic across runs.
 
      - **K-means++ seeding** (Arthur & Vassilvitskii 2007) — exact
-       algorithm pinned in spec to remove implementer ambiguity:
+       algorithm pinned in spec to remove implementer ambiguity. Each
+       step calls out the precise rand 0.10 API to use, because
+       different APIs (e.g., `random_range` vs `Uniform::sample` vs
+       manual modulo) consume different numbers of bytes from
+       ChaCha8Rng's keystream and would shift the entire downstream
+       state, producing different cluster labels for the same seed.
        ```
        Inputs: rows R = [r_0, ..., r_{N-1}] in R^K (the row-normalized
                eigenvector matrix), K target centroids, ChaCha8Rng `rng`.
        Output: K initial centroids c_0, ..., c_{K-1} in R^K.
+       Implementation note: all f64 arithmetic below MUST execute
+       strictly left-to-right (no SIMD reductions, no parallelization,
+       no associativity rewrites). Floating-point sums and min reductions
+       are non-associative; differing reduction orders flip near-tie
+       comparisons by ≤ ULP, which is enough to change which row is
+       picked at step 2a's argmin or step 2c's cumulative-mass
+       crossing. Pin: write the loop as a sequential accumulator.
 
-       1. Sample i_0 uniformly from {0, ..., N-1} via rng.
+       1. Pick first centroid:
+          // requires `use rand::distr::{Distribution, Uniform};`
+          let i_0: usize = Uniform::new(0usize, N).unwrap().sample(&mut rng);
           c_0 = R[i_0].
+
+          (`Uniform::new` returns `Result<Uniform<usize>, Error>` in
+          rand 0.10; `.unwrap()` is safe here because N >= 1 is
+          enforced by `Error::EmptyInput` in step 0. Do NOT use
+          `rng.random_range(0usize..N)` — it's currently `Uniform`
+          internally but that's an unstable implementation detail.)
+
        2. For k = 1..K:
-            a. For each row r_j, compute D_j = min over m in 0..k of
-               ||r_j - c_m||² (squared Euclidean distance to nearest
-               already-chosen centroid).
-            b. Let S = sum(D_j). If S == 0 (all rows coincide with an
-               existing centroid), pick the next centroid uniformly
-               from rows not yet chosen as a centroid.
-            c. Otherwise, sample row index j with probability D_j / S
-               (one ChaCha8Rng draw of `f64` in [0, 1) cumulatively
-               compared against partial sums of D_j / S).
-            d. c_k = R[j].
+            a. For each j in 0..N (left-to-right):
+                 Compute D_j = min{ ||r_j - c_m||²  for m in 0..k }
+                 by iterating m = 0, 1, ..., k-1 in order, tracking
+                 running min. Use f64 for both the per-component
+                 squared-difference accumulator and the min reduction.
+            b. Let S = Σ_{j=0..N} D_j (sum left-to-right in f64).
+               If `S == 0.0` exactly (all rows coincide with already-
+               chosen centroids — possible when input has duplicates):
+                 Build `available: Vec<usize>` by scanning j = 0..N in
+                 order and including j iff it is NOT in the set of
+                 already-chosen centroid indices (linear scan, NOT a
+                 hash set, for byte-deterministic order). Pick:
+                   let idx: usize =
+                     Uniform::new(0usize, available.len())
+                       .unwrap()
+                       .sample(&mut rng);
+                 Set j = available[idx], c_k = R[j], continue.
+            c. Otherwise (S > 0):
+                 // requires `use rand::RngExt;` (rand 0.10 split
+                 // `random` out of `Rng` into `RngExt`)
+                 Draw u via `let u: f64 = rng.random::<f64>();` (this
+                 is `StandardUniform.sample(&mut rng)` in rand 0.10:
+                 53-bit-mantissa f64 in [0.0, 1.0), half-open).
+                 Compute threshold `t = u * S` (NOT `u`; we sample
+                 against the un-normalized cumulative to avoid a
+                 division-rounding step).
+                 Walk j = 0, 1, 2, ..., maintaining a running prefix
+                 sum `cum = Σ_{i=0..=j} D_i` (left-to-right in f64).
+                 Pick the **smallest** j such that `cum > t` (strict
+                 `>`, not `>=`; the strict comparison correctly skips
+                 zero-mass rows whose D_j == 0 and ensures `u == 0`
+                 still picks the first non-zero-mass row).
+                 c_k = R[j].
        ```
-       Note: tie-handling in step 2c uses the smallest-index row whose
-       cumulative probability mass crosses the sampled value. This is
-       deterministic given the sampled value, so seed determinism
-       carries through.
+       This pinning closes four byte-determinism gaps that the rev-3
+       and rev-4 prose descriptions left ambiguous (step-1 sampling
+       method, step-2b "uniformly from not-yet-chosen" method, step-2c
+       f64 distribution, step-2c "crosses" semantics).
 
      - **Lloyd's iterations** with these termination conditions, in order:
          a. Convergence: every cluster assignment is unchanged from
@@ -1216,19 +1364,45 @@ embed window." That reasoning is wrong: it confuses what
 `embed_model.embed(...)` reads from the buffer with what the *next*
 `process_samples` call will need.
 
-The actual constraint comes from `dia::segment::Segmenter`. Its sliding
-windows have a tail-anchored window for end-of-stream coverage (see
-`dia::segment::WINDOW_SAMPLES = 160 000`). When a future
-`process_samples` push triggers a new segment window, that window's
-start sample can be as old as `total_samples_pushed -
-dia::segment::WINDOW_SAMPLES`. The segment's `Action::Activity` then
-exposes a range whose start may extend back to that point, and we need
-the audio in our buffer to slice for `embed_model.embed`. Trimming below
-that bound means a future activity's audio range is unrecoverable.
+The actual constraint comes from `dia::segment::Segmenter`. Code trace
+on the v0.1.0-shipped segmenter (verified 2026-04-26):
 
-This is also the bound currently used by `Segmenter` itself for its
-internal sample buffer (see `dia::segment::segmenter.rs`), so we're
-matching its retention guarantee, not exceeding it.
+- `schedule_ready_windows` (`segmenter.rs:161-173`) emits a window with
+  start `k * step_samples` only when `total_samples_pushed >= k *
+  step_samples + WINDOW_SAMPLES`. So after a synchronous push-and-pump
+  cycle ending at total `T`, the largest emitted window has index
+  `k_max = floor((T - WINDOW_SAMPLES) / step_samples)` and start
+  `k_max * step_samples ≤ T - WINDOW_SAMPLES`.
+- `emit_speaker_activities` (`segmenter.rs:282-329`) is invoked from
+  `push_inference` and produces activities with absolute-sample range
+  in `[k * step_samples, k * step_samples + WINDOW_SAMPLES)` for the
+  window-`k` push. So the latest activity's range start is `k_max *
+  step_samples`.
+- The next process_samples call, pushing more audio, will (eventually)
+  schedule window `k_max + 1` whose start is `(k_max + 1) *
+  step_samples`. By the inequality above this is `> T -
+  WINDOW_SAMPLES`. The activities from that window have range start
+  `>= (k_max + 1) * step_samples > T - WINDOW_SAMPLES`.
+- `finish()` (`segmenter.rs:453-474`) and `plan_starts` (`window.rs:36`)
+  schedule the tail-anchor at `total_samples - WINDOW_SAMPLES`. The
+  activity range from the tail can start exactly at `T - WINDOW_SAMPLES`.
+
+Therefore the trim bound `T - WINDOW_SAMPLES`:
+- is ≤ every future regular-window activity's start (no underflow);
+- equals the tail-anchor activity's earliest start (exactly tight).
+
+So WINDOW_SAMPLES is the **correct** bound — not WINDOW_SAMPLES + step
+(which would over-allocate by `step_samples`) and not just
+`step_samples` (which would underflow on `finish_stream`'s tail).
+Reviewers in early revisions hypothesized other bounds; this one is
+verified by the code trace above and by the integration tests in §9.
+
+This is the same bound the `Segmenter` uses internally for its own
+input buffer trim (`emit_window` line 207-208 trims to `(next_window_idx
++ 1) * step_samples`, which is at most `T - WINDOW_SAMPLES + step_samples`,
+i.e., it retains `WINDOW_SAMPLES - step_samples` samples — close to but
+slightly less than the Diarizer's bound, because the Segmenter doesn't
+need the tail-anchor margin until `finish()` is called).
 
 **Steady-state memory:** `dia::segment::WINDOW_SAMPLES * 4 bytes =
 160 000 × 4 = 640 KB`. Plus `Diarizer`'s own `VecDeque` overhead and
@@ -1236,11 +1410,17 @@ the `CollectedEmbedding` vec (when `collect_embeddings = true`).
 
 For a `SpeakerActivity` with absolute-sample range `[s0, s1)`, the slice
 `audio_buffer[s0 - audio_base..s1 - audio_base]` is fed to
-`embed_model.embed(...)`. **Defensive bounds check**: if `s0 <
-audio_base` or `s1 - audio_base > audio_buffer.len()` (e.g., a
-pathological out-of-order activity from a buggy caller), return
-`Error::Embed(Error::InvalidClip { len: 0, min: MIN_CLIP_SAMPLES as
-usize })` rather than panicking.
+`embed_model.embed(...)`. **Defensive bounds checks** (return errors
+rather than panicking):
+- `s0 < audio_base` → `Error::Internal(InternalError::AudioBufferUnderflow
+  { activity_start: s0, audio_base })`.
+- `s1 > audio_base + audio_buffer.len()` →
+  `Error::Internal(InternalError::AudioBufferOverrun { activity_end: s1,
+  audio_end: audio_base + audio_buffer.len() as u64 })`.
+
+Both should be unreachable under the segment contract verified in
+§5.7. Their existence is purely defense-in-depth for malformed mid-level
+compositions or future segment regressions.
 
 ### 5.8 Diarizer error handling policy
 
@@ -1290,7 +1470,7 @@ ort = { version = "2.0.0-rc.12", optional = true }
 
 # New in v0.1.0 phase 2
 kaldi-native-fbank = "0.1"
-nalgebra = "0.33"
+nalgebra = "0.34"
 # K-means PRNG for spectral clustering (see §5.5 step 8 / §11.9).
 # rand_chacha provides the pinned ChaCha8Rng implementation; rand
 # provides convenience methods (`Rng::random_range`, distributions)
@@ -1351,7 +1531,7 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 **`dia::cluster`:**
 - All §5.5.1 edge cases.
 - Antipodal centroid update: `Clusterer::submit([1,0,...])` then `submit([-1,0,...])` doesn't panic; second submission becomes new speaker (not assigned).
-- Property: `RollingMean` accumulator magnitude bounded — for any sequence of `Clusterer::submit` calls under `RollingMean`, the per-component absolute value of any `SpeakerEntry::accumulator` after `N` assignments is `<= N`. Sanity check on `f32` precision behavior (no infinity, no NaN, no runaway growth beyond unit-vector summation).
+- Property: `RollingMean` accumulator magnitude bounded — for any sequence of `Clusterer::submit` calls under `RollingMean`, after `N` assignments any `SpeakerEntry::accumulator` satisfies `||accumulator||₂ <= N` (triangle inequality on a sum of `N` unit vectors). This is the load-bearing invariant — `cached_centroid`'s validity (`||cached_centroid|| > NORM_EPSILON` per §5.4) requires that `||accumulator||₂` not catastrophically zero out, and the upper bound complements it. Sanity check on `f32` precision behavior (no infinity, no NaN, no runaway growth).
 - Degenerate-update lazy-cache: in `RollingMean`, submit `e1`, force-assign `−e1` (via threshold tweak so it's still assigned to the same speaker), assert `cached_centroid` stays at `e1` (the prior good value) rather than NaN.
 - `OverflowStrategy::AssignClosest` does NOT change centroid (only `assignment_count`).
 - `OverflowStrategy::Reject` returns `Error::TooManySpeakers`.
@@ -1368,7 +1548,8 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 
 **`dia::Diarizer`:**
 - All from rev 1.
-- Buffer underflow on pathological activity range → `Error::Embed(Error::InvalidClip)` (no panic).
+- Buffer underflow on pathological activity range → `Error::Internal(InternalError::AudioBufferUnderflow { .. })` (no panic).
+- Buffer overrun on pathological activity range → `Error::Internal(InternalError::AudioBufferOverrun { .. })` (no panic).
 - `num_speakers()` and `speakers()` reflect Clusterer state mid-stream.
 
 ### Integration tests (gated)
@@ -1671,44 +1852,69 @@ From this brainstorm:
     bounded — pre-existing implementations following rev-2's formula
     would silently produce different clusters when "upgraded" to
     rev 3.
-- **Revision 4** (2026-04-26, this document): incorporates third
-  adversarial-review feedback. Implementation-blocking gaps closed.
-  - **§7 dependencies (item 42):** added `rand = "0.10"` and
+
+    **Per-linkage impact:**
+    - `Linkage::Single` (smallest distance wins): essentially
+      unaffected. Single linkage always merges the closest pair, and
+      clamping a *larger* distance from 1.5 to 1.0 doesn't change
+      which pair is closest (the closest-pair distance is `<= 1.0`
+      in both rev-2 and rev-3 because some non-anti-correlated pair
+      always exists in real-world inputs).
+    - `Linkage::Complete` (largest distance wins): **affected.** The
+      max-of-pair-distances becomes `<= 1.0` in rev-3, so merge
+      ordering downstream of any negatively-correlated pair shifts.
+    - `Linkage::Average` (Lance-Williams weighted mean): **affected.**
+      Cluster-vs-cluster average distance includes contributions
+      from negatively-correlated pairs; clamping shifts the average,
+      which shifts merge ordering.
+
+    Net: any caller using Complete or Average linkage on inputs with
+    negatively-correlated embeddings will see different cluster
+    output between rev-2 and rev-3 of this spec. Single-linkage
+    callers are unaffected. The rev-3 change is the right one
+    (matches spectral's affinity convention; `[0, 1]` is the
+    bounded-distance convention used in the speaker-clustering
+    literature) but is documented here so the divergence isn't a
+    silent surprise.
+- **Revision 4** (2026-04-26): incorporates third adversarial-review
+  feedback. Implementation-blocking gaps closed.
+  - **§7 dependencies (review-3 item 42):** added `rand = "0.10"` and
     `rand_chacha = "0.10"` (with `default-features = false`).
     Without these, §5.5 step 8's pinned PRNG was un-implementable
     from §7 alone. (Reviewer suggested "0.9", but the current
     crates.io versions for both are 0.10 as of 2026-04-26 — used
     those.)
-  - **K-means++ algorithm pinned (item 43):** §5.5 step 8 now spells
-    out the Arthur & Vassilvitskii 2007 D²-weighted seeding algorithm
-    explicitly (uniform first centroid; subsequent centroids sampled
-    with probability ∝ squared distance to nearest existing
+  - **K-means++ algorithm pinned (review-3 item 43):** §5.5 step 8
+    now spells out the Arthur & Vassilvitskii 2007 D²-weighted seeding
+    algorithm explicitly (uniform first centroid; subsequent centroids
+    sampled with probability ∝ squared distance to nearest existing
     centroid; tie-break via smallest-index cumulative-mass crossing).
     Without this, two implementations could produce different cluster
     labels from the same input + seed (k-means|| variant,
     farthest-first traversal, uniform initialization, etc.).
-  - **PRNG pinning tightened (item 44):** §5.5 / §11.9 / §10 now pin
-    `rand_chacha::ChaCha8Rng` exactly, drop "or equivalent
+  - **PRNG pinning tightened (review-3 item 44):** §5.5 / §11.9 / §10
+    now pin `rand_chacha::ChaCha8Rng` exactly, drop "or equivalent
     reproducible PRNG," and add an explicit breaking-change-policy
     statement (PRNG swap or `rand_chacha` major-version bump that
     changes keystream → major version bump on dia).
-  - **§13 rev-3 entry corrected (item 45):** added the missing
-    agglomerative distance-clamp note above (the change shipped in
-    rev 3 but wasn't in rev 3's history bullet list).
-  - **§11.9 attribution fix (item 46):** "rev-3 change from rev 2"
-    not "from rev 1" (the hash-of-input-bytes seed proposal was
-    introduced in rev 2, not rev 1).
-  - **§14 count fix (item 47):** review-2 paragraph rephrased to
-    avoid undercount — "all action items in review 2 are accepted"
-    instead of "twelve."
-  - **§1 wording (item 48):** "improves the long-clip handling" →
-    "with one deliberate divergence: long-clip handling uses
-    sliding-window mean (see §5.1 for the trade-off)." Removes the
-    value-judgment framing; matches §5.1's "Important divergence"
+  - **§13 rev-3 entry corrected (review-3 item 45):** added the
+    missing agglomerative distance-clamp note above (the change
+    shipped in rev 3 but wasn't in rev 3's history bullet list).
+  - **§11.9 attribution fix (review-3 item 46):** "rev-3 change from
+    rev 2" not "from rev 1" (the hash-of-input-bytes seed proposal
+    was introduced in rev 2, not rev 1).
+  - **§14 count fix (review-3 item 47):** review-2 paragraph
+    rephrased to avoid undercount — "all action items in review 2
+    are accepted" instead of "twelve."
+  - **§1 wording (review-3 item 48):** "improves the long-clip
+    handling" → "with one deliberate divergence: long-clip handling
+    uses sliding-window mean (see §5.1 for the trade-off)." Removes
+    the value-judgment framing; matches §5.1's "Important divergence"
     callout.
-  - **§9 property test (item 49):** added "RollingMean accumulator
-    bounded magnitude" property test (assert `||accumulator|| <= N`
-    after `N` submissions of unit-norm embeddings).
+  - **§9 property test (review-3 item 49):** added "RollingMean
+    accumulator bounded magnitude" property test (assert
+    `||accumulator|| <= N` after `N` submissions of unit-norm
+    embeddings).
   - **§5.4 cached_centroid invariant comment (T3-B):** added a
     one-line comment on the field documenting that
     `||cached_centroid|| > NORM_EPSILON` always holds (initialized
@@ -1717,6 +1923,70 @@ From this brainstorm:
     investigate `f32` precision impact on `RollingMean` for sessions
     with `N > 10⁶` assignments (not blocking v0.1.0; flagged for
     v0.1.1+).
+- **Revision 5** (2026-04-26, this document): incorporates fourth
+  adversarial-review feedback. Two implementation-blocking polish
+  items closed; broader byte-determinism specification.
+  - **nalgebra 0.33 → 0.34 (review-4 T1-A):** verified via
+    `cargo info nalgebra` that 0.34.2 is current; the rev-4
+    "0.33" pin was stale.
+  - **K-means++ byte-determinism pinned (review-4 T1-B):** §5.5
+    step 8 now spells out exact rand-0.10 calls for all four
+    sources of byte ambiguity: step-1 first-centroid sampling
+    (`Uniform::new(0, N).unwrap().sample`); step-2a min reduction
+    order (left-to-right f64); step-2b "uniform from not-yet-chosen"
+    (compacted-index `Vec` + `Uniform::new`); step-2c f64 sampling
+    (`rng.random::<f64>()` = `StandardUniform`, half-open [0, 1));
+    step-2c "crosses" semantics (strict `>`, not `>=`); step-2c
+    threshold computation (`u * S` rather than `D_j / S` to avoid
+    division-rounding). These four ambiguities, left in rev-4 prose,
+    would have produced different cluster labels across independent
+    correct implementations of the spec. Pinning them removes that.
+  - **SpeakerCentroid accessor block (review-4 T1-C):** added the
+    missing `impl SpeakerCentroid { ... }`. The struct had private
+    fields and no accessor methods, so `Clusterer::speakers() ->
+    Vec<SpeakerCentroid>` returned read-only-but-unreadable values.
+    Also converted `ClusterAssignment` from `pub` fields to private
+    + accessors, for visibility consistency within the cluster
+    module (review-4 T3-A).
+  - **§5.7 / §11.5 code-trace verification (review-4 T2-A):** the
+    `total_samples_pushed - dia::segment::WINDOW_SAMPLES` trim bound
+    is now justified by line-number references into the shipped
+    `dia::segment::segmenter.rs` and `window.rs`. Pushed back on
+    the reviewer's "could be `step_samples + WINDOW_SAMPLES = 200 000`"
+    claim — code trace shows the bound is exactly `WINDOW_SAMPLES`,
+    not `WINDOW_SAMPLES + step_samples`.
+  - **§13 vs §15 numbering disambiguation (review-4 T2-B):**
+    rev-4's §13 entries used "(item NN)" referring to review-3
+    finding numbers; §15 used "#NN" as its own action-item local
+    namespace. Rev-5 §13 entries explicitly say "(review-3 item NN)"
+    to disambiguate. §15 #43 (which mislabeled itself as "rev-3
+    review item 49") was removed — review-3 item 49 was the
+    property-test request, already addressed in §9 + §13; the
+    "cross-platform K-means determinism CI" idea was a duplicate
+    of §15 #32 anyway (review-4 T3-C).
+  - **§9 / §13 property-test wording aligned (review-4 T2-C):** both
+    sections now describe the L2-norm bound `||accumulator||₂ <= N`
+    (the load-bearing invariant for `cached_centroid` validity), not
+    "per-component absolute value <= N" (which is also true but not
+    the load-bearing one).
+  - **§15 #43 kaldi-native-fbank pre-impl spike (review-4 T2-D):**
+    added a HIGH-severity gating action item to verify
+    `kaldi-native-fbank = "0.1"` (brand-new, single-version,
+    ~1.4k downloads as of 2026-04-26) against `torchaudio.compliance.
+    kaldi.fbank` BEFORE writing the embed module. Falls back to
+    `knf-rs` if the spike fails.
+  - **§13 distance-clamp linkage-impact nuance (review-4 T3-D):**
+    the rev-3 distance-clamp note now spells out per-linkage impact
+    (Single unaffected; Complete and Average affected on inputs with
+    negatively-correlated pairs). Polish, not a correctness change.
+  - **`Diarizer::Error::Internal(InternalError::AudioBufferUnderflow
+    { .. })` variant (review-4 T4-A):** rev-1..rev-4 returned
+    `Error::Embed(Error::InvalidClip { len: 0, min: ... })` for
+    audio-buffer underflow on a pathological activity. Rev-5 splits
+    this into a dedicated `Error::Internal` variant tree with two
+    sub-variants (`AudioBufferUnderflow`, `AudioBufferOverrun`) so
+    callers debugging real `InvalidClip` errors aren't misled by
+    sentinels.
 
 ## 14. Findings rejected from reviews
 
@@ -1761,6 +2031,32 @@ For traceability across both adversarial-review rounds.
   gaps; the rest are documentation polish and are now folded into the
   spec rather than the implementation patch list.
 
+### From review 4 (rev 4 → rev 5)
+
+- **T2-A specific number rejected; meta-point accepted.** Review 4
+  claimed the §5.7 audio-buffer reach-back "could be `step_samples
+  + WINDOW_SAMPLES = 200 000` not 160 000" and that the
+  `WINDOW_SAMPLES` bound was an unverified design assertion. The
+  specific number is wrong: code trace on shipped
+  `dia::segment::segmenter.rs` (`schedule_ready_windows` at lines
+  161-173, `emit_speaker_activities` at lines 282-329, `finish` at
+  lines 453-474) and `window.rs` (`plan_starts` at line 36) shows
+  the bound is exactly `WINDOW_SAMPLES`. The reviewer's hypothetical
+  "200 000" would over-allocate by 40 000 samples (one step). The
+  meta-point — that the spec asserted this without justification —
+  was correct, and §5.7 / §11.5 now contain the line-by-line code
+  trace.
+- **All other review-4 items accepted.** T1-A (nalgebra 0.34), T1-B
+  (K-means++ pins), T1-C (SpeakerCentroid accessors), T2-B
+  (numbering disambiguation), T2-C (property test wording), T2-D
+  (kaldi-native-fbank spike), T3-A (visibility consistency), T3-B
+  (left-to-right reduction pin), T3-C (de-dup #32 vs #43), T3-D
+  (linkage-impact nuance), T4-A (Diarizer::Error::Internal variant).
+  T4-B (§15 numbering gaps) is acknowledged but deferred — the
+  numbering reflects the historical accumulation of items across
+  reviews and renumbering would invalidate cross-references in the
+  prior revision-history bullets.
+
 ## 15. Action list for v0.1.1+ follow-ups
 
 These don't block v0.1.0 but should be tracked:
@@ -1789,4 +2085,4 @@ These don't block v0.1.0 but should be tracked:
 | 40 | (rev-2 review) Telemetry: optional `tracing` spans inside `Diarizer::process_samples` for per-activity embedding-and-clustering timings. Gated behind a feature flag to avoid forcing the dep on no-tracing users.    | low |
 | 41 | (rev-2 review) Verify `kaldi-native-fbank` numerical agreement with the C++ `knf-rs` binding on a 30-second test clip. If divergent beyond 1e-3, investigate which is more correct vs Python's torchaudio reference. | medium |
 | 42 | (rev-3 review T3-C) Float32 precision impact on `RollingMean` for sessions with `N > 10⁶` assignments — once `||accumulator||` reaches ~10⁶, per-component lower bits of the `f32` mantissa (≈7 decimal digits) can drift, biasing the L2-normalized centroid direction. Investigate periodic accumulator renormalization (e.g., `accumulator /= ||accumulator||` every 10 000 assignments to keep magnitude near 1) or upgrading the accumulator to `f64` internally. Not a v0.1.0 issue (typical sessions are well under 10⁶); flagged for tracking.                                                                                                                                                                                       | low |
-| 43 | (rev-3 review item 49) Cross-platform K-means determinism CI test — assert `cluster_offline` produces byte-identical cluster labels on macOS / Linux / x86_64 / aarch64 for the same input + seed. Confirms `nalgebra`'s eigensolver and `ChaCha8Rng`'s sampling produce truly cross-platform-stable output. Distinct from item 32 (which checks K-means alone); this checks the full spectral pipeline end-to-end.                                                                                                                                                                                                                                                                                                                                  | medium |
+| 43 | (rev-4 review T2-D) **PRE-IMPLEMENTATION SPIKE** (run before writing the `dia::embed` module): integrate `kaldi-native-fbank = "0.1"` against `findit-speaker-embedding`'s reference embeddings on a fixed 16 kHz test clip and assert per-coefficient agreement with `torchaudio.compliance.kaldi.fbank` to `< 1e-4`. The crate is brand-new (0.1.0 published 2026-01-12 by RustedBytes, single version, ~1.4k downloads) and has not yet been validated in production. If the spike fails, fall back to `knf-rs` (C++ binding) **before** committing the dep in §7. This protects against shipping v0.1.0 with an fbank crate that subtly disagrees with the Python reference. Distinct from item 41 (post-ship continuous verification); this item is a go/no-go gate. | high |
