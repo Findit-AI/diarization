@@ -1,12 +1,28 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 3** (2026-04-26, post-second-adversarial-review).
+**Revision 4** (2026-04-26, post-third-adversarial-review).
 **Status:** ready for re-review.
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`:
 - `dia::embed` — speaker fingerprint generation (port of `findit-speaker-embedding` + improvements)
 - `dia::cluster` — cross-window speaker linking (online streaming + offline batch)
 - `dia::Diarizer` — top-level orchestrator combining segment + embed + cluster
 
+> **Revision 4 closes the implementation-blocking gaps from review 3.**
+> §7 grows `rand = "0.10"` and `rand_chacha = "0.10"` (without these,
+> §5.5 step 8's pinned PRNG was un-implementable). §5.5 step 8 now
+> spells out the K-means++ algorithm explicitly (Arthur & Vassilvitskii
+> 2007 D²-weighted seeding) so two implementations cannot diverge on
+> the same input + seed. The PRNG is pinned exactly to
+> `rand_chacha::ChaCha8Rng` in §5.5 / §11.9 / §10 (rev 3 said "or
+> equivalent reproducible PRNG," which left a backdoor for breaking
+> output stability). Plus assorted polish: §13 records the rev-3
+> agglomerative distance-clamp change that was shipped but not
+> documented; §11.9 attribution corrected; §14 review-2 count fixed;
+> §1 wording matches §5.1's "deliberate divergence" framing; §9 grows
+> a property test for `RollingMean` accumulator magnitude bounds;
+> §15 grows two more action items (float32 precision; cross-platform
+> K-means determinism).
+>
 > **Revision 3 fixes the rev-2 audio-buffer regression** (the trim bound
 > mistakenly used the *embed* window size when it should use the
 > *segment* window size — would underflow on the first push that
@@ -59,10 +75,12 @@ same person as slot 0 in window 6). For real-world diarization output —
 The Python project that inspired this work is `findit-speaker-embedding`
 (WeSpeaker ResNet34 ONNX, kaldi-compatible fbank, 200-frame fixed input,
 256-d L2-normalized output). dia v0.1.0 ports the embedding pipeline
-faithfully but improves the long-clip handling. The clustering layer is
-**novel** — `findit-speaker-embedding` does not provide one; it stops
-at producing fingerprints and leaves cross-window linking to its
-caller.
+faithfully, with one deliberate divergence: long-clip handling uses
+sliding-window mean instead of Python's center-crop (see §5.1 for the
+trade-off). Numerical-parity-sensitive callers should review §5.1
+before adopting. The clustering layer is **novel** —
+`findit-speaker-embedding` does not provide one; it stops at producing
+fingerprints and leaves cross-window linking to its caller.
 
 User-facing pipeline this spec assumes:
 
@@ -869,6 +887,10 @@ struct SpeakerEntry {
     /// below). Initialized to the first submitted embedding (which is
     /// itself L2-normalized by `Embedding`'s invariant), so `cached_centroid`
     /// is always populated from the moment a SpeakerEntry exists.
+    ///
+    /// **Invariant:** `||cached_centroid|| > NORM_EPSILON`. This is what
+    /// makes wrapping it in `Embedding` (via `pub(crate)` constructor)
+    /// safe: the public `Embedding` invariant is preserved.
     cached_centroid: [f32; EMBEDDING_DIM],
     assignment_count: u32,
 }
@@ -1054,12 +1076,43 @@ wins. Documented for reproducibility.
              Some(s) => s,
              None    => 0,                    // documented constant default
          }
-       Use a small, stable PRNG (e.g., `rand_chacha::ChaCha8Rng`,
-       which is `serde`-stable and reproducible across platforms).
-       The choice is an implementation detail of dia::cluster but
-       must NOT be `rand`'s default (`thread_rng`) since that's
-       non-deterministic.
-     - **K-means++ seeding** to pick K initial centroids.
+       The PRNG is **pinned to `rand_chacha::ChaCha8Rng`** (constructed
+       via `ChaCha8Rng::seed_from_u64(rng_seed)`). NOT a different
+       reproducible PRNG: different PRNGs produce different sequences
+       from the same seed, which means different cluster labels for
+       the same input — a user-observable breaking change. Swapping
+       the PRNG (or upgrading `rand_chacha` to a major version that
+       changes the stream algorithm) is a breaking change requiring
+       a major version bump on dia. `rand`'s `thread_rng` is
+       **never** used because it's seeded from OS entropy and
+       non-deterministic across runs.
+
+     - **K-means++ seeding** (Arthur & Vassilvitskii 2007) — exact
+       algorithm pinned in spec to remove implementer ambiguity:
+       ```
+       Inputs: rows R = [r_0, ..., r_{N-1}] in R^K (the row-normalized
+               eigenvector matrix), K target centroids, ChaCha8Rng `rng`.
+       Output: K initial centroids c_0, ..., c_{K-1} in R^K.
+
+       1. Sample i_0 uniformly from {0, ..., N-1} via rng.
+          c_0 = R[i_0].
+       2. For k = 1..K:
+            a. For each row r_j, compute D_j = min over m in 0..k of
+               ||r_j - c_m||² (squared Euclidean distance to nearest
+               already-chosen centroid).
+            b. Let S = sum(D_j). If S == 0 (all rows coincide with an
+               existing centroid), pick the next centroid uniformly
+               from rows not yet chosen as a centroid.
+            c. Otherwise, sample row index j with probability D_j / S
+               (one ChaCha8Rng draw of `f64` in [0, 1) cumulatively
+               compared against partial sums of D_j / S).
+            d. c_k = R[j].
+       ```
+       Note: tie-handling in step 2c uses the smallest-index row whose
+       cumulative probability mass crosses the sampled value. This is
+       deterministic given the sampled value, so seed determinism
+       carries through.
+
      - **Lloyd's iterations** with these termination conditions, in order:
          a. Convergence: every cluster assignment is unchanged from
             the previous iteration. Equivalently, the per-iteration
@@ -1085,7 +1138,7 @@ For both `cluster_offline` and `Clusterer::submit`:
 | `N == 1` (offline) | Returns `vec![0]` immediately; no clustering |
 | `N == 2` (offline, spectral) | Returns `vec![0, 1]` if similarity < threshold else `vec![0, 0]`; eigengap is degenerate at N=2 so we skip directly to the threshold check |
 | All embeddings identical (offline) | One cluster: `vec![0; N]` |
-| Affinity matrix all-zero (spectral) | `Error::AllDissimilar` |
+| Affinity graph has any isolated node — i.e., some `D_ii < NORM_EPSILON` (spectral) | `Error::AllDissimilar` (this includes the degenerate sub-case where the entire affinity matrix is zero) |
 | NaN in any embedding | `Error::NonFiniteInput` (validated at entry) |
 | All-zero embedding (norm < `NORM_EPSILON`) | `Error::DegenerateEmbedding` (validated at entry; zero IS finite — distinct from NaN/inf) |
 | Eigendecomposition NaN-out | `Error::EigendecompositionFailed` |
@@ -1238,12 +1291,30 @@ ort = { version = "2.0.0-rc.12", optional = true }
 # New in v0.1.0 phase 2
 kaldi-native-fbank = "0.1"
 nalgebra = "0.33"
+# K-means PRNG for spectral clustering (see §5.5 step 8 / §11.9).
+# rand_chacha provides the pinned ChaCha8Rng implementation; rand
+# provides convenience methods (`Rng::random_range`, distributions)
+# on top of `rand_core`'s base `RngCore`/`SeedableRng` traits. Both
+# at default-features=false to skip OS RNG / std features we don't
+# need. (Implementer may drop `rand` if all sampling can be done
+# directly through rand_core's traits, which rand_chacha depends on
+# transitively. Spec-level recommendation: include both.)
+rand = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 ```
 
-Both new deps are unconditional. No new feature flags. The `cluster-spectral`
-feature flag mentioned during brainstorming is not introduced — `nalgebra`
-is needed for the default `OfflineMethod::Spectral`, so gating it would
-break the default path.
+All four new deps are unconditional. No new feature flags. The
+`cluster-spectral` feature flag mentioned during brainstorming is not
+introduced — `nalgebra` is needed for the default
+`OfflineMethod::Spectral`, so gating it would break the default path.
+
+**PRNG version pinning:** `rand_chacha = "0.10"` is pinned at the spec
+level because the K-means spectral clustering output depends on the
+exact byte sequence produced by `ChaCha8Rng`. A future bump to 0.11
+(or any version that changes the streaming algorithm) would change
+cluster labels for the same input — that is a breaking change for
+users who pinned `dia` and expect stable output. See §11.9 for the
+breaking-change policy on PRNG bumps.
 
 ## 8. Streaming flow examples
 
@@ -1280,6 +1351,7 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 **`dia::cluster`:**
 - All §5.5.1 edge cases.
 - Antipodal centroid update: `Clusterer::submit([1,0,...])` then `submit([-1,0,...])` doesn't panic; second submission becomes new speaker (not assigned).
+- Property: `RollingMean` accumulator magnitude bounded — for any sequence of `Clusterer::submit` calls under `RollingMean`, the per-component absolute value of any `SpeakerEntry::accumulator` after `N` assignments is `<= N`. Sanity check on `f32` precision behavior (no infinity, no NaN, no runaway growth beyond unit-vector summation).
 - Degenerate-update lazy-cache: in `RollingMean`, submit `e1`, force-assign `−e1` (via threshold tweak so it's still assigned to the same speaker), assert `cached_centroid` stays at `e1` (the prior good value) rather than NaN.
 - `OverflowStrategy::AssignClosest` does NOT change centroid (only `assignment_count`).
 - `OverflowStrategy::Reject` returns `Error::TooManySpeakers`.
@@ -1334,9 +1406,9 @@ const _: fn() = || {
 - **Determinism**: same caveats as `dia::segment` — set
   `intra_op_num_threads = 1` on both `SegmentModelOptions` and
   `EmbedModelOptions` for bit-exact reproducibility. K-means in spectral
-  clustering uses a deterministic PRNG (`rand_chacha::ChaCha8Rng` or
-  equivalent reproducible PRNG); the default seed is the literal `0`
-  (see §11.9 and §5.5 step 8).
+  clustering uses `rand_chacha::ChaCha8Rng` (pinned by version in §7;
+  swap is a major-version-bump change), seeded from
+  `OfflineClusterOptions::seed` (default `0`). See §11.9 and §5.5 step 8.
 
 ## 11. Resolved contracts
 
@@ -1429,12 +1501,25 @@ Same as rev 1.
   PRNG seed. Same input → same labels, deterministic across runs.
 - `Some(s)`: `s` is used directly.
 
-The PRNG is `rand_chacha::ChaCha8Rng` (or equivalent reproducible
-PRNG); `rand`'s `thread_rng` is **never** used. (See §5.5 step 8.)
+**The PRNG is pinned to `rand_chacha::ChaCha8Rng`.** Constructed via
+`ChaCha8Rng::seed_from_u64(seed)`. `rand`'s `thread_rng` is **never**
+used (seeded from OS entropy → non-deterministic).
 
-Rev-3 change from rev 1: rev 1 proposed deriving the default seed
-from a hash of input bytes. Rev 3 uses the literal `0` instead — same
-determinism, no public commitment to a specific hash function.
+**Breaking-change policy:** swapping the PRNG type, changing the
+seed-derivation function, or upgrading `rand_chacha` to a version
+that alters its keystream is a user-observable behavioral change
+(same input → different cluster labels). All three require a major
+version bump on dia. The dia team commits to NOT make this change
+between minor versions.
+
+Rev-3 change from rev 2: rev 2 proposed deriving the default seed
+from a hash of input bytes (FxHash). Rev 3 uses the literal `0`
+instead — same determinism, no public commitment to a specific hash
+function.
+
+Rev-4 change: pinned `rand_chacha::ChaCha8Rng` exactly (rev 3 said
+"or equivalent reproducible PRNG," which left a backdoor for
+breaking output stability).
 
 ### 11.10 OverflowStrategy semantics
 
@@ -1478,10 +1563,15 @@ From this brainstorm:
   (rev-2; no defensible default σ for v0.1.0).
 - Eigengap K is capped at `min(N - 1, MAX_AUTO_SPEAKERS = 15)` (rev-2
   fix; rev-1 was unbounded → could pick K = N).
-- All-zero affinity matrix in spectral → `Error::AllDissimilar`
-  precondition check (rev-2).
+- Spectral precondition: `Error::AllDissimilar` is returned if any
+  degree `D_ii < NORM_EPSILON` (rev-3 tightened from rev-2's narrower
+  "all-of-A < eps" check; isolated nodes are now caught even when
+  the rest of the affinity graph is non-degenerate).
 - K-means uses a deterministic seed: explicit `seed: Option<u64>` on
-  `OfflineClusterOptions`; default derives from input hash (rev-2 fix).
+  `OfflineClusterOptions`; default is the literal `0` (rev-3
+  simplified rev-2's hash-of-input-bytes proposal). PRNG pinned to
+  `rand_chacha::ChaCha8Rng` (rev-4 tightened from rev-3's "or
+  equivalent reproducible PRNG").
 - `nalgebra` always in deps (no feature flag).
 - `NORM_EPSILON = 1e-12` matches Python's value (verified in
   `findit-speaker-embedding/embedder.py:85`).
@@ -1525,8 +1615,8 @@ From this brainstorm:
     tail-anchor reach-back was irrelevant. That tightening was
     incorrect; it underflows on real workloads. Rev 3 restores the
     `dia::segment::WINDOW_SAMPLES` bound (640 KB).
-- **Revision 3** (2026-04-26, this document): incorporates second
-  adversarial-review feedback.
+- **Revision 3** (2026-04-26): incorporates second adversarial-review
+  feedback.
   - **Critical fix (T1-A):** §5.7 / §11.5 audio buffer trim bound
     reverted from `EMBED_WINDOW_SAMPLES` to
     `dia::segment::WINDOW_SAMPLES`; steady-state memory restored to
@@ -1569,6 +1659,64 @@ From this brainstorm:
   - **Misc:** §1 wording (`findit-speaker-embedding` does not provide
     clustering — clustering layer is "novel," not "deferred"), free
     function `cosine_similarity` rationale.
+  - **Agglomerative distance clamped to [0, 1] (NEW in rev 3, missed
+    from the rev-3 entry above and surfaced by review 3):** §5.6
+    step 1 changed from `D_ij = 1 - cos_similarity(e_i, e_j)` (range
+    `[0, 2]`) to `D_ij = 1 - max(0, e_i · e_j)` (range `[0, 1]`,
+    ReLU-clamped to match spectral's affinity convention). Affects
+    cluster output when any pair has negative cosine similarity:
+    rev-2 saw `dist = 1.5` for cos = -0.5; rev-3 sees `dist = 1.0`.
+    Threshold semantics (`stop if dist >= 1 - threshold`) are
+    unchanged in form but the underlying distance space is now
+    bounded — pre-existing implementations following rev-2's formula
+    would silently produce different clusters when "upgraded" to
+    rev 3.
+- **Revision 4** (2026-04-26, this document): incorporates third
+  adversarial-review feedback. Implementation-blocking gaps closed.
+  - **§7 dependencies (item 42):** added `rand = "0.10"` and
+    `rand_chacha = "0.10"` (with `default-features = false`).
+    Without these, §5.5 step 8's pinned PRNG was un-implementable
+    from §7 alone. (Reviewer suggested "0.9", but the current
+    crates.io versions for both are 0.10 as of 2026-04-26 — used
+    those.)
+  - **K-means++ algorithm pinned (item 43):** §5.5 step 8 now spells
+    out the Arthur & Vassilvitskii 2007 D²-weighted seeding algorithm
+    explicitly (uniform first centroid; subsequent centroids sampled
+    with probability ∝ squared distance to nearest existing
+    centroid; tie-break via smallest-index cumulative-mass crossing).
+    Without this, two implementations could produce different cluster
+    labels from the same input + seed (k-means|| variant,
+    farthest-first traversal, uniform initialization, etc.).
+  - **PRNG pinning tightened (item 44):** §5.5 / §11.9 / §10 now pin
+    `rand_chacha::ChaCha8Rng` exactly, drop "or equivalent
+    reproducible PRNG," and add an explicit breaking-change-policy
+    statement (PRNG swap or `rand_chacha` major-version bump that
+    changes keystream → major version bump on dia).
+  - **§13 rev-3 entry corrected (item 45):** added the missing
+    agglomerative distance-clamp note above (the change shipped in
+    rev 3 but wasn't in rev 3's history bullet list).
+  - **§11.9 attribution fix (item 46):** "rev-3 change from rev 2"
+    not "from rev 1" (the hash-of-input-bytes seed proposal was
+    introduced in rev 2, not rev 1).
+  - **§14 count fix (item 47):** review-2 paragraph rephrased to
+    avoid undercount — "all action items in review 2 are accepted"
+    instead of "twelve."
+  - **§1 wording (item 48):** "improves the long-clip handling" →
+    "with one deliberate divergence: long-clip handling uses
+    sliding-window mean (see §5.1 for the trade-off)." Removes the
+    value-judgment framing; matches §5.1's "Important divergence"
+    callout.
+  - **§9 property test (item 49):** added "RollingMean accumulator
+    bounded magnitude" property test (assert `||accumulator|| <= N`
+    after `N` submissions of unit-norm embeddings).
+  - **§5.4 cached_centroid invariant comment (T3-B):** added a
+    one-line comment on the field documenting that
+    `||cached_centroid|| > NORM_EPSILON` always holds (initialized
+    from a unit vector; degenerate updates leave it unchanged).
+  - **§15 float32 precision item (T3-C):** added action item to
+    investigate `f32` precision impact on `RollingMean` for sessions
+    with `N > 10⁶` assignments (not blocking v0.1.0; flagged for
+    v0.1.1+).
 
 ## 14. Findings rejected from reviews
 
@@ -1594,7 +1742,7 @@ For traceability across both adversarial-review rounds.
 
 ### From review 2 (rev 2 → rev 3)
 
-- **None outright rejected.** All twelve items in the second review
+- **None outright rejected.** All action items in the second review
   are accepted in some form, either as direct spec edits (T1-A, T1-B,
   cached centroid, fast paths, validation timing, K-means seed,
   builder parity, `clear()` rustdoc, Embedding invariant,
@@ -1604,6 +1752,14 @@ For traceability across both adversarial-review rounds.
   shipping, we noted the difference inline (e.g., reviewer wrote
   `NonFiniteInput` for zero-norm cases; we split that into a separate
   `DegenerateEmbedding` variant since zero IS finite).
+
+### From review 3 (rev 3 → rev 4)
+
+- **None outright rejected.** All eight items in the third review are
+  accepted as rev-4 spec edits (items 42–49 above; T3-B and T3-C also
+  applied). Items #42 and #43 were the only implementation-blocking
+  gaps; the rest are documentation polish and are now folded into the
+  spec rather than the implementation patch list.
 
 ## 15. Action list for v0.1.1+ follow-ups
 
@@ -1632,3 +1788,5 @@ These don't block v0.1.0 but should be tracked:
 | 39 | (rev-2 review) Property: spectral clustering is invariant under input permutation (cluster *count* and *purity* must match, even if label values differ). Test with shuffle.                                          | medium |
 | 40 | (rev-2 review) Telemetry: optional `tracing` spans inside `Diarizer::process_samples` for per-activity embedding-and-clustering timings. Gated behind a feature flag to avoid forcing the dep on no-tracing users.    | low |
 | 41 | (rev-2 review) Verify `kaldi-native-fbank` numerical agreement with the C++ `knf-rs` binding on a 30-second test clip. If divergent beyond 1e-3, investigate which is more correct vs Python's torchaudio reference. | medium |
+| 42 | (rev-3 review T3-C) Float32 precision impact on `RollingMean` for sessions with `N > 10⁶` assignments — once `||accumulator||` reaches ~10⁶, per-component lower bits of the `f32` mantissa (≈7 decimal digits) can drift, biasing the L2-normalized centroid direction. Investigate periodic accumulator renormalization (e.g., `accumulator /= ||accumulator||` every 10 000 assignments to keep magnitude near 1) or upgrading the accumulator to `f64` internally. Not a v0.1.0 issue (typical sessions are well under 10⁶); flagged for tracking.                                                                                                                                                                                       | low |
+| 43 | (rev-3 review item 49) Cross-platform K-means determinism CI test — assert `cluster_offline` produces byte-identical cluster labels on macOS / Linux / x86_64 / aarch64 for the same input + seed. Confirms `nalgebra`'s eigensolver and `ChaCha8Rng`'s sampling produce truly cross-platform-stable output. Distinct from item 32 (which checks K-means alone); this checks the full spectral pipeline end-to-end.                                                                                                                                                                                                                                                                                                                                  | medium |
