@@ -1,18 +1,69 @@
 # dia — embed + cluster + Diarizer design (v0.1.0 phase 2)
 
-**Revision 7** (2026-04-26, VAD prerequisite + richer DiarizedSpan).
-**Status:** ready for implementation (pending §15 #43 pre-impl spike).
+**Revision 8** (2026-04-26, post-fifth-adversarial-review + correctness fixes).
+**Status:** ready for implementation (pending §15 #43 pre-impl spike + §15 #52 ChaCha keystream stability).
 **Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`,
 **plus a v0.X bump of `dia::segment` to expose per-window per-speaker per-frame
 raw probabilities** (required for reconstruction):
 - `dia::segment` v0.X — adds `Action::SpeakerScores` variant + marks `Action` as `#[non_exhaustive]`
-- `dia::embed` — speaker fingerprint generation with `exclude_overlap` masking
+- `dia::embed` — speaker fingerprint generation with **`embed_masked` (rev-8) and `embed_weighted` primitives**
 - `dia::cluster` — cross-window speaker linking (online streaming + offline batch)
 - `dia::Diarizer` — top-level orchestrator with **pyannote-style per-frame
   reconstruction** (overlap-add cluster-activation stitching, count-bounded
   argmax, per-cluster RLE-to-spans). Output is one `DiarizedSpan` per closed
   speaker turn — not per-(window, speaker).
 
+> **Revision 8 fixes load-bearing correctness errors** flagged by the
+> fifth adversarial review:
+> - **T1-A (CRITICAL):** §5.8's `exclude_overlap` mechanism was wrong.
+>   Rev-7 routed it through `embed_weighted`, which §5.3 says collapses
+>   to a no-op for clips ≤ 2 s (the most common VAD-filtered activity
+>   length). Pyannote actually does **gather-and-embed**: drop the
+>   masked-out frames before feature extraction, run ONNX on the
+>   shorter cleaned signal (verified at
+>   `pyannote/audio/pipelines/speaker_verification.py:568-619`,
+>   `ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__`). Rev-8 adds a
+>   new `EmbedModel::embed_masked(samples, keep_mask)` primitive that
+>   gathers retained samples, zero-pads to `EMBED_WINDOW_SAMPLES`, and
+>   embeds. §5.8 routes through it. `embed_weighted` is preserved for
+>   callers who want soft per-sample weights (e.g., direct VAD
+>   probability streams).
+> - **T1-C (HIGH):** the per-frame rate was wrong throughout §5.8 /
+>   §4.4 / §5.10. `pyannote/segmentation-3.0` produces 589 frames per
+>   `WINDOW_SAMPLES = 160 000`, i.e. ≈ 271.65 samples/frame ≈ 16.97 ms/frame
+>   ≈ 58.9 fps — verified by reading `dia::segment::stitch::frame_to_sample`
+>   (the live constant `WINDOW_SAMPLES * frame_idx / FRAMES_PER_WINDOW`).
+>   Rev-7 said "100 fps / 160 samples / 10 ms" repeatedly, which is
+>   wrong. Rev-8 corrects: `MIN_CLEAN_FRAMES = ceil(MIN_CLIP_SAMPLES /
+>   SAMPLES_PER_FRAME) = ceil(400/271.65) = 2`; the per-frame
+>   accumulator steady-state is ≈ 589, not 1000.
+> - **T2-A (HIGH):** `average_activation` normalization in §5.11 used
+>   the warm-up-trimmed `chunk_count` from §5.10's speaker-count
+>   bookkeeping, but pyannote's `Inference.aggregate(skip_average=True)`
+>   maintains its own un-trimmed overlapping-chunk count
+>   (`pyannote/audio/core/inference.py:602-604`). Rev-8 separates the
+>   two counters in `FrameCount`: `activation_chunk_count` (no warm-up,
+>   for activation normalization) and `count_chunk_count` (warm-up
+>   trimmed, for speaker-count rounding only).
+> - **T2-B/C/D (HIGH):** pseudocode bugs in the new §5.9-§5.11
+>   reconstruction state machine — `emit_finalized_frames` flush could
+>   panic at end-of-stream (`pop_front()` on an empty `VecDeque`);
+>   `window_starts` was referenced but never declared in
+>   `ReconstructState`; `activity_clean_flags` insertion was missing
+>   from §5.8's pseudocode. All three corrected in rev-8.
+> - **T1-B (rejected):** the reviewer claimed pyannote's default
+>   clusterer is `HiddenMarkovModelClustering`, citing
+>   `speaker_diarization.py:115`. Verified against the actual source:
+>   line 115 is part of an unrelated docstring; the actual default at
+>   `speaker_diarization.py:210` is `clustering: str = "VBxClustering"`.
+>   §15 #44 was correct. Pushback documented in §14.
+>
+> Plus a fan-out of polish: §3.1 reference fix, `min_duration_off`
+> wording fix in §4.4, §12 decision log refresh, §14 review-5..7
+> rejected sections, §11.13 (NEW) on `slot_to_cluster` eviction, NaN
+> handling in §5.11 argmax (`total_cmp`), u64 in frame arithmetic, and
+> §15 #52 (ChaCha8Rng byte-fixture regression test).
+>
 > **Revision 7 nails down the VAD-prerequisite contract** that's been
 > implicit since the brainstorm. The user's pipeline is `audio decoder
 > → resample → VAD → dia → downstream`, so dia's input is **VAD-filtered
@@ -143,11 +194,25 @@ same person as slot 0 in window 6). For real-world diarization output —
 
 The Python project that inspired this work is `findit-speaker-embedding`
 (WeSpeaker ResNet34 ONNX, kaldi-compatible fbank, 200-frame fixed input,
-256-d L2-normalized output). dia v0.1.0 ports the embedding pipeline
-faithfully, with one deliberate divergence: long-clip handling uses
-sliding-window mean instead of Python's center-crop (see §5.1 for the
-trade-off). Numerical-parity-sensitive callers should review §5.1
-before adopting. The clustering layer is **novel** —
+256-d L2-normalized output) — and, after the rev-6 reconstruction scope
+expansion, `pyannote.audio`'s `SpeakerDiarization` pipeline. dia v0.1.0
+matches the algorithm shape of both faithfully but **diverges in
+several documented places**:
+
+| Divergence | Why | Where |
+|---|---|---|
+| Long-clip embedding aggregation: sliding-window mean instead of pyannote's gather-then-embed | Our fixed-200-frame fbank model can't accept variable-length features; pyannote's WeSpeaker ONNX export does | §5.1 (general path) |
+| `exclude_overlap` mask: applied at sample-rate before fbank, not frame-rate after fbank | Same fixed-fbank-shape constraint | §5.8 (rev-6 / rev-8) |
+| Online streaming clustering instead of pyannote's batch HAC / VBx / HMM-GMM | Streaming is the whole point of dia | §5.4 |
+| Default offline clusterer: Spectral, not pyannote's VBx | VBx needs PLDA + bundled weights + batch-only; deferred to v0.2 (§15 #44) | §5.5 |
+| K-means++ tie-break: smallest cluster-id wins (deterministic) | Pyannote uses `np.argsort` (implementation-defined for ties); ours is byte-stable | §5.5 step 8 |
+| `Action::SpeakerScores` exposed; reconstruction runs externally to segment | Streaming requires per-window emission of raw probs; pyannote's pipeline holds them internally | §3 (rev-6 segment v0.X bump) |
+| Reconstruction emits per-cluster runs as they close, not as a batch `Annotation` at end-of-stream | Streaming output | §5.11 |
+| No `min_duration_on/off` merging | Deferred to v0.1.1 (§15 #48) | §4.4, §15 #48 |
+
+Numerical-parity-sensitive callers should review the divergence
+table above plus §5.1 / §5.8 before adopting. The clustering layer
+itself is **novel** vs `findit-speaker-embedding` —
 `findit-speaker-embedding` does not provide one; it stops at producing
 fingerprints and leaves cross-window linking to its caller.
 
@@ -264,8 +329,9 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 - Pure-Rust `kaldi-native-fbank` for feature extraction
 - Variable-length clip handling: zero-pad < 2 s, **sliding-window mean for > 2 s**
   (this is a deliberate IMPROVEMENT over Python's center-crop — see §5.1)
-- Voice-weighted variant accepting caller-provided per-sample voice probabilities (rev-6: this is the same primitive used by Diarizer's `exclude_overlap` mask path — see §5.8)
-- Two-tier API: low-level (raw `embed_features` / `embed_features_batch`) + high-level (`embed` / `embed_with_meta` / `embed_weighted` / `embed_weighted_with_meta`)
+- Voice-weighted variant accepting caller-provided per-sample voice probabilities (rev-6: useful for direct VAD-probability streams; **NOT** used by Diarizer's `exclude_overlap` after rev-8 — see `embed_masked` below)
+- **Rev-8: binary-mask variant** (`embed_masked` / `embed_masked_with_meta`): gather samples where `keep_mask[i] == true`, drop others, then run the standard embedding pipeline. Used by `Diarizer::exclude_overlap` (§5.8) to match pyannote's gather-and-embed mechanism.
+- Two-tier API: low-level (raw `embed_features` / `embed_features_batch`) + high-level (`embed` / `embed_with_meta` / `embed_weighted` / `embed_weighted_with_meta` / `embed_masked` / `embed_masked_with_meta`)
 - `Embedding` newtype with `.similarity()` and `.normalize_from(raw)` methods
 - Generic `EmbeddingMeta<A, T>` with `()` defaults
 - `EmbeddingResult` carries observability fields (`windows_used`, `total_weight`, `source_duration`)
@@ -454,6 +520,10 @@ pub enum Error {
     #[error("voice_probs.len() = {weights_len} must equal samples.len() = {samples_len}")]
     WeightShapeMismatch { samples_len: usize, weights_len: usize },
 
+    /// Rev-8: `keep_mask.len()` must equal `samples.len()` for `embed_masked`.
+    #[error("keep_mask.len() = {mask_len} must equal samples.len() = {samples_len}")]
+    MaskShapeMismatch { samples_len: usize, mask_len: usize },
+
     /// All windows had near-zero voice-probability weight; the weighted
     /// average is undefined. Almost always caller error.
     #[error("all windows had effectively zero voice-activity weight")]
@@ -549,11 +619,45 @@ impl EmbedModel {
         &mut self, samples: &[f32], meta: EmbeddingMeta<A, T>,
     ) -> Result<EmbeddingResult<A, T>, Error>;
 
+    /// Soft per-sample weighting. Each element of `voice_probs` in `[0.0, 1.0]`
+    /// scales its corresponding sample's contribution. For clips ≤ 2 s
+    /// (single-window path), the weight collapses under L2-normalization
+    /// — see §5.3 — so this primitive is best for the multi-window
+    /// (>2 s) path or for callers passing direct VAD-probability streams.
+    /// **NOT used for `Diarizer::exclude_overlap`** — see `embed_masked`
+    /// below for the binary-keep-mask path.
     pub fn embed_weighted(
         &mut self, samples: &[f32], voice_probs: &[f32],
     ) -> Result<EmbeddingResult, Error>;
     pub fn embed_weighted_with_meta<A, T>(
         &mut self, samples: &[f32], voice_probs: &[f32], meta: EmbeddingMeta<A, T>,
+    ) -> Result<EmbeddingResult<A, T>, Error>;
+
+    /// **Rev-8.** Binary keep-mask: gather samples where `keep_mask[i] ==
+    /// true`, drop others, then run the standard embedding pipeline (§5.1)
+    /// on the gathered audio. Matches pyannote's
+    /// `ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__` masked path
+    /// (`pyannote/audio/pipelines/speaker_verification.py:568-619`),
+    /// adapted for our fixed-200-frame fbank: pyannote gathers at frame
+    /// rate after fbank; we gather at sample rate before fbank. The two
+    /// are numerically equivalent up to fbank-window-boundary effects when
+    /// mask transitions land on 25 ms boundaries (the kaldi fbank window
+    /// width). Documented divergence; see §5.8.
+    ///
+    /// **Errors:**
+    /// - `Error::MaskShapeMismatch` if `keep_mask.len() != samples.len()`.
+    /// - `Error::InvalidClip` if the gathered length < `MIN_CLIP_SAMPLES`.
+    /// - `Error::NonFiniteInput` if any sample is NaN/inf.
+    ///
+    /// **Caller responsibility:** if `embed_masked` returns `InvalidClip`
+    /// because the gathered length was too short, the caller may decide
+    /// to fall back (e.g., re-call with a less-restrictive mask). The
+    /// `Diarizer` does this internally — see §5.8 fallback rule.
+    pub fn embed_masked(
+        &mut self, samples: &[f32], keep_mask: &[bool],
+    ) -> Result<EmbeddingResult, Error>;
+    pub fn embed_masked_with_meta<A, T>(
+        &mut self, samples: &[f32], keep_mask: &[bool], meta: EmbeddingMeta<A, T>,
     ) -> Result<EmbeddingResult<A, T>, Error>;
 }
 ```
@@ -889,9 +993,12 @@ pub struct CollectedEmbedding {
 /// when its current per-frame run closes — i.e., the first frame
 /// where cluster `K` is NOT in the top-`count` finalized frames after
 /// having been in them in the immediately previous finalized frame.
-/// Adjacent same-cluster runs separated by a gap less than the
-/// configured `min_duration_off` (matches pyannote's
-/// `to_annotation(min_duration_off=...)`) are merged.
+/// **Rev-8: there is NO `min_duration_off` merging in v0.1.0.**
+/// Adjacent same-cluster runs separated by ≥ 1 finalized-frame gap
+/// emit as separate spans. Pyannote's `to_annotation(min_duration_off
+/// =...)` merging is deferred to v0.1.1 — see §15 #48. Callers who
+/// want short-gap merging today can post-process the emitted span
+/// stream themselves with a 1-element lookback (≈ 5 lines).
 #[derive(Debug, Clone, Copy)]
 pub struct DiarizedSpan {
     range: TimeRange,
@@ -987,9 +1094,12 @@ impl Diarizer {
     pub fn pending_inferences(&self) -> usize;
     pub fn buffered_samples(&self) -> usize;
     /// Number of un-finalized frames currently held in the per-frame
-    /// per-cluster activation accumulator. Steady-state ≈ 1000
-    /// (10 s × 100 fps); spikes during pumps that schedule multiple
-    /// new windows. Useful for backpressure detection. (Rev-6.)
+    /// per-cluster activation accumulator. Steady-state ≈ 589
+    /// (one full window's worth of frames at the model's ≈ 58.9 fps);
+    /// spikes during pumps that schedule multiple new windows. Useful
+    /// for backpressure detection. (Rev-6; rev-8 corrected the
+    /// frame-rate math from "100 fps × 10 s = 1000" to "58.9 fps,
+    /// which gives ≈ 589 frames per 10 s window.")
     pub fn buffered_frames(&self) -> usize;
     /// Cumulative count of samples passed to `process_samples` since
     /// the last `clear()` (or since construction). Monotonic, never
@@ -1614,14 +1724,47 @@ compositions or future segment regressions.
 ### 5.8 Diarizer `exclude_overlap` embedding mask
 
 Matches `pyannote/audio/pipelines/speaker_diarization.py:375-425` (the
-`get_embeddings(file, binary_segmentations, exclude_overlap=True)` path).
+`get_embeddings(file, binary_segmentations, exclude_overlap=True)`
+caller path) plus `pyannote/audio/pipelines/speaker_verification.py:568-619`
+(`ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__`'s actual mask
+mechanism).
 
 **Purpose.** When extracting speaker `S`'s embedding from a window that
 also contains another speaker, the audio at frames where multiple
 speakers are simultaneously active "contaminates" S's fingerprint with
-the other speaker's voice. Masking those frames before aggregation
-gives a cleaner embedding, which improves cluster separability — the
-single largest pre-clustering quality lever in pyannote's pipeline.
+the other speaker's voice. Masking those frames before feature
+extraction gives a cleaner embedding, which improves cluster
+separability — the single largest pre-clustering quality lever in
+pyannote's pipeline.
+
+**Mechanism (rev-8, corrected from rev-6/7).** Pyannote's
+`ONNXWeSpeakerPretrainedSpeakerEmbedding` does **gather-and-embed**:
+interpolate the input mask to fbank-frame rate, binarize at 0.5,
+boolean-index-gather the fbank features (drop masked-out frames), then
+run ONNX inference on the cleaned (variable-length) features.
+
+Rev-6/7 mistakenly routed our path through `embed_weighted`, which is
+a different primitive — per-sample soft-weighted aggregation that
+collapses to a no-op for clips ≤ 2 s under L2-normalization (§5.3).
+That made `exclude_overlap = true` silently ineffective for the most
+common case (VAD-filtered single-utterance activities, typically
+0.5-3 s). The rev-5 adversarial review caught this. Rev-8 routes
+through `EmbedModel::embed_masked` (§4.2 rev-8 addition) which gathers
+samples at sample-rate before fbank, then embeds normally.
+
+**Numerical divergence from pyannote (documented).** Pyannote gathers
+at frame-rate (after fbank); we gather at sample-rate (before fbank).
+Equivalent up to fbank-window-boundary effects when mask transitions
+land on 25 ms boundaries (the kaldi fbank window width). Differences
+manifest only when the mask transitions in the middle of a fbank
+window — the gathered audio is contiguous in our path, vs the
+gathered features are contiguous in pyannote's.
+
+**Frame-rate verified.** `dia::segment::stitch::frame_to_sample`
+defines `WINDOW_SAMPLES * frame_idx / FRAMES_PER_WINDOW = 160 000 *
+frame_idx / 589`, so a frame is ≈ 271.65 samples, ≈ 16.97 ms,
+≈ 58.9 fps — **NOT** 100 fps / 10 ms / 160 samples (rev-6/7 prose
+was wrong; rev-5 review caught this).
 
 **Algorithm** (per pump, per window `W` that just had its activities
 emitted):
@@ -1632,90 +1775,115 @@ Inputs (drained from `Segmenter`):
                           (from Action::SpeakerScores)
   activities[]: Vec<SpeakerActivity>
                 (from Action::Activity emissions for window W)
+  window_start: u64    (W.window_start, absolute samples; first sample of frame 0)
 
-For each frame f in 0..FRAMES_PER_WINDOW:
-    binarized[f] = [raw_probs[slot][f] > binarize_threshold for slot in 0..MAX_SPEAKER_SLOTS]
-    n_active[f] = sum(binarized[f])    // 0, 1, 2, or 3
+# Step 1: per-frame binarized speaker masks (frame-rate).
+binarized: [[bool; MAX_SPEAKER_SLOTS]; FRAMES_PER_WINDOW]
+for f in 0..FRAMES_PER_WINDOW:
+    for s in 0..MAX_SPEAKER_SLOTS:
+        binarized[f][s] = raw_probs[s][f] > binarize_threshold
 
-For each activity in activities:
+# Step 2: per-frame "n_active" (number of slots active at this frame).
+n_active: [u8; FRAMES_PER_WINDOW]
+for f in 0..FRAMES_PER_WINDOW:
+    n_active[f] = binarized[f].iter().filter(|&&b| b).count() as u8
+
+# Step 3: per-activity mask construction + embedding.
+for activity in activities:
     let s = activity.speaker_slot
-    speaker_mask[f]   = 1.0 if binarized[f][s]                              else 0.0
-    clean_mask[f]     = 1.0 if binarized[f][s] && n_active[f] == 1          else 0.0
+    let s0 = activity.range.start    // absolute samples
+    let s1 = activity.range.end
 
-    # Convert frame-level mask to sample-level mask aligned with the
-    # absolute-sample range of `activity`. Each frame covers
-    # SAMPLES_PER_FRAME = 160 samples (10 ms @ 16 kHz). Replicate.
-    let activity_samples = audio_buffer[activity.range]
-    let activity_frame_lo = frame_index_of(activity.range.start)
-    let activity_frame_hi = frame_index_of(activity.range.end)
+    # Per-frame masks (frame-rate, indexed in [0, FRAMES_PER_WINDOW)):
+    speaker_mask_frames: [bool; FRAMES_PER_WINDOW]
+    clean_mask_frames:   [bool; FRAMES_PER_WINDOW]
+    for f in 0..FRAMES_PER_WINDOW:
+        speaker_mask_frames[f] = binarized[f][s]
+        clean_mask_frames[f]   = binarized[f][s] && n_active[f] == 1
 
-    let clean_count = sum(clean_mask[activity_frame_lo..activity_frame_hi])
-    let used_clean = clean_count >= MIN_CLEAN_FRAMES
-    let used_mask = if used_clean { &clean_mask } else { &speaker_mask }
+    # Convert per-frame masks to per-sample keep_masks aligned with the
+    # activity's absolute-sample range [s0, s1).
+    # Frame f covers absolute samples
+    #     [window_start + frame_to_sample(f),
+    #      window_start + frame_to_sample(f + 1)).
+    # We expand the frame mask, restricted to overlap with [s0, s1).
+    let activity_len = (s1 - s0) as usize
+    let mut speaker_keep = vec![false; activity_len]
+    let mut clean_keep   = vec![false; activity_len]
+    for f in 0..FRAMES_PER_WINDOW:
+        let frame_s_start_abs = window_start + frame_to_sample(f as u32) as u64
+        let frame_s_end_abs   = window_start + frame_to_sample((f + 1) as u32) as u64
+        let lo_abs = frame_s_start_abs.max(s0)
+        let hi_abs = frame_s_end_abs.min(s1)
+        if lo_abs >= hi_abs { continue; }
+        let lo_in_act = (lo_abs - s0) as usize
+        let hi_in_act = (hi_abs - s0) as usize
+        if speaker_mask_frames[f] { speaker_keep[lo_in_act..hi_in_act].fill(true) }
+        if clean_mask_frames[f]   { clean_keep  [lo_in_act..hi_in_act].fill(true) }
 
-    let voice_probs: Vec<f32> = expand_frame_mask_to_samples(
-        used_mask, activity_frame_lo, activity_frame_hi
-    )
-    // voice_probs.len() == activity_samples.len()
+    # Decide which mask: clean if it would gather enough samples, else fall back.
+    let clean_kept_count = clean_keep.iter().filter(|&&b| b).count()
+    let used_clean = clean_kept_count >= MIN_CLIP_SAMPLES as usize
+    let keep_mask = if used_clean { &clean_keep } else { &speaker_keep }
 
-    let embedding = embed_model.embed_weighted(activity_samples, &voice_probs)?
+    # Embed via gather-and-pad (§4.2 rev-8 embed_masked).
+    let activity_samples = &audio_buffer[s0 - audio_base ..= s1 - audio_base - 1]
+    let result = match embed_model.embed_masked(activity_samples, keep_mask) {
+        Ok(r) => r,
+        Err(Error::InvalidClip { .. }) if used_clean => {
+            # Clean mask was theoretically large enough but the gathered
+            # audio after sample-rate gather was too short (e.g., due to
+            # boundary-rounding: clean_keep counts True values, but
+            # MIN_CLIP_SAMPLES checks actual gathered length). Fall back
+            # to speaker-only mask. This re-call is the only way the
+            # ≤ 2 s + heavy-overlap case becomes an InvalidClip.
+            embed_model.embed_masked(activity_samples, &speaker_keep)?
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let embedding = *result.embedding()
     let assignment = clusterer.submit(&embedding)?
 
-    // Track for reconstruction (§5.9) and observability:
-    slot_to_cluster.insert((W.id, s), assignment.speaker_id)
+    # Track for reconstruction (§5.9), span-quality metrics (§5.11), and observability.
+    slot_to_cluster.insert((W.id, s), assignment.speaker_id())
+    activity_clean_flags.insert((W.id, s), used_clean)
     if collect_embeddings:
         collected_embeddings.push(CollectedEmbedding {
             range: activity.range,
             embedding,
-            online_speaker_id: assignment.speaker_id,
+            online_speaker_id: assignment.speaker_id(),
             speaker_slot: s,
             used_clean_mask: used_clean,
         })
 ```
 
-**`MIN_CLEAN_FRAMES`** is the equivalent of pyannote's `min_num_frames`
-(`speaker_diarization.py:382`). Pyannote computes it from the embedding
-model's minimum-input-samples. For our purposes:
+**`MIN_CLIP_SAMPLES`** as the threshold (rev-8 simplification). Rev-7
+introduced a separate `MIN_CLEAN_FRAMES` constant computed from
+`MIN_CLIP_SAMPLES / SAMPLES_PER_FRAME`. Rev-8 drops it: the
+gather-and-pad path lets us check the gathered-sample count directly,
+which is exactly the constraint that matters (`embed_masked` returns
+`InvalidClip` if gathered < `MIN_CLIP_SAMPLES`). The frame-count
+threshold was a proxy that would have been numerically equivalent
+(`ceil(400 / 271.65) = 2` frames) but is now redundant.
 
-```rust
-/// Minimum number of "clean" frames (where this speaker is the *only*
-/// active speaker) for `exclude_overlap` to use the clean mask. If
-/// fewer than this many frames are clean, fall back to the speaker-only
-/// mask (which is a superset of the clean mask).
-///
-/// = ceil(MIN_CLIP_SAMPLES / SAMPLES_PER_FRAME)
-/// = ceil(400 / 160) = 3 frames (= 30 ms @ 100 fps).
-///
-/// 30 ms is comfortably above pyannote's "kaldi window" minimum
-/// (25 ms), and matches the floor below which `embed_weighted` would
-/// reject as `Error::InvalidClip`.
-pub const MIN_CLEAN_FRAMES: u32 = 3;
+**Pyannote's equivalent.** `pyannote/audio/pipelines/speaker_verification.py:611-612`:
+```python
+if masked_feature.shape[0] < self.min_num_frames:
+    continue   # skip the embedding for this (chunk, speaker)
 ```
+We diverge: rev-8 falls back to the speaker-only mask rather than
+skipping. Skipping would lose the embedding for activities with very
+short clean regions, which is precisely the case where overlap-aware
+masking matters most. Falling back to the speaker-only mask preserves
+the embedding (with some contamination) and lets `clean_mask_fraction`
+in the output `DiarizedSpan` (§4.4) signal the quality degradation to
+the caller.
 
-So if fewer than 3 frames in the activity range have *only* this speaker
-active, fall back to the speaker-only mask (where any frame with this
-speaker active is included, even if others are too).
-
-**Divergence from pyannote.** Pyannote's mask is consumed *inside* the
-PyTorch embedding model (it operates on the model's intermediate
-features). Our mask is applied at the audio-sample / per-window level
-via `embed_weighted`'s sliding-window aggregation:
-- For clips ≤ `EMBED_WINDOW_SAMPLES` (= 32 000 samples = 2 s): one
-  window, weight = mean of voice_probs over that window. Single scalar
-  weight on a single embedding cancels under L2-normalization, so the
-  result is identical to `embed(samples)` (matching pyannote's behavior
-  in this case where their model also sees the full clip with frames
-  weighted-zero where the mask is 0).
-- For clips > 2 s: sliding-window mean weighted by per-window mean
-  voice_probs (§5.2). This **diverges** from pyannote's "model-internal
-  weighted aggregation" but is the closest streaming-friendly
-  approximation given that the WeSpeaker ONNX export does not accept a
-  mask input. Documented as a known divergence in §15.
-
-**Observability.** `CollectedEmbedding::used_clean_mask` lets callers
-detect heavy-overlap audio: if a high fraction of activities fell back
-to the speaker-only mask, embedding quality (and downstream cluster
-purity) is likely degraded.
+**Observability.** `CollectedEmbedding::used_clean_mask` and
+`DiarizedSpan::clean_mask_fraction` (§4.4) let callers detect
+heavy-overlap audio: if a high fraction of activities fell back to the
+speaker-only mask, embedding quality (and downstream cluster purity)
+is likely degraded for that span.
 
 ### 5.9 Per-frame per-cluster activation stitching
 
@@ -1758,11 +1926,46 @@ struct ReconstructState {
 }
 
 struct FrameCount {
-    /// Sum across windows of (count of speakers > threshold at this frame).
-    /// Aggregated via overlap-add MEAN (so divide by chunk_count on finalize).
+    // ── Activation bookkeeping (no warm-up trim, used in §5.11
+    //     average_activation normalization). ──
+    /// Number of windows whose un-trimmed frames contributed to this
+    /// frame's per-cluster activation accumulator. **NEVER** identical
+    /// to `count_chunk_count`; the activation accumulator includes
+    /// warm-up frames whereas the speaker-count accumulator excludes
+    /// them. Rev-7 conflated these two; rev-8 split them per
+    /// review-7 T2-A, matching pyannote's
+    /// `Inference.aggregate(skip_average=True)` overlapping_chunk_count
+    /// independence from `speaker_count`'s separate trimmed count.
+    activation_chunk_count: u32,
+
+    // ── Speaker-count bookkeeping (warm-up trimmed, used in §5.10 +
+    //     §5.11 count-bounded argmax). ──
+    /// Sum across windows of (count of speakers > threshold at this
+    /// frame), only from frames OUTSIDE each contributing window's
+    /// warm-up margin (see §5.10).
     count_sum: f32,
-    /// Number of windows that contributed to this frame.
-    chunk_count: u32,
+    /// Number of windows whose warm-up-trimmed frames contributed to
+    /// this frame's `count_sum`. Used as the divisor when rounding to
+    /// the integer instantaneous speaker count.
+    count_chunk_count: u32,
+}
+
+/// Per-(window_id, slot) → cluster id mapping. Populated in §5.8 when
+/// activities are clustered. Consumed in §5.9 step A. Eviction policy
+/// in §11.13.
+struct ReconstructStateExtras {
+    slot_to_cluster: BTreeMap<(WindowId, u8), u64>,
+    /// Per-(window_id, slot) → bool flag indicating whether the
+    /// activity used the clean mask. Populated in §5.8, consumed by
+    /// §5.11 to compute `DiarizedSpan::clean_mask_fraction`. Same
+    /// eviction lifecycle as `slot_to_cluster` (§11.13).
+    activity_clean_flags: HashMap<(WindowId, u8), bool>,
+    /// Per-window_id → window_start (absolute samples). Populated
+    /// during integration in §5.9 step A; consumed by §5.11 to map
+    /// frame indices back to absolute samples and to determine which
+    /// (window, slot) entries can be evicted (§11.13). Rev-7 omitted
+    /// this field; rev-8 added it per review-7 T2-C.
+    window_starts: HashMap<WindowId, u64>,
 }
 ```
 
@@ -1770,9 +1973,20 @@ struct FrameCount {
 window's activities have all been clustered AND its `Action::SpeakerScores`
 have arrived):
 
+**Integration trigger** (rev-8 explicit): in the Diarizer's pump loop
+(§5.8), buffer each `Action::SpeakerScores` per `WindowId`. After each
+`Segmenter::push_inference(id, scores)` returns, drain the queued
+`Action::Activity` events for `id` (clustering each — §5.8), then
+invoke `integrate_window(id)`. This is well-defined because both the
+`SpeakerScores` and the `Activity` events for window `id` are emitted
+synchronously in `push_inference`'s call frame; both have arrived
+before the next `Action::NeedsInference` would be polled.
+
 ```
 fn integrate_window(W, raw_probs[slot][frame], slot_to_cluster):
-    let window_start_frame = frame_index_of(W.window_start)
+    let window_start = W.window_start as u64    // absolute samples
+    let window_start_frame = frame_index_of(window_start)
+    window_starts.insert(W.id, window_start)    // (T2-C, populated here)
     grow activations / counts buffers up to window_start_frame + FRAMES_PER_WINDOW
 
     # Step A: collapse-by-max within each cluster for THIS window.
@@ -1793,37 +2007,48 @@ fn integrate_window(W, raw_probs[slot][frame], slot_to_cluster):
                 continue
 
     # Step B: overlap-add SUM into the global per-frame accumulator
-    # (Matches Inference.aggregate(skip_average=True) line 598-600.)
+    # (Matches Inference.aggregate(skip_average=True) line 598-600).
+    # NOTE: pyannote sets warm_up=(0.0, 0.0) for the activation aggregate,
+    # so we count EVERY frame (no warm-up trim). This is independent of
+    # the speaker_count overlap-add MEAN below (Step C), which DOES trim.
     for (cluster_id, frame_scores) in per_cluster_max:
         for f_in_window in 0..FRAMES_PER_WINDOW:
             let abs_frame = window_start_frame + f_in_window
             let buf_idx = (abs_frame - base_frame) as usize
             let entry = activations[buf_idx].entry(cluster_id).or_insert(0.0)
             *entry += frame_scores[f_in_window]
-            // No hamming weighting: pyannote sets hamming=False for this call.
-            // No warm-up trimming: pyannote sets warm_up=(0.0, 0.0) for
-            //   reconstruct (warm-up is only used in speaker_count, §5.10).
+    # In a parallel loop (or in the loop above), bump the activation
+    # chunk-count for every frame in the window (no warm-up trim).
+    for f_in_window in 0..FRAMES_PER_WINDOW:
+        let abs_frame = window_start_frame + f_in_window
+        let buf_idx = (abs_frame - base_frame) as usize
+        counts[buf_idx].activation_chunk_count += 1
 
-    # Step C: count bookkeeping — for each frame, accumulate the
+    # Step C: speaker-count bookkeeping — for each frame, accumulate the
     # binarized speaker count from THIS window for §5.10.
+    # WITH warm-up trimming (matches pyannote `speaker_count(warm_up=
+    # (0.1, 0.1))`).
     for f_in_window in 0..FRAMES_PER_WINDOW:
         let abs_frame = window_start_frame + f_in_window
         let buf_idx = (abs_frame - base_frame) as usize
 
-        # Count of speakers active at this frame in THIS window
-        # (matches pyannote: sum across slots of binarized).
-        # WITH warm-up trimming (§5.10).
-        let in_warm_up = f_in_window < num_frames_left || f_in_window >= FRAMES_PER_WINDOW - num_frames_right
+        let in_warm_up = f_in_window < SPEAKER_COUNT_WARM_UP_FRAMES_LEFT
+                       || f_in_window >= (FRAMES_PER_WINDOW - SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT)
         if !in_warm_up:
             let n_active_here = (0..MAX_SPEAKER_SLOTS)
                 .filter(|s| raw_probs[s][f_in_window] > binarize_threshold)
                 .count() as f32
             counts[buf_idx].count_sum += n_active_here
-            counts[buf_idx].chunk_count += 1
+            counts[buf_idx].count_chunk_count += 1
 
     # Step D: advance finalization boundary and emit (§5.11).
     advance_finalization_boundary(W.id)
     emit_finalized_frames()
+
+    # Step E: evict (W.id, *) entries from slot_to_cluster /
+    # activity_clean_flags / window_starts whose window's last frame
+    # has finalized AND whose run is no longer open. See §11.13.
+    evict_finalized_window_metadata()
 ```
 
 **Finalization boundary**. A frame `f` is finalized when no future
@@ -1837,16 +2062,16 @@ The smallest start of any *future* window is the next
 ```
 fn advance_finalization_boundary(W_id):
     let next_window_start_frame = frame_index_of(
-        segmenter.peek_next_window_start()  // pub(crate) accessor — see §3.1 segment changes
+        segmenter.peek_next_window_start()
     )
     self.finalization_boundary = max(self.finalization_boundary, next_window_start_frame)
     // Equivalently: at end-of-stream (post-finish_stream), set to total_frames.
 ```
 
 The `Segmenter::peek_next_window_start()` accessor is added as part
-of the rev-6 segment v0.X bump (§3 in-scope items). Returns
-`(next_window_idx as u64) * step_samples` if `!finished`, else
-`u64::MAX` (no future windows).
+of the rev-6 segment v0.X bump (§3 in-scope items, "`dia::segment`
+v0.X bump" bullet). Returns `(next_window_idx as u64) * step_samples`
+if `!finished`, else `u64::MAX` (no future windows).
 
 ### 5.10 Per-frame instantaneous-speaker-count tracking
 
@@ -1902,7 +2127,8 @@ For each window W and each frame f_in_window in
 fn finalized_count_at(frame): u32 {
     let c = counts[frame - base_frame]
     if c.chunk_count == 0 { return 0 }    // frame in warm-up of all contributing windows
-    return (c.count_sum / c.chunk_count as f32).round() as u32
+    if c.count_chunk_count == 0 { return 0 }    // frame in warm-up of all contributing windows
+    return (c.count_sum / c.count_chunk_count as f32).round() as u32
 }
 ```
 
@@ -1959,15 +2185,25 @@ struct ReconstructState {
 ```
 
 **Algorithm** (run as part of finalization, after each window is
-integrated in §5.9). Updated rev-7 to populate `DiarizedSpan` quality
-metrics; the structural logic is unchanged.
+integrated in §5.9). Rev-8 fixed three bugs surfaced by review-7
+T2-B, T3-F, T3-H: empty-deque guard on the flush loop, `u64`
+arithmetic for frame indices throughout (no truncating cast to
+`u32`), and `total_cmp` instead of `partial_cmp` for the argmax
+comparison so NaN-defense doesn't silently demote NaN clusters to
+the back.
 
 ```
 fn emit_finalized_frames(emit: &mut FnMut(DiarizedSpan)):
-    while base_frame < finalization_boundary:
-        let frame_state: HashMap<u64, f32> = activations.pop_front()
-        let frame_count_state: FrameCount   = counts.pop_front()
-        let chunk_count = frame_count_state.chunk_count.max(1) as f32  // avoid /0
+    while base_frame < finalization_boundary {
+        // ── Rev-8 T2-B: guard the deque pop. activations may be empty
+        //    when finalization_boundary is set to u64::MAX during
+        //    flush_open_runs but the buffer was already drained.
+        let Some(frame_state): Option<HashMap<u64, f32>> = activations.pop_front() else { break; };
+        let frame_count_state: FrameCount = counts.pop_front()
+            .expect("counts and activations grow in lockstep");
+        // ── Rev-8 T2-A: use ACTIVATION chunk count (un-trimmed) here.
+        //    speaker-count chunk count is for §5.10 only.
+        let activation_chunk_count = frame_count_state.activation_chunk_count.max(1) as f32
 
         let count = finalized_count_at(base_frame).min(max_speakers as u32)
 
@@ -1977,10 +2213,16 @@ fn emit_finalized_frames(emit: &mut FnMut(DiarizedSpan)):
         let top: Vec<(u64, f32)> = if count > 0 {
             let mut sorted: Vec<(u64, f32)> = frame_state.iter()
                 .map(|(&c, &a)| (c, a)).collect()
+            // Rev-8 T3-H: use total_cmp for NaN safety. partial_cmp
+            // returns None for NaN comparisons; unwrap_or(Equal) would
+            // silently demote NaN values inconsistently. total_cmp
+            // gives a strict total ordering with NaN at the highest
+            // (or lowest) end. Activations from the integration step
+            // SHOULD always be finite — defense-in-depth only.
             // Tie-break: lower cluster_id wins (deterministic).
             sorted.sort_by(|(a_id, a_v), (b_id, b_v)| {
-                b_v.partial_cmp(a_v).unwrap_or(Ordering::Equal)
-                    .then(a_id.cmp(b_id))
+                b_v.total_cmp(a_v)            // descending by activation
+                    .then(a_id.cmp(b_id))    // ascending by id on tie
             })
             sorted.into_iter().take(count as usize).collect()
         } else {
@@ -2327,7 +2569,7 @@ VAD-input variable-length tests (rev-7, real `Segmenter` + synthetic inferencer)
 - **Empty push is no-op**: `process_samples(_, _, &[], _)` returns `Ok(())`, no callbacks invoked, no state advances. `total_samples_pushed` unchanged.
 - **Sub-window single push (0.5 s) without finish_stream**: `process_samples` returns `Ok(())`. `pending_inferences == 0`, `buffered_samples == 8000`, `buffered_frames == 0`. No DiarizedSpans emitted yet.
 - **Sub-window single push followed by finish_stream**: tail-anchor schedules at `max(0, total - WINDOW) = 0`, padded window infers, real-audio activities cluster, DiarizedSpan(s) emit covering only the real-audio range (zero-padded frames produce count=0 → no spans).
-- **Sub-MIN_CLIP_SAMPLES single push (10 ms = 160 samples) followed by finish_stream**: padded window's only "real" frames are 1 frame's worth; activities, if any, would have ranges < MIN_CLIP_SAMPLES → embed_model returns `Error::InvalidClip`. Verify the error propagates out of `finish_stream` rather than silently producing garbage.
+- **Sub-MIN_CLIP_SAMPLES single push (e.g., 10 ms = 160 samples) followed by finish_stream**: padded window's only "real" frames are < 1 frame's worth (each frame is ≈ 271.65 samples ≈ 16.97 ms); activities, if any, would have ranges < MIN_CLIP_SAMPLES → embed_model returns `Error::InvalidClip`. Verify the error propagates out of `finish_stream` rather than silently producing garbage.
 - **Multiple short pushes + finish_stream**: `process_samples(0.5 s) → process_samples(0.8 s) → process_samples(1.2 s) → finish_stream`. Total 2.5 s. Tail-anchor at 0, padded window infers, all activities have absolute-sample ranges within `[0, 2.5 s)`. Verify `total_samples_pushed == 2.5 * 16_000 == 40_000`.
 - **Multiple medium pushes**: `process_samples(3 s) × 5 → finish_stream`. Total 15 s. Two regular windows + tail-anchor (or no tail if 15 s ≥ 10 s and last full window is at start = 5 s covering [5 s, 15 s)). Verify `pending_inferences` decrements as expected.
 - **Long single push (60 s) without finish_stream**: many windows process during the single `process_samples` call. Verify `total_samples_pushed == 60 * 16_000`, `pending_inferences == 0` after pump completes (synchronous), and DiarizedSpans emit for already-finalized turns. Some frames remain un-finalized (≈ last 10 s); `buffered_frames > 0`.
@@ -2348,7 +2590,7 @@ DiarizedSpan quality-metric tests (rev-7):
 End-to-end ort-gated tests (`#[ignore]` smoke tests, real model):
 - 30-second single-speaker clip → exactly one DiarizedSpan, speaker_id = 0.
 - 30-second two-speaker alternating clip (no overlap) → 2-speaker output, alternating DiarizedSpans.
-- Pyannote parity test: 5-minute multi-speaker held-out clip; run pyannote.audio reference (Python, separate harness) and dia. Compute DER (diarization error rate) using a standard scorer. Assert DER ≤ 5% absolute. (See §15 #43 for the parity-test harness setup.)
+- Pyannote parity test: 5-minute multi-speaker held-out clip; run pyannote.audio reference (Python, separate harness) and dia. Compute DER (diarization error rate) using a standard scorer. **Rev-8: relaxed target to DER ≤ 10 % absolute** on a clean 2-3 speaker meeting clip (rev-7 had ≤ 5 %, which review-7 T3-I correctly flagged as aspirational given documented divergences: gather-mechanism difference §5.8, online-vs-batch clustering, default-clusterer difference §5.5 vs pyannote VBx, K-means seed source). 5 % remains a stretch goal. (See §15 #43 for the parity-test harness setup.)
 
 ### Integration tests (gated)
 
@@ -2508,6 +2750,55 @@ breaking output stability).
 
 (Documented in §5.4 — "lowest-index speaker wins.")
 
+### 11.13 Reconstruction state eviction policy (rev-8, presented out of numerical order — §11.12 below)
+
+The Diarizer's reconstruction state machine (§5.9-§5.11) has three
+per-window-id metadata maps that must be evicted to bound memory on
+long sessions:
+
+- `slot_to_cluster: BTreeMap<(WindowId, u8), u64>`
+- `activity_clean_flags: HashMap<(WindowId, u8), bool>`
+- `window_starts: HashMap<WindowId, u64>`
+
+**Eviction rule.** After each `emit_finalized_frames()` call returns,
+for each `WindowId w` with `window_starts[w] = window_start`:
+
+```
+let last_frame = frame_index_of(window_start) + FRAMES_PER_WINDOW as u64;
+let no_open_run_references_w = open_runs.values().all(|run| {
+    run.contributing_activities.iter().all(|(wid, _)| *wid != w)
+});
+if base_frame >= last_frame && no_open_run_references_w {
+    slot_to_cluster.retain(|(wid, _), _| *wid != w);
+    activity_clean_flags.retain(|(wid, _), _| *wid != w);
+    window_starts.remove(&w);
+}
+```
+
+In words: a window's metadata can be dropped once (a) all of its
+frames have finalized — none of them can be in any future
+contribution to a cluster's per-frame run since they're already past
+the finalization boundary — AND (b) no currently-open per-cluster
+run still has a contributing-activity entry referencing this window
+(open runs may extend forward and emit a `DiarizedSpan` with
+`activity_count` that includes the original (window, slot) pair).
+
+**Memory bound for a 60-min session at default `step_samples = 40_000`:**
+- Number of windows ever scheduled: ≈ `60 * 60 * 16_000 / 40_000 = 1440`
+- Without eviction: `1440 windows × (3 slots + 1 window_start)` ≈ ~10 KB total — small but unbounded.
+- With eviction: at most `~10 windows` of metadata (one window's worth ≈ 4 frames overlap × `step_samples / WINDOW_SAMPLES ratio`, plus open-run grace) ≈ ~80 bytes.
+- The savings matter more for multi-hour streams; the eviction policy is correctness-relevant once an open run spans a long stretch of finalized windows.
+
+**Open-run-aware aspect** (the `no_open_run_references_w` check): if a
+speaker's run is open across windows W=10, W=11, W=12, ..., W=20 (an
+extended turn), and W=10..W=15 have finalized but W=16..W=20 are still
+contributing, we keep the metadata for W=10..W=15 even though their
+frames have finalized — because `DiarizedSpan::activity_count` (§4.4)
+counts all contributing (window, slot) pairs across the entire run,
+and we'd lose count information if we evicted early. Eviction
+happens at the moment the run closes (or the moment a window's last
+contributing activity has been emitted into a closed span).
+
 ### 11.12 Variable-length VAD-filtered input contract (rev-7)
 
 **The Diarizer accepts pushes of any length** via `process_samples`,
@@ -2665,6 +2956,70 @@ From this brainstorm:
 - `DEFAULT_EMA_ALPHA = 0.2` is **tentative** — chosen by Resemblyzer
   precedent without empirical tuning. v0.2 sensitivity analysis pinned
   in §15 #20.
+
+### Rev-6 / rev-7 / rev-8 additions to the decision log
+
+- **Reconstruction adoption (rev-6):** match `pyannote.audio`'s
+  `SpeakerDiarization` pipeline shape (segmentation → exclude-overlap
+  embedding → clustering → reconstruct → annotate). Reasoning: pyannote
+  is the published / validated production reference; matching its
+  algorithm gives us a defensible quality baseline. Streaming
+  adaptation (per-frame finalization driven by segment's window
+  schedule) is novel.
+- **`Action::SpeakerScores` segment v0.X bump (rev-6):** segment must
+  expose per-window per-speaker raw probabilities for downstream
+  reconstruction. Implemented as a new `Action` variant emitted from
+  `push_inference` alongside `Activity`. `Action` marked
+  `#[non_exhaustive]` to make future additions non-breaking.
+- **`exclude_overlap` mechanism (rev-6 wrong, rev-8 corrected):**
+  rev-6/7 routed it through `embed_weighted` — a no-op for clips ≤ 2 s
+  (review-7 T1-A caught this). Rev-8 introduces `embed_masked` (gather
+  retained samples + zero-pad to 2 s + embed normally), matching
+  pyannote's `ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__` masked
+  path. Documented divergence: pyannote gathers at frame-rate post-fbank;
+  we gather at sample-rate pre-fbank. Equivalent up to fbank-window
+  boundary alignment.
+- **DiarizedSpan field set (rev-7):** simplified to `(range, speaker_id,
+  is_new_speaker)` plus three quality metrics (`average_activation`,
+  `activity_count`, `clean_mask_fraction`) for downstream storage and
+  analysis. Window-local concepts (similarity, slot) live on
+  `CollectedEmbedding` instead.
+- **VAD prerequisite formalization (rev-7):** Diarizer accepts
+  variable-length pushes (`samples.len()` from 0 to whole-stream). The
+  rev-6 algorithm already handled this; rev-7 made it explicit in
+  §11.12 with a recommended caller pattern for VAD-to-original timeline
+  mapping.
+- **Frame rate ≈ 58.9 fps (rev-8 correction):** rev-6/7 prose said
+  "100 fps / 10 ms / 160 samples" repeatedly. Verified by reading
+  shipped `dia::segment::stitch::frame_to_sample`: `WINDOW_SAMPLES *
+  frame_idx / FRAMES_PER_WINDOW = 160_000 * frame_idx / 589` ≈ 271.65
+  samples/frame ≈ 16.97 ms/frame ≈ 58.9 fps. Rev-8 corrects throughout.
+- **Argmax tie-break: smallest cluster_id wins (rev-6 / rev-8 highlight
+  per review-7 T4-B):** pyannote uses `np.argsort(-activations)` which
+  has implementation-defined tie behavior (typically quicksort,
+  non-deterministic for ties). We pick the deterministic
+  smaller-cluster_id tie-break to make streaming output byte-stable
+  across runs and platforms — a deliberate IMPROVEMENT over pyannote,
+  not a divergence.
+- **Activation vs speaker-count chunk-counts split (rev-8 per
+  review-7 T2-A):** pyannote's `Inference.aggregate(skip_average=True)`
+  has its own un-trimmed overlapping_chunk_count; `speaker_count` has
+  a separate warm-up-trimmed count. Rev-7 conflated them into a single
+  `FrameCount.chunk_count`; rev-8 splits into `activation_chunk_count`
+  (no trim, used for `average_activation` normalization in §5.11) and
+  `count_chunk_count` (warm-up trimmed, used for speaker-count
+  rounding in §5.10).
+- **Reconstruction state eviction (rev-8 per review-7 T3-J):** the
+  three per-window-id metadata maps (`slot_to_cluster`,
+  `activity_clean_flags`, `window_starts`) are evicted once a window's
+  last frame has finalized AND no open per-cluster run still references
+  any (window, slot) entry. Documented in §11.13. Bounds memory on
+  long sessions.
+- **DER target ≤ 10 % (rev-8 per review-7 T3-I):** rev-7 had ≤ 5 %
+  absolute on a 5-min held-out clip. Reviewer correctly observed this
+  is aspirational given documented divergences. Rev-8 relaxes to
+  ≤ 10 % for the CI gate; 5 % remains a stretch goal for
+  numerical-parity-quality work later.
 
 ## 13. Revision history
 
@@ -2921,7 +3276,9 @@ From this brainstorm:
     (default true; matches pyannote's `embedding_exclude_overlap`).
   - **`Diarizer::buffered_frames()` accessor:** new introspection
     method returning the count of un-finalized frames in the
-    per-frame accumulator (steady-state ≈ 1000 = 10 s × 100 fps).
+    per-frame accumulator. (Rev-7 said steady-state was "≈ 1000 =
+    10 s × 100 fps," which is wrong — rev-8 corrected to ≈ 589 frames
+    at the model's ≈ 58.9 fps frame rate.)
   - **`Diarizer::clear()` rustdoc updated** to enumerate the rev-6
     per-frame stitching state being dropped, and to clarify that
     open per-cluster runs are NOT auto-emitted (use `finish_stream`
@@ -2935,14 +3292,14 @@ From this brainstorm:
     stitching, count-bounded argmax, warm-up trimming, tie-break,
     `is_new_speaker`, `finish_stream` flush, `clear()` discards,
     `buffered_frames()` introspection, slot-to-cluster reassignment,
-    inactive-slot skip. Plus pyannote parity smoke test (DER ≤ 5%
-    on a 5-minute multi-speaker held-out clip).
+    inactive-slot skip. Plus pyannote parity smoke test (rev-7
+    target: DER ≤ 5%; rev-8 relaxed to ≤ 10% per review-7 T3-I).
   - **§3 deferred items:** updated to remove "Per-frame voice prob
     from `dia::segment` integrated path" (now in scope as
     `Action::SpeakerScores`); added `min_cluster_size` cluster
     pruning, VBx clustering, configurable warm_up, configurable
     per-frame `min_duration_on/off`.
-- **Revision 7** (2026-04-26, this document): nails down the
+- **Revision 7** (2026-04-26): nails down the
   VAD-prerequisite contract that's been implicit since the brainstorm
   but never formalized; enriches `DiarizedSpan` for downstream
   storage/analysis. No algorithmic changes — the rev-6 algorithm
@@ -2990,6 +3347,80 @@ From this brainstorm:
     reconstruction finalizes per-frame as windows complete). Rev 7
     is documentation + observability + tests — no behavior change
     for any existing caller.
+- **Revision 8** (2026-04-27, this document): incorporates fifth
+  adversarial-review feedback (review 7). Three load-bearing
+  correctness fixes plus a fan-out of pseudocode bugs in the rev-6
+  reconstruction state machine. The most consequential change: rev-7
+  spec routed `Diarizer`'s `exclude_overlap` mask through
+  `embed_weighted`, which §5.3 says is a no-op for clips ≤ 2 s — i.e.,
+  silently ineffective for the most common VAD-filtered activity case.
+  Rev-8 adds a new `EmbedModel::embed_masked` primitive matching
+  pyannote's actual gather-and-embed mechanism and routes §5.8 through
+  it.
+  - **§4.2 / §5.8 (review-7 T1-A, CRITICAL):** new
+    `EmbedModel::embed_masked(samples, keep_mask: &[bool])` API.
+    Pyannote's `ONNXWeSpeakerPretrainedSpeakerEmbedding.__call__`
+    interpolates the input mask to fbank-frame rate, binarizes at
+    0.5, gathers retained features, runs ONNX on the variable-length
+    cleaned features. Our equivalent: gather samples at sample-rate
+    (pre-fbank), zero-pad to `EMBED_WINDOW_SAMPLES`, embed normally.
+    Numerically equivalent up to fbank-window-boundary effects when
+    mask transitions land on 25 ms boundaries. §5.8 entirely rewritten
+    to use the new path.
+  - **§4.4 / §5.8 / §5.10 (review-7 T1-C):** SAMPLES_PER_FRAME is
+    `WINDOW_SAMPLES / FRAMES_PER_WINDOW = 160_000 / 589 ≈ 271.65`,
+    not the "160 / 100 fps / 10 ms" rev-7 prose claimed. Verified
+    against shipped `dia::segment::stitch::frame_to_sample`. §5.8 now
+    uses correct frame-to-sample expansion via the actual
+    `frame_to_sample` function (not a hardcoded constant).
+    `MIN_CLEAN_FRAMES` (rev-7's separate constant) dropped in favor
+    of direct gathered-sample-count check against `MIN_CLIP_SAMPLES`,
+    which is the constraint that actually matters for `embed_masked`.
+  - **§5.9 / §5.11 (review-7 T2-A):** `FrameCount` split into
+    `activation_chunk_count` (un-trimmed; for `average_activation`
+    normalization) and `count_chunk_count` (warm-up trimmed; for
+    speaker-count rounding). Rev-7 conflated them. Pyannote's
+    `Inference.aggregate(skip_average=True)` and `speaker_count`
+    maintain independent counts.
+  - **§5.11 (review-7 T2-B):** `emit_finalized_frames` flush loop
+    now Option-aware (`let Some(...) else break;`) so the
+    `flush_open_runs` end-of-stream path doesn't panic when the
+    deque is empty but `finalization_boundary == u64::MAX`.
+  - **§5.9 (review-7 T2-C):** `ReconstructStateExtras::window_starts`
+    declared explicitly (rev-7 referenced it without declaring).
+  - **§5.8 (review-7 T2-D):** `activity_clean_flags.insert((W.id, s),
+    used_clean)` now visible in the §5.8 pseudocode (rev-7 declared
+    the field but didn't show insertion).
+  - **§15 #52 (review-7 T2-E):** new HIGH-severity action item for
+    a pre-impl ChaCha8Rng byte-fixture regression test.
+  - **§11.13 (review-7 T3-J, NEW):** explicit eviction policy for
+    `slot_to_cluster` / `activity_clean_flags` / `window_starts`.
+    Bounds memory on long sessions; correctness-relevant when an
+    open run extends across many finalized windows.
+  - **§5.11 (review-7 T3-F + T3-H):** `u64` everywhere in frame
+    arithmetic (no truncating `as u32` casts) and `total_cmp` instead
+    of `partial_cmp` in argmax for NaN safety.
+  - **§4.4 (review-7 T3-B):** `DiarizedSpan` rustdoc no longer
+    references the non-existent `min_duration_off` option;
+    explicitly states "no merging in v0.1.0; see §15 #48 for v0.1.1".
+  - **§9 / §13 (review-7 T3-I):** pyannote parity DER target relaxed
+    from ≤ 5% to ≤ 10% absolute. Reviewer correctly observed that
+    5% was aspirational given the documented divergences (gather
+    mechanism, online-vs-batch clustering, default clusterer
+    differences). 5% remains a stretch goal for v0.1.1+.
+  - **§1 (review-7 T4-C):** divergence list expanded from "one
+    deliberate divergence" to a table of seven. Honestifies the
+    framing.
+  - **§12 (review-7 T3-C, T4-B):** decision log now includes rev-6,
+    rev-7, rev-8 additions. T4-B's deterministic tie-break called
+    out as a deliberate IMPROVEMENT over pyannote's
+    implementation-defined `np.argsort`, not a divergence.
+  - **§14 (review-7 T3-D):** rejected-finding subsections added for
+    reviews 5, 6, 7. Review-7 T1-B explicitly rejected with
+    line-number evidence (reviewer cited line 115 for default
+    clusterer; actual line is 210, default is `VBxClustering`).
+  - **§15 #53 (review-7 T4-A):** new low-severity action item for
+    `Action::SpeakerScores` allocation-pool optimization.
 
 ## 14. Findings rejected from reviews
 
@@ -3060,6 +3491,67 @@ For traceability across both adversarial-review rounds.
   reviews and renumbering would invalidate cross-references in the
   prior revision-history bullets.
 
+### From review 5 (rev 5 → rev 6) — none rejected
+
+All review-5 items folded into the rev-6 scope expansion (pyannote
+reconstruction). No findings rejected.
+
+### From review 6 (rev 6 → rev 7) — none rejected
+
+The rev-6 → rev-7 transition was not driven by an adversarial review
+but by a user-mandate scope clarification (VAD-prerequisite contract
++ richer DiarizedSpan output). No findings rejected; not applicable.
+
+### From review 7 (rev 7 → rev 8)
+
+- **T1-B (default clusterer is HMM-GMM, not VBx) — REJECTED.** The
+  reviewer cited `speaker_diarization.py:115` as evidence that
+  pyannote's default is `clustering: str = "HiddenMarkovModelClustering"`.
+  Verified against the actual source file at
+  `/Users/user/Develop/findit-studio/pyannote-audio/src/pyannote/audio/pipelines/speaker_diarization.py`:
+  line 115 is part of an unrelated docstring/output-formatting
+  block in the `diarize_one` method:
+  ```python
+  exclusive_diarization.append(
+      {
+          "start": round(speech_turn.start, 3),    # ← line 115
+          ...
+      }
+  )
+  ```
+  The actual default at line 210 is:
+  ```python
+  clustering: str = "VBxClustering",
+  ```
+  §15 #44 ("VBx is pyannote-audio's default offline clusterer") is
+  therefore **correct**. The reviewer cited the wrong line. Sustaining
+  the existing spec language; T1-B not applied.
+- **All other review-7 items accepted** as rev-8 spec edits. T1-A
+  (gather-and-embed via new `embed_masked` API + §5.8 rewrite),
+  T1-C (SAMPLES_PER_FRAME math: ≈ 271.65 not 160; ≈ 58.9 fps not
+  100; MIN_CLEAN_FRAMES dropped in favor of direct gathered-sample
+  count check). T2-A (split FrameCount into activation_chunk_count
+  and count_chunk_count), T2-B (Option-aware flush loop), T2-C
+  (`window_starts` declared in `ReconstructStateExtras`), T2-D
+  (`activity_clean_flags` insertion shown in §5.8 pseudocode),
+  T2-E (§15 #52 ChaCha8Rng byte-fixture regression test),
+  T2-F (resolved by T1-A fix — gather-and-pad path is no longer
+  no-op for clips ≤ 2 s). T3-A (§3.1 phantom reference removed),
+  T3-B (§4.4 min_duration_off note honestified to "v0.1.0: no
+  merging; see §15 #48 for v0.1.1"), T3-E (`SAMPLE_RATE_TB` referenced
+  via `dia::segment` re-exports throughout), T3-F (`u64` everywhere
+  in frame arithmetic; no `as u32` truncating casts), T3-G
+  (§5.9 explicit "buffer per WindowId; integrate when both
+  Activity events and SpeakerScores have arrived"), T3-H
+  (`total_cmp` for NaN safety in argmax), T3-I (DER target relaxed
+  to ≤ 10 % absolute on a clean clip; 5 % was aspirational),
+  T3-J (eviction policy pinned in §11.13). T4-A (segment
+  `Action::SpeakerScores` allocation churn — accepted as a v0.1.1
+  optimization noted in §15 #53), T4-B (deterministic tie-break
+  documented as a deliberate improvement in §12 decision log),
+  T4-C (§1 divergence list expanded — "one deliberate divergence"
+  → bulleted list).
+
 ## 15. Action list for v0.1.1+ follow-ups
 
 These don't block v0.1.0 but should be tracked:
@@ -3097,3 +3589,5 @@ These don't block v0.1.0 but should be tracked:
 | 49 | (rev-6) **Mask-aware embedding ONNX export**: WeSpeaker ONNX export currently takes only waveform. Pyannote's mask is consumed inside the model. We approximate via per-window mean weighting in `embed_weighted`. If we ever re-export WeSpeaker with a mask input, switch the §5.8 mask path to feed it directly to the model — closer to pyannote behavior. Significant scope (re-export + maintain alongside the current export). | medium |
 | 50 | (rev-7) **`dia::utils::TimelineMap` helper for VAD-to-original mapping**: caller-side `Vec<(dia_offset, original_offset)>` log + `map_dia_range_to_original(TimeRange) -> TimeRange` helper. Currently the caller writes this themselves (~30 lines, see §11.12 example). Could ship a small `dia::utils::TimelineMap` struct with `record(dia_offset, original_offset)` / `lookup(dia_range)` API. Defer until we have evidence that >1 caller has implemented this independently — premature standardization. | low |
 | 51 | (rev-7) **Per-VAD-range diarization with shared speakers**: API for callers who want each VAD range to produce its own clean DiarizedSpans (no spans crossing original-VAD-range boundaries) while keeping speaker IDs consistent across ranges. Currently requires manual mid-level orchestration. Could provide `Diarizer::checkpoint() / restore_after_clear` or `Diarizer::process_chunk_isolated(samples)` that finishes-then-resumes without speaker-state loss. Defer; the §11.12 caller pattern (concatenate + post-process) is sufficient for v0.1.0. | medium |
+| 52 | (rev-8 review-7 T2-E) **ChaCha8Rng keystream byte-fixture regression test** (PRE-IMPL): assert that `ChaCha8Rng::seed_from_u64(42).next_u64()` (and a small handful of other seeds × draws) produces the exact `u64` values we record now. Test runs under both default features and `default-features = false`. Goal: catch a future `rand_chacha` minor-version bump that quietly changes the cipher's stream output, since our public determinism contract (§11.9) depends on byte-stable output. The fixture is ~6 lines of test code; the alarm value is high (silent reproducibility break across users upgrading dia transitively). | high |
+| 53 | (rev-8 review-7 T4-A) **`Action::SpeakerScores` allocation churn**: the variant carries `Box<[[f32; 589]; 3]>` ≈ 7 KB per emission. For a 60-min stream at default `step_samples = 40_000`, that's ~1440 windows × 7 KB = ~10 MB of allocations through the lifetime, all short-lived (consumed by the Diarizer's pump within the same `process_samples` call). Could pool the buffers (`pub(crate) Segmenter::take_speaker_score_buf` returning a `Box` from a small-pool freelist that the Diarizer returns post-consume) or pass `&[[f32; 589]; 3]` borrowed from segmenter scratch. Defer until profiling shows allocator pressure. | low |
