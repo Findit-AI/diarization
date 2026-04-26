@@ -29,11 +29,7 @@ impl Embedding {
   /// `Embedding` invariant), so this reduces to a dot product.
   /// Returns a value in `[-1.0, 1.0]`.
   pub fn similarity(&self, other: &Embedding) -> f32 {
-    let mut acc = 0.0f32;
-    for i in 0..EMBEDDING_DIM {
-      acc += self.0[i] * other.0[i];
-    }
-    acc
+    self.0.iter().zip(other.0.iter()).map(|(a, b)| a * b).sum()
   }
 
   /// L2-normalize a raw 256-d inference output and wrap it.
@@ -127,6 +123,7 @@ pub struct EmbeddingResult<A = (), T = ()> {
 impl<A, T> EmbeddingResult<A, T> {
   /// Construct (typically from inside `EmbedModel`).
   #[allow(dead_code)] // used in tests; EmbedModel added in a later phase
+  // TODO(phase-5): drop #[allow(dead_code)] once EmbedModel uses this constructor
   pub(crate) fn new(
     embedding: Embedding,
     source_duration: Duration,
