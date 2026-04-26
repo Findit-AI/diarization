@@ -13,5 +13,6 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod cluster;
 pub mod embed;
 pub mod segment;
