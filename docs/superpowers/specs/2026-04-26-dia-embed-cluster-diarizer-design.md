@@ -1852,7 +1852,7 @@ for activity in activities:
     #   2. If InvalidClip, fall back to speaker_keep.
     #   3. If InvalidClip AGAIN, skip the activity entirely and
     #      continue (do NOT propagate — matches pyannote's skip).
-    let activity_samples = &audio_buffer[s0 - audio_base ..= s1 - audio_base - 1]
+    let activity_samples = &audio_buffer[s0 - audio_base..s1 - audio_base]
     let mut effective_used_clean = used_clean
 
     let result = match embed_model.embed_masked(activity_samples, keep_mask) {
