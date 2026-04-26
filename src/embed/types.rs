@@ -62,6 +62,48 @@ pub fn cosine_similarity(a: &Embedding, b: &Embedding) -> f32 {
   a.similarity(b)
 }
 
+/// Optional metadata that flows through `embed_with_meta` /
+/// `embed_weighted_with_meta` / `embed_masked_with_meta` to
+/// `EmbeddingResult`. Generic over the `audio_id` and `track_id`
+/// types — callers use whatever string-like type fits their domain.
+/// Defaults to `()` so the unit-typed metadata path allocates nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EmbeddingMeta<A = (), T = ()> {
+  pub(crate) audio_id: A,
+  pub(crate) track_id: T,
+  pub(crate) correlation_id: Option<u64>,
+}
+
+impl<A, T> EmbeddingMeta<A, T> {
+  /// Construct with `audio_id` and `track_id`.
+  pub fn new(audio_id: A, track_id: T) -> Self {
+    Self {
+      audio_id,
+      track_id,
+      correlation_id: None,
+    }
+  }
+
+  /// Attach a correlation id (e.g., a session-scoped sequence number)
+  /// for downstream telemetry / log correlation.
+  pub fn with_correlation_id(mut self, id: u64) -> Self {
+    self.correlation_id = Some(id);
+    self
+  }
+
+  pub fn audio_id(&self) -> &A {
+    &self.audio_id
+  }
+
+  pub fn track_id(&self) -> &T {
+    &self.track_id
+  }
+
+  pub fn correlation_id(&self) -> Option<u64> {
+    self.correlation_id
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -155,5 +197,27 @@ mod tests {
     // Free fn must equal method bit-exactly (same dot product,
     // same component order — no fma rearrangement).
     assert_eq!(cosine_similarity(&ea, &eb), ea.similarity(&eb));
+  }
+
+  #[test]
+  fn embedding_meta_unit_default() {
+    let m: EmbeddingMeta = EmbeddingMeta::default();
+    assert_eq!(m.audio_id(), &());
+    assert_eq!(m.track_id(), &());
+    assert_eq!(m.correlation_id(), None);
+  }
+
+  #[test]
+  fn embedding_meta_typed() {
+    let m = EmbeddingMeta::new("audio_42".to_string(), 7u32);
+    assert_eq!(m.audio_id(), "audio_42");
+    assert_eq!(m.track_id(), &7u32);
+    assert_eq!(m.correlation_id(), None);
+  }
+
+  #[test]
+  fn embedding_meta_with_correlation_id() {
+    let m = EmbeddingMeta::new((), ()).with_correlation_id(123);
+    assert_eq!(m.correlation_id(), Some(123));
   }
 }
