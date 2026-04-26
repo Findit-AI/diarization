@@ -1,9 +1,10 @@
 //! Sans-I/O speaker diarization for streaming audio.
 //!
-//! See the [`segment`] module for the v0.1.0 surface (speaker segmentation).
-//! Future releases will add an `embed` module for speaker embedding and a
-//! clustering layer that turns window-local speaker slots into global
-//! speaker identities.
+//! - [`segment`]: v0.1.0 speaker segmentation (window-local speaker slots).
+//! - [`embed`]: speaker fingerprint generation (WeSpeaker ResNet34 ONNX).
+//!
+//! A clustering layer that turns window-local speaker slots into global
+//! speaker identities will follow in a later release.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -12,4 +13,5 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod embed;
 pub mod segment;
