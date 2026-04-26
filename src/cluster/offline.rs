@@ -5,5 +5,5 @@ use crate::{
   embed::Embedding,
 };
 pub fn cluster_offline(_e: &[Embedding], _o: &OfflineClusterOptions) -> Result<Vec<u64>, Error> {
-  Err(Error::Placeholder)
+  Err(Error::EmptyInput)
 }
