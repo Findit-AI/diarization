@@ -11,7 +11,7 @@ mod error;
 mod options;
 mod types;
 
-// pub use error::Error;       // re-enabled in Task 8
+pub use error::Error;
 pub use options::{
   EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, HOP_SAMPLES, MIN_CLIP_SAMPLES,
   NORM_EPSILON,
