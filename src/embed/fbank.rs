@@ -94,6 +94,9 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
   online.input_finished();
 
   let n_avail = online.num_frames_ready();
+  // Boxed: 200 × 80 × 4 = 64KB array would overflow typical thread stack
+  // budgets (default 8MB main, 2MB worker). Heap allocation is fine here —
+  // the alloc cost is ~µs and dwarfed by the fbank computation itself.
   let mut out = Box::new([[0.0f32; FBANK_NUM_MELS]; FBANK_FRAMES]);
 
   if n_avail >= FBANK_FRAMES {
@@ -185,5 +188,31 @@ mod tests {
     let samples = vec![0.001f32; MIN_CLIP_SAMPLES as usize + 100];
     let f = compute_fbank(&samples).unwrap();
     assert_eq!(f.len(), FBANK_FRAMES);
+  }
+
+  #[test]
+  fn accepts_min_clip_samples_exactly() {
+    // Boundary: exactly MIN_CLIP_SAMPLES = 400 samples = 25 ms = 1 frame.
+    let samples = vec![0.001f32; MIN_CLIP_SAMPLES as usize];
+    let f = compute_fbank(&samples).unwrap();
+    assert_eq!(f.len(), FBANK_FRAMES);
+    assert_eq!(f[0].len(), FBANK_NUM_MELS);
+  }
+
+  #[test]
+  fn produces_correct_shape_for_long_clip_with_center_crop() {
+    // 4 seconds of audio → ~398 fbank frames > FBANK_FRAMES = 200 → exercises
+    // the center-crop branch (start = (n_avail - 200) / 2).
+    let samples = vec![0.001f32; 2 * EMBED_WINDOW_SAMPLES as usize];
+    let f = compute_fbank(&samples).unwrap();
+    assert_eq!(f.len(), FBANK_FRAMES);
+    assert_eq!(f[0].len(), FBANK_NUM_MELS);
+    // After mean-subtraction, all values must be finite (regression guard
+    // for the center-crop branch specifically).
+    for row in f.iter() {
+      for &v in row.iter() {
+        assert!(v.is_finite(), "center-crop branch produced non-finite: {v}");
+      }
+    }
   }
 }
