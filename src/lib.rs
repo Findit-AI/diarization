@@ -14,5 +14,6 @@
 extern crate std;
 
 pub mod cluster;
+pub mod diarizer;
 pub mod embed;
 pub mod segment;
