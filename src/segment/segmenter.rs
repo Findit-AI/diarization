@@ -537,6 +537,23 @@ impl Segmenter {
   pub fn buffered_samples(&self) -> usize {
     self.input.len()
   }
+
+  /// Where the next regular sliding window will start, in absolute samples.
+  ///
+  /// After [`finish`](Self::finish) is called, returns `u64::MAX` (no
+  /// future regular windows; any tail anchor is already scheduled).
+  ///
+  /// `pub(crate)` because the only consumer today is
+  /// [`Diarizer`](crate::diarizer)'s reconstruction state machine
+  /// (spec §5.9 frame-finalization boundary). Expose as `pub` if a
+  /// real external use case materializes.
+  #[allow(dead_code)] // Consumer (`dia::Diarizer`) lands in a later phase.
+  pub(crate) fn peek_next_window_start(&self) -> u64 {
+    if self.finished {
+      return u64::MAX;
+    }
+    self.next_window_idx as u64 * self.opts.step_samples() as u64
+  }
 }
 
 #[inline]
@@ -891,6 +908,35 @@ mod tests {
     // After all three, boundary should advance to next_window_idx * step.
     // We don't strictly assert a span here (depends on hysteresis crossing
     // a boundary); just confirm the pipeline ran without error.
+  }
+
+  #[test]
+  fn peek_next_window_start_advances_on_window_emit() {
+    let mut s = Segmenter::new(opts());
+    let step = SegmentOptions::default().step_samples() as u64;
+    assert_eq!(s.peek_next_window_start(), 0);
+
+    s.push_samples(&vec![0.001f32; 160_000]);
+    let id = match s.poll() {
+      Some(Action::NeedsInference { id, .. }) => id,
+      other => panic!("expected NeedsInference, got {other:?}"),
+    };
+    // After the first regular window has been scheduled (its
+    // NeedsInference dequeued), the next regular window starts at `step`.
+    assert_eq!(s.peek_next_window_start(), step);
+
+    let scores = vec![1.0f32 / POWERSET_CLASSES as f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    s.push_inference(id, &scores).unwrap();
+    while s.poll().is_some() {}
+    assert_eq!(s.peek_next_window_start(), step);
+  }
+
+  #[test]
+  fn peek_next_window_start_max_after_finish() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&[0.001; 16_000]);
+    s.finish();
+    assert_eq!(s.peek_next_window_start(), u64::MAX);
   }
 
   #[test]
