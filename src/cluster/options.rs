@@ -16,11 +16,11 @@ pub const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.5;
 /// Range: `(0.0, 1.0]`. Smaller values give older observations more weight.
 pub const DEFAULT_EMA_ALPHA: f32 = 0.2;
 
-/// Hard cap on the number of auto-assigned speaker slots.
+/// Hard cap on the number of auto-assigned speaker slots used as a fallback
+/// when `ClusterOptions::max_speakers` is not `None`.
 ///
-/// When [`OverflowStrategy::AssignClosest`] is active and the clusterer
-/// has already opened this many speakers, any new embedding that would
-/// otherwise open another slot is folded into the nearest existing speaker.
+/// Kept for reference; the default for `ClusterOptions::max_speakers` is
+/// `None` (no cap).
 pub const MAX_AUTO_SPEAKERS: u32 = 15;
 
 // ── Online clustering options ─────────────────────────────────────────────
@@ -48,12 +48,14 @@ impl Default for UpdateStrategy {
 /// existing speaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OverflowStrategy {
-  /// Assign the embedding to the closest existing speaker even if it does
-  /// not meet the similarity threshold. This is the default.
+  /// Reject the embedding and return
+  /// [`Error::TooManySpeakers`](crate::cluster::Error::TooManySpeakers).
+  /// This is the default.
   #[default]
-  AssignClosest,
-  /// Reject the embedding and return [`Error::TooManySpeakers`](crate::cluster::Error::TooManySpeakers).
   Reject,
+  /// Assign the embedding to the closest existing speaker even if it does
+  /// not meet the similarity threshold. **Does not update the centroid.**
+  AssignClosest,
 }
 
 /// Runtime options for the online [`Clusterer`](crate::cluster::Clusterer).
@@ -61,7 +63,7 @@ pub enum OverflowStrategy {
 pub struct ClusterOptions {
   similarity_threshold: f32,
   update_strategy: UpdateStrategy,
-  max_speakers: u32,
+  max_speakers: Option<u32>,
   overflow_strategy: OverflowStrategy,
 }
 
@@ -70,7 +72,7 @@ impl Default for ClusterOptions {
     Self {
       similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
       update_strategy: UpdateStrategy::default(),
-      max_speakers: MAX_AUTO_SPEAKERS,
+      max_speakers: None,
       overflow_strategy: OverflowStrategy::default(),
     }
   }
@@ -94,8 +96,8 @@ impl ClusterOptions {
     self.update_strategy
   }
 
-  /// Maximum number of auto-assigned speaker slots.
-  pub fn max_speakers(&self) -> u32 {
+  /// Maximum number of auto-assigned speaker slots, or `None` for no cap.
+  pub fn max_speakers(&self) -> Option<u32> {
     self.max_speakers
   }
 
@@ -120,7 +122,7 @@ impl ClusterOptions {
 
   /// Set the max-speakers cap (builder).
   pub fn with_max_speakers(mut self, v: u32) -> Self {
-    self.max_speakers = v;
+    self.max_speakers = Some(v);
     self
   }
 
@@ -133,23 +135,27 @@ impl ClusterOptions {
   // ── Mutators (in-place set_*) ───────────────────────────────────────────
 
   /// Set the similarity threshold (in-place).
-  pub fn set_similarity_threshold(&mut self, v: f32) {
+  pub fn set_similarity_threshold(&mut self, v: f32) -> &mut Self {
     self.similarity_threshold = v;
+    self
   }
 
   /// Set the update strategy (in-place).
-  pub fn set_update_strategy(&mut self, v: UpdateStrategy) {
+  pub fn set_update_strategy(&mut self, v: UpdateStrategy) -> &mut Self {
     self.update_strategy = v;
+    self
   }
 
   /// Set the max-speakers cap (in-place).
-  pub fn set_max_speakers(&mut self, v: u32) {
-    self.max_speakers = v;
+  pub fn set_max_speakers(&mut self, v: u32) -> &mut Self {
+    self.max_speakers = Some(v);
+    self
   }
 
   /// Set the overflow strategy (in-place).
-  pub fn set_overflow_strategy(&mut self, v: OverflowStrategy) {
+  pub fn set_overflow_strategy(&mut self, v: OverflowStrategy) -> &mut Self {
     self.overflow_strategy = v;
+    self
   }
 }
 
@@ -183,19 +189,19 @@ pub enum OfflineMethod {
 /// Options for the offline batch [`cluster_offline`](crate::cluster::cluster_offline) function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OfflineClusterOptions {
-  similarity_threshold: f32,
   method: OfflineMethod,
-  max_speakers: u32,
-  min_speakers: u32,
+  similarity_threshold: f32,
+  target_speakers: Option<u32>,
+  seed: Option<u64>,
 }
 
 impl Default for OfflineClusterOptions {
   fn default() -> Self {
     Self {
-      similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
       method: OfflineMethod::default(),
-      max_speakers: MAX_AUTO_SPEAKERS,
-      min_speakers: 1,
+      similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
+      target_speakers: None,
+      seed: None,
     }
   }
 }
@@ -208,71 +214,75 @@ impl OfflineClusterOptions {
 
   // ── Accessors ──────────────────────────────────────────────────────────
 
-  /// Cosine-similarity threshold used by the algorithm.
-  pub fn similarity_threshold(&self) -> f32 {
-    self.similarity_threshold
-  }
-
   /// The offline clustering algorithm.
   pub fn method(&self) -> OfflineMethod {
     self.method
   }
 
-  /// Maximum number of speaker clusters.
-  pub fn max_speakers(&self) -> u32 {
-    self.max_speakers
+  /// Cosine-similarity threshold used by the algorithm.
+  pub fn similarity_threshold(&self) -> f32 {
+    self.similarity_threshold
   }
 
-  /// Minimum number of speaker clusters.
-  pub fn min_speakers(&self) -> u32 {
-    self.min_speakers
+  /// Target number of speaker clusters, or `None` for automatic.
+  pub fn target_speakers(&self) -> Option<u32> {
+    self.target_speakers
+  }
+
+  /// Optional RNG seed for reproducibility.
+  pub fn seed(&self) -> Option<u64> {
+    self.seed
   }
 
   // ── Builder (consuming with_*) ─────────────────────────────────────────
 
-  /// Set the similarity threshold (builder).
-  pub fn with_similarity_threshold(mut self, v: f32) -> Self {
-    self.similarity_threshold = v;
-    self
-  }
-
   /// Set the algorithm (builder).
-  pub fn with_method(mut self, v: OfflineMethod) -> Self {
-    self.method = v;
+  pub fn with_method(mut self, m: OfflineMethod) -> Self {
+    self.method = m;
     self
   }
 
-  /// Set the max-speakers cap (builder).
-  pub fn with_max_speakers(mut self, v: u32) -> Self {
-    self.max_speakers = v;
+  /// Set the similarity threshold (builder).
+  pub fn with_similarity_threshold(mut self, t: f32) -> Self {
+    self.similarity_threshold = t;
     self
   }
 
-  /// Set the min-speakers floor (builder).
-  pub fn with_min_speakers(mut self, v: u32) -> Self {
-    self.min_speakers = v;
+  /// Set the target speaker count (builder).
+  pub fn with_target_speakers(mut self, n: u32) -> Self {
+    self.target_speakers = Some(n);
+    self
+  }
+
+  /// Set the RNG seed (builder).
+  pub fn with_seed(mut self, s: u64) -> Self {
+    self.seed = Some(s);
     self
   }
 
   // ── Mutators (in-place set_*) ───────────────────────────────────────────
 
-  /// Set the similarity threshold (in-place).
-  pub fn set_similarity_threshold(&mut self, v: f32) {
-    self.similarity_threshold = v;
-  }
-
   /// Set the algorithm (in-place).
-  pub fn set_method(&mut self, v: OfflineMethod) {
-    self.method = v;
+  pub fn set_method(&mut self, m: OfflineMethod) -> &mut Self {
+    self.method = m;
+    self
   }
 
-  /// Set the max-speakers cap (in-place).
-  pub fn set_max_speakers(&mut self, v: u32) {
-    self.max_speakers = v;
+  /// Set the similarity threshold (in-place).
+  pub fn set_similarity_threshold(&mut self, t: f32) -> &mut Self {
+    self.similarity_threshold = t;
+    self
   }
 
-  /// Set the min-speakers floor (in-place).
-  pub fn set_min_speakers(&mut self, v: u32) {
-    self.min_speakers = v;
+  /// Set the target speaker count (in-place).
+  pub fn set_target_speakers(&mut self, n: u32) -> &mut Self {
+    self.target_speakers = Some(n);
+    self
+  }
+
+  /// Set the RNG seed (in-place).
+  pub fn set_seed(&mut self, s: u64) -> &mut Self {
+    self.seed = Some(s);
+    self
   }
 }

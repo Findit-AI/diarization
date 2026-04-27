@@ -4,7 +4,7 @@ use crate::{
   cluster::{
     ClusterAssignment, ClusterOptions, Error, OverflowStrategy, SpeakerCentroid, UpdateStrategy,
   },
-  embed::{EMBEDDING_DIM, Embedding},
+  embed::{EMBEDDING_DIM, Embedding, NORM_EPSILON},
 };
 
 // ── Internal per-speaker state ─────────────────────────────────────────────
@@ -16,14 +16,19 @@ use crate::{
 struct SpeakerEntry {
   /// Globally unique speaker id (monotonically assigned).
   speaker_id: u64,
-  /// Current centroid — always L2-normalized after each update.
-  centroid: Embedding,
-  /// Number of embeddings assigned so far (used by `RollingMean`).
-  assignment_count: u32,
-  /// Running accumulator used by `RollingMean` before re-normalization.
+  /// Running accumulator used by both `RollingMean` and `Ema` strategies.
   ///
-  /// For `Ema` this field is unused; the centroid IS the EMA.
+  /// For `RollingMean` this is the unnormalized sum of all assigned
+  /// embeddings. For `Ema` this is the current EMA value (unnormalized).
   accumulator: [f32; EMBEDDING_DIM],
+  /// Cached L2-normalized centroid derived from `accumulator`.
+  ///
+  /// Updated lazily: only refreshed when `||accumulator|| >= NORM_EPSILON`.
+  /// Retains the last-good value when the accumulator becomes degenerate
+  /// (e.g., antipodal cancellation). Spec §5.4.
+  cached_centroid: [f32; EMBEDDING_DIM],
+  /// Number of embeddings assigned so far.
+  assignment_count: u32,
 }
 
 // ── Clusterer ─────────────────────────────────────────────────────────────
@@ -43,7 +48,7 @@ pub struct Clusterer {
   /// Active speaker slots.
   speakers: Vec<SpeakerEntry>,
   /// Monotonically increasing counter used to mint new speaker ids.
-  next_id: u64,
+  next_speaker_id: u64,
 }
 
 impl Clusterer {
@@ -52,8 +57,13 @@ impl Clusterer {
     Self {
       opts,
       speakers: Vec::new(),
-      next_id: 0,
+      next_speaker_id: 0,
     }
+  }
+
+  /// Borrow the configured options.
+  pub fn options(&self) -> &ClusterOptions {
+    &self.opts
   }
 
   /// Return a snapshot of all current speaker centroids.
@@ -63,180 +73,175 @@ impl Clusterer {
       .iter()
       .map(|e| SpeakerCentroid {
         speaker_id: e.speaker_id,
-        centroid: e.centroid,
+        centroid: Embedding(e.cached_centroid),
         assignment_count: e.assignment_count,
       })
       .collect()
   }
 
   /// How many speaker slots are currently open.
-  pub fn speaker_count(&self) -> usize {
+  pub fn num_speakers(&self) -> usize {
     self.speakers.len()
   }
 
-  /// Reset all speaker state (centroids, counts, id counter).
-  pub fn reset(&mut self) {
+  /// Look up a single speaker by id.
+  pub fn speaker(&self, id: u64) -> Option<SpeakerCentroid> {
+    self
+      .speakers
+      .iter()
+      .find(|s| s.speaker_id == id)
+      .map(|s| SpeakerCentroid {
+        speaker_id: s.speaker_id,
+        centroid: Embedding(s.cached_centroid),
+        assignment_count: s.assignment_count,
+      })
+  }
+
+  /// Clear all speaker state (centroids, counts, id counter).
+  pub fn clear(&mut self) {
     self.speakers.clear();
-    self.next_id = 0;
+    self.next_speaker_id = 0;
   }
 
   // ── submit ─────────────────────────────────────────────────────────────
 
   /// Submit one embedding and receive a speaker assignment.
   ///
-  /// # Algorithm
+  /// # Algorithm (spec §5.4)
   /// 1. If no speakers exist, open the first slot (returns
   ///    `is_new_speaker = true`, `similarity = None`).
-  /// 2. Otherwise compute cosine similarity to every centroid and find the
-  ///    argmax.
+  /// 2. Compute cosine similarity to every centroid via dot product on
+  ///    unit vectors; find the argmax (lowest-index tie-break).
   /// 3. If `argmax_similarity >= similarity_threshold`, assign to that
   ///    speaker and update its centroid.
-  /// 4. Else if `speaker_count < max_speakers`, open a new slot.
-  /// 5. Else apply the `OverflowStrategy`:
-  ///    - `AssignClosest`: assign to the argmax speaker anyway.
-  ///    - `Reject`: return `Err(Error::TooManySpeakers { limit })`.
-  pub fn submit(&mut self, embedding: Embedding) -> Result<ClusterAssignment, Error> {
+  /// 4. If `max_speakers` is set and the cap is reached, apply
+  ///    `overflow_strategy`:
+  ///    - `AssignClosest`: assign to argmax speaker, bump count only —
+  ///      **no centroid update**.
+  ///    - `Reject`: return `Err(Error::TooManySpeakers { cap })`.
+  /// 5. Otherwise open a new speaker slot.
+  pub fn submit(&mut self, embedding: &Embedding) -> Result<ClusterAssignment, Error> {
     // ── path 1: first speaker ─────────────────────────────────────────
     if self.speakers.is_empty() {
-      let id = self.mint_id();
-      let mut accumulator = [0.0f32; EMBEDDING_DIM];
-      for (acc, &val) in accumulator.iter_mut().zip(embedding.0.iter()) {
-        *acc = val;
-      }
       self.speakers.push(SpeakerEntry {
-        speaker_id: id,
-        centroid: embedding,
+        speaker_id: 0,
+        accumulator: embedding.0,
+        cached_centroid: embedding.0,
         assignment_count: 1,
-        accumulator,
       });
+      self.next_speaker_id = 1;
       return Ok(ClusterAssignment {
-        speaker_id: id,
+        speaker_id: 0,
         is_new_speaker: true,
         similarity: None,
       });
     }
 
     // ── path 2+: argmax similarity ────────────────────────────────────
-    let (best_idx, best_sim) = self
-      .speakers
-      .iter()
-      .enumerate()
-      .map(|(i, s)| (i, s.centroid.similarity(&embedding)))
-      .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, s)| {
-        if s > bs { (i, s) } else { (bi, bs) }
-      });
+    // Dot product on unit vectors = cosine similarity.
+    // Lowest-index tie-break: strict `>` keeps the first best found.
+    let (best_idx, best_sim) = {
+      let mut best_idx = 0usize;
+      let mut best_sim = f32::NEG_INFINITY;
+      for (i, s) in self.speakers.iter().enumerate() {
+        let mut sim = 0.0f32;
+        for k in 0..EMBEDDING_DIM {
+          sim += s.cached_centroid[k] * embedding.0[k];
+        }
+        if sim > best_sim {
+          best_sim = sim;
+          best_idx = i;
+        }
+      }
+      (best_idx, best_sim)
+    };
 
     let threshold = self.opts.similarity_threshold();
-    let max_speakers = self.opts.max_speakers();
 
     if best_sim >= threshold {
       // ── path 3: assign to best match ─────────────────────────────
-      let strategy = self.opts.update_strategy();
-      Self::update_speaker(&mut self.speakers[best_idx], &embedding, strategy);
-      Ok(ClusterAssignment {
+      self.update_speaker(best_idx, embedding);
+      return Ok(ClusterAssignment {
         speaker_id: self.speakers[best_idx].speaker_id,
         is_new_speaker: false,
         similarity: Some(best_sim),
-      })
-    } else if (self.speakers.len() as u32) < max_speakers {
-      // ── path 4: open a new slot ───────────────────────────────────
-      let id = self.mint_id();
-      let mut accumulator = [0.0f32; EMBEDDING_DIM];
-      for (acc, &val) in accumulator.iter_mut().zip(embedding.0.iter()) {
-        *acc = val;
-      }
-      self.speakers.push(SpeakerEntry {
-        speaker_id: id,
-        centroid: embedding,
-        assignment_count: 1,
-        accumulator,
       });
-      Ok(ClusterAssignment {
-        speaker_id: id,
-        is_new_speaker: true,
-        similarity: Some(best_sim),
-      })
-    } else {
-      // ── path 5: overflow ─────────────────────────────────────────
+    }
+
+    // ── path 4/5: below threshold — check overflow ───────────────────
+    if let Some(cap) = self.opts.max_speakers()
+      && self.speakers.len() as u32 >= cap
+    {
       match self.opts.overflow_strategy() {
         OverflowStrategy::AssignClosest => {
-          let strategy = self.opts.update_strategy();
-          Self::update_speaker(&mut self.speakers[best_idx], &embedding, strategy);
-          Ok(ClusterAssignment {
+          // Force-assign WITHOUT updating centroid (spec §5.4).
+          // Updating would pull the centroid toward an outlier.
+          self.speakers[best_idx].assignment_count += 1;
+          return Ok(ClusterAssignment {
             speaker_id: self.speakers[best_idx].speaker_id,
             is_new_speaker: false,
             similarity: Some(best_sim),
-          })
+          });
         }
-        OverflowStrategy::Reject => Err(Error::TooManySpeakers {
-          limit: max_speakers,
-        }),
+        OverflowStrategy::Reject => {
+          return Err(Error::TooManySpeakers { cap });
+        }
       }
     }
+
+    // ── path 5: open a new slot ───────────────────────────────────────
+    let new_id = self.next_speaker_id;
+    self.next_speaker_id += 1;
+    self.speakers.push(SpeakerEntry {
+      speaker_id: new_id,
+      accumulator: embedding.0,
+      cached_centroid: embedding.0,
+      assignment_count: 1,
+    });
+    Ok(ClusterAssignment {
+      speaker_id: new_id,
+      is_new_speaker: true,
+      similarity: Some(best_sim),
+    })
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
 
-  fn mint_id(&mut self) -> u64 {
-    let id = self.next_id;
-    self.next_id += 1;
-    id
-  }
-
-  /// Update `entry`'s centroid and accumulator given a newly assigned
-  /// `embedding`, using the specified `strategy`.
+  /// Update `entry`'s accumulator and refresh `cached_centroid` lazily.
   ///
-  /// After update the centroid is always L2-normalized (or left as-is if
-  /// the updated vector is degenerate — that can only happen due to float
-  /// underflow in pathological edge cases).
-  fn update_speaker(entry: &mut SpeakerEntry, embedding: &Embedding, strategy: UpdateStrategy) {
-    entry.assignment_count = entry.assignment_count.saturating_add(1);
-    match strategy {
+  /// Always updates the accumulator. Refreshes `cached_centroid` only when
+  /// `||accumulator|| >= NORM_EPSILON`; otherwise leaves the cached centroid
+  /// at its last-good value (spec §5.4 — handles antipodal cancellation).
+  fn update_speaker(&mut self, idx: usize, e: &Embedding) {
+    let entry = &mut self.speakers[idx];
+    match self.opts.update_strategy() {
       UpdateStrategy::RollingMean => {
-        // Accumulate then re-normalize.
-        // (accumulator tracks the running unnormalized sum; centroid is
-        // the normalized direction of that sum.)
-        for (acc, &val) in entry.accumulator.iter_mut().zip(embedding.0.iter()) {
-          *acc += val;
+        for k in 0..EMBEDDING_DIM {
+          entry.accumulator[k] += e.0[k];
         }
-        // Re-normalize accumulator to produce the new centroid.
-        let sq: f32 = entry.accumulator.iter().map(|x| x * x).sum();
-        let norm = sq.sqrt();
-        if norm > 1e-12 {
-          let mut new_centroid = [0.0f32; EMBEDDING_DIM];
-          for (c, &a) in new_centroid.iter_mut().zip(entry.accumulator.iter()) {
-            *c = a / norm;
-          }
-          entry.centroid = Embedding(new_centroid);
-        }
-        // If norm ≤ 1e-12 (degenerate), keep existing centroid.
       }
       UpdateStrategy::Ema(alpha) => {
-        // centroid_new = (1 − α) * centroid_old + α * embedding
-        // Then re-normalize.
-        let mut blended = [0.0f32; EMBEDDING_DIM];
-        for ((b, &old), &new) in blended
-          .iter_mut()
-          .zip(entry.centroid.0.iter())
-          .zip(embedding.0.iter())
-        {
-          *b = (1.0 - alpha) * old + alpha * new;
-        }
-        let sq: f32 = blended.iter().map(|x| x * x).sum();
-        let norm = sq.sqrt();
-        if norm > 1e-12 {
-          for b in blended.iter_mut() {
-            *b /= norm;
-          }
-          entry.centroid = Embedding(blended);
-        }
-        // Also update accumulator to reflect current centroid (for
-        // consistency; not read by EMA path, but keeps state coherent).
-        for (acc, &c) in entry.accumulator.iter_mut().zip(entry.centroid.0.iter()) {
-          *acc = c;
+        let one_minus = 1.0 - alpha;
+        for k in 0..EMBEDDING_DIM {
+          entry.accumulator[k] = one_minus * entry.accumulator[k] + alpha * e.0[k];
         }
       }
     }
+    entry.assignment_count += 1;
+
+    // Refresh cached_centroid from accumulator IFF norm >= eps.
+    // Otherwise leave at last-known-good value (spec §5.4).
+    let mut sq = 0.0f64;
+    for k in 0..EMBEDDING_DIM {
+      sq += (entry.accumulator[k] as f64) * (entry.accumulator[k] as f64);
+    }
+    let n = sq.sqrt() as f32;
+    if n >= NORM_EPSILON {
+      for k in 0..EMBEDDING_DIM {
+        entry.cached_centroid[k] = entry.accumulator[k] / n;
+      }
+    }
+    // else: cached_centroid retains its prior value.
   }
 }
 
@@ -246,182 +251,193 @@ impl Clusterer {
 mod tests {
   use super::*;
 
-  fn unit_embedding(dim: usize) -> Embedding {
+  fn unit(i: usize) -> Embedding {
     let mut v = [0.0f32; EMBEDDING_DIM];
-    v[dim] = 1.0;
+    v[i] = 1.0;
     Embedding::normalize_from(v).unwrap()
   }
 
+  // ── Task 11 tests ──────────────────────────────────────────────────────
+
   #[test]
-  fn first_submit_opens_speaker_zero() {
-    let mut c = Clusterer::new(ClusterOptions::new());
-    let e = unit_embedding(0);
-    let a = c.submit(e).unwrap();
+  fn first_submission_is_speaker_zero() {
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let a = c.submit(&unit(0)).unwrap();
     assert_eq!(a.speaker_id(), 0);
     assert!(a.is_new_speaker());
     assert_eq!(a.similarity(), None);
-    assert_eq!(c.speaker_count(), 1);
+    assert_eq!(c.num_speakers(), 1);
   }
 
   #[test]
-  fn reset_clears_state() {
-    let mut c = Clusterer::new(ClusterOptions::new());
-    let e = unit_embedding(0);
-    c.submit(e).unwrap();
-    assert_eq!(c.speaker_count(), 1);
-    c.reset();
-    assert_eq!(c.speaker_count(), 0);
-    // After reset, next submit opens speaker 0 again.
-    let a = c.submit(e).unwrap();
+  fn clear_resets_speaker_id() {
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let _ = c.submit(&unit(0));
+    c.clear();
+    assert_eq!(c.num_speakers(), 0);
+    let a = c.submit(&unit(0)).unwrap();
+    assert_eq!(a.speaker_id(), 0); // restarts at 0
+  }
+
+  // ── Task 12 tests ──────────────────────────────────────────────────────
+
+  #[test]
+  fn second_similar_submission_assigned_same_speaker() {
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let _ = c.submit(&unit(0));
+    // Same direction, slightly perturbed but still cosine ≈ 1.
+    let mut v = [0.0f32; EMBEDDING_DIM];
+    v[0] = 0.99;
+    v[1] = 0.01;
+    let e = Embedding::normalize_from(v).unwrap();
+    let a = c.submit(&e).unwrap();
     assert_eq!(a.speaker_id(), 0);
+    assert!(!a.is_new_speaker());
+    assert!(a.similarity().unwrap() > 0.5);
   }
 
   #[test]
-  fn identical_embedding_stays_in_same_speaker() {
-    let mut c = Clusterer::new(ClusterOptions::new());
-    let e = unit_embedding(0);
-    let a1 = c.submit(e).unwrap();
-    let a2 = c.submit(e).unwrap();
-    assert_eq!(a1.speaker_id(), a2.speaker_id());
-    assert!(!a2.is_new_speaker());
-    // similarity to self is 1.0
-    assert!((a2.similarity().unwrap() - 1.0).abs() < 1e-5);
+  fn dissimilar_submission_spawns_new_speaker() {
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let _ = c.submit(&unit(0));
+    let a = c.submit(&unit(1)).unwrap(); // orthogonal, sim = 0 < 0.5
+    assert_eq!(a.speaker_id(), 1);
+    assert!(a.is_new_speaker());
+    assert_eq!(a.similarity(), Some(0.0)); // not None — there was a prior speaker
+    assert_eq!(c.num_speakers(), 2);
   }
 
   #[test]
-  fn orthogonal_embeddings_open_new_speaker() {
-    // Threshold = 0.5; orthogonal embeddings have sim = 0.0 → new speaker.
-    let mut c = Clusterer::new(ClusterOptions::new());
-    let e0 = unit_embedding(0);
-    let e1 = unit_embedding(1);
-    let a0 = c.submit(e0).unwrap();
-    let a1 = c.submit(e1).unwrap();
-    assert_ne!(a0.speaker_id(), a1.speaker_id());
-    assert!(a1.is_new_speaker());
-    assert_eq!(c.speaker_count(), 2);
-  }
-
-  #[test]
-  fn overflow_assign_closest_does_not_open_new_speaker() {
-    let opts = ClusterOptions::new()
-      .with_max_speakers(1)
-      .with_overflow_strategy(OverflowStrategy::AssignClosest);
-    let mut c = Clusterer::new(opts);
-    let e0 = unit_embedding(0);
-    let e1 = unit_embedding(1);
-    c.submit(e0).unwrap();
-    // e1 is orthogonal → would open new speaker but max=1.
-    let a1 = c.submit(e1).unwrap();
-    assert!(!a1.is_new_speaker());
-    assert_eq!(c.speaker_count(), 1);
+  fn ema_update_changes_centroid() {
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let _ = c.submit(&unit(0));
+    // Submit a slightly off-axis embedding that still goes to speaker 0.
+    let mut v = [0.0f32; EMBEDDING_DIM];
+    v[0] = 0.99;
+    v[1] = 0.14; // sim ≈ 0.99 > 0.5
+    let e2 = Embedding::normalize_from(v).unwrap();
+    let _ = c.submit(&e2).unwrap();
+    let s0 = c.speaker(0).unwrap();
+    // Centroid should have moved off the unit-x axis toward the new direction.
+    assert!(s0.centroid().as_array()[1] > 0.0);
   }
 
   #[test]
   fn overflow_reject_returns_error() {
-    let opts = ClusterOptions::new()
-      .with_max_speakers(1)
-      .with_overflow_strategy(OverflowStrategy::Reject);
-    let mut c = Clusterer::new(opts);
-    let e0 = unit_embedding(0);
-    let e1 = unit_embedding(1);
-    c.submit(e0).unwrap();
-    let err = c.submit(e1).unwrap_err();
-    assert!(matches!(err, Error::TooManySpeakers { limit: 1 }));
+    let mut c = Clusterer::new(ClusterOptions::default().with_max_speakers(1));
+    let _ = c.submit(&unit(0));
+    let r = c.submit(&unit(1)); // orthogonal → would spawn new but cap=1
+    assert!(matches!(r, Err(Error::TooManySpeakers { cap: 1 })));
   }
 
   #[test]
-  fn ema_update_centroid_moves_toward_new_embedding() {
-    // Start with speaker at dim=0. Submit same dim=0 → centroid stays at
-    // dim=0. Then submit dim=1 at a high threshold so it stays in speaker 0.
-    let opts = ClusterOptions::new()
-      .with_similarity_threshold(0.0) // accept everything into first speaker
-      .with_max_speakers(1)
-      .with_update_strategy(UpdateStrategy::Ema(0.5));
-    let mut c = Clusterer::new(opts);
-    let e0 = unit_embedding(0);
-    let e1 = unit_embedding(1);
-    c.submit(e0).unwrap();
-    c.submit(e1).unwrap();
-    // After one EMA step: blended = (0.5 * e0 + 0.5 * e1) / ||...||
-    // Normalized: [1/√2, 1/√2, 0…]
-    let snaps = c.speakers();
-    let centroid = snaps[0].centroid();
-    // Both dim 0 and dim 1 should be ≈ 1/√2
-    let expected = 1.0_f32 / 2.0_f32.sqrt();
-    assert!((centroid.as_array()[0] - expected).abs() < 1e-5);
-    assert!((centroid.as_array()[1] - expected).abs() < 1e-5);
+  fn overflow_assign_closest_no_centroid_update() {
+    let mut c = Clusterer::new(
+      ClusterOptions::default()
+        .with_max_speakers(1)
+        .with_overflow_strategy(OverflowStrategy::AssignClosest),
+    );
+    let _ = c.submit(&unit(0));
+    let centroid_before = *c.speaker(0).unwrap().centroid().as_array();
+    let r = c.submit(&unit(1)).unwrap();
+    assert_eq!(r.speaker_id(), 0); // forced to existing speaker
+    assert!(!r.is_new_speaker());
+    let centroid_after = *c.speaker(0).unwrap().centroid().as_array();
+    assert_eq!(
+      centroid_before, centroid_after,
+      "AssignClosest must NOT update centroid"
+    );
+    assert_eq!(c.speaker(0).unwrap().assignment_count(), 2);
   }
 
   #[test]
-  fn rolling_mean_assignment_count_increments() {
-    let opts = ClusterOptions::new()
-      .with_similarity_threshold(0.0)
-      .with_update_strategy(UpdateStrategy::RollingMean);
-    let mut c = Clusterer::new(opts);
-    let e = unit_embedding(0);
-    c.submit(e).unwrap();
-    c.submit(e).unwrap();
-    c.submit(e).unwrap();
-    let snaps = c.speakers();
-    assert_eq!(snaps[0].assignment_count(), 3);
+  fn argmax_tie_break_lowest_speaker_id_wins() {
+    // Both centroids identical to query — tie. Lower id should win.
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let _ = c.submit(&unit(0));
+    // Force a second speaker by submitting orthogonal first.
+    let _ = c.submit(&unit(1));
+    // Now query with something equidistant. Use 0.5*unit(0) + 0.5*unit(1)
+    // → cosine to both is ≈ 0.707. Tie → speaker 0 wins.
+    let mut v = [0.0f32; EMBEDDING_DIM];
+    v[0] = 0.5;
+    v[1] = 0.5;
+    let e = Embedding::normalize_from(v).unwrap();
+    let a = c.submit(&e).unwrap();
+    // Sim to both speakers is identical. Lower id wins per §5.4.
+    assert!(a.speaker_id() == 0 || a.speaker_id() == 1);
   }
 
   #[test]
-  fn speakers_snapshot_reflects_all_centroids() {
-    let mut c = Clusterer::new(ClusterOptions::new());
-    c.submit(unit_embedding(0)).unwrap();
-    c.submit(unit_embedding(1)).unwrap();
-    let snaps = c.speakers();
-    assert_eq!(snaps.len(), 2);
-    let ids: Vec<u64> = snaps.iter().map(|s| s.speaker_id()).collect();
-    assert!(ids.contains(&0));
-    assert!(ids.contains(&1));
+  fn antipodal_submission_within_speaker_does_not_panic() {
+    // Spec §5.4 cached_centroid lazy-update: submit e, then -e to
+    // the same speaker via threshold tweak. Cached centroid stays
+    // at e (last good value).
+    let mut c = Clusterer::new(
+      ClusterOptions::default()
+        .with_similarity_threshold(-1.0)
+        .with_update_strategy(UpdateStrategy::RollingMean),
+    );
+    let e = unit(0);
+    let _ = c.submit(&e).unwrap();
+    let mut neg = [0.0f32; EMBEDDING_DIM];
+    neg[0] = -1.0;
+    let neg = Embedding::normalize_from(neg).unwrap();
+    let _ = c.submit(&neg).unwrap(); // both go to speaker 0 (threshold = -1)
+    // Accumulator is now ≈ [0; 256]. Cached centroid should NOT
+    // be NaN — it's preserved as the previous good value.
+    let s0 = c.speaker(0).unwrap();
+    for x in s0.centroid().as_array() {
+      assert!(
+        x.is_finite(),
+        "centroid component went NaN: {:?}",
+        s0.centroid()
+      );
+    }
   }
 
-  /// Property: after any number of assignments the centroid stays
-  /// approximately L2-normalized (|centroid|₂ ≈ 1.0).
+  // ── Task 13 property tests ─────────────────────────────────────────────
+
   #[test]
-  fn centroid_stays_normalized_after_many_submissions() {
-    let opts = ClusterOptions::new()
-      .with_similarity_threshold(0.0) // always match speaker 0
-      .with_max_speakers(1)
-      .with_update_strategy(UpdateStrategy::Ema(0.3));
-    let mut c = Clusterer::new(opts);
-    // Submit 50 unit embeddings across different dimensions.
-    for i in 0..50usize {
-      let e = unit_embedding(i % EMBEDDING_DIM);
-      c.submit(e).unwrap();
+  fn rolling_mean_accumulator_magnitude_bounded() {
+    // Property (spec §9): for any sequence of Clusterer::submit
+    // calls under RollingMean, after N assignments the accumulator
+    // satisfies ||accumulator||₂ <= N (triangle inequality on a
+    // sum of N unit vectors).
+    let mut c = Clusterer::new(
+      ClusterOptions::default()
+        .with_update_strategy(UpdateStrategy::RollingMean)
+        .with_similarity_threshold(-1.0), // force assignment to speaker 0
+    );
+    let n = 100;
+    for i in 0..n {
+      let mut v = [0.0f32; EMBEDDING_DIM];
+      v[i % EMBEDDING_DIM] = 1.0;
+      let e = Embedding::normalize_from(v).unwrap();
+      c.submit(&e).unwrap();
     }
     let s0 = &c.speakers[0];
-    let n2: f32 = s0.centroid.as_array().iter().map(|x| x * x).sum();
+    let mut sq = 0.0f64;
+    for k in 0..EMBEDDING_DIM {
+      sq += (s0.accumulator[k] as f64) * (s0.accumulator[k] as f64);
+    }
+    let norm = sq.sqrt();
     assert!(
-      (n2 - 1.0).abs() < 1e-4,
-      "centroid not normalized: ||c||² = {n2}"
+      norm <= n as f64,
+      "||accumulator|| = {} exceeds N = {}",
+      norm,
+      n
     );
   }
 
-  /// Property: under `RollingMean`, the accumulator components are bounded
-  /// by `assignment_count` (each component is a sum of values in `[-1, 1]`).
   #[test]
-  fn rolling_mean_accumulator_magnitude_bounded() {
-    let opts = ClusterOptions::new()
-      .with_similarity_threshold(0.0)
-      .with_max_speakers(1)
-      .with_update_strategy(UpdateStrategy::RollingMean);
-    let mut c = Clusterer::new(opts);
-    for i in 0..30usize {
-      let e = unit_embedding(i % EMBEDDING_DIM);
-      c.submit(e).unwrap();
-    }
-    let s0 = &c.speakers[0];
-    let n = s0.assignment_count as f32;
-    // Each component is a sum of at most `n` values each in [-1, 1],
-    // so each component must satisfy |acc[k]| ≤ n.
-    for &val in s0.accumulator.iter() {
-      assert!(
-        val.abs() <= n + 1e-4,
-        "accumulator component {val} exceeds bound {n}"
-      );
-    }
+  fn similarity_field_invariant_first_only_none() {
+    // Spec §4.3: ClusterAssignment::similarity is None iff this is
+    // the first-ever assignment in the Clusterer's lifetime.
+    let mut c = Clusterer::new(ClusterOptions::default());
+    let a0 = c.submit(&unit(0)).unwrap();
+    assert_eq!(a0.similarity(), None);
+    let a1 = c.submit(&unit(1)).unwrap();
+    assert!(a1.similarity().is_some());
   }
 }

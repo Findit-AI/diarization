@@ -1,60 +1,53 @@
-//! Error type for `dia::cluster`.
+//! Error type for `dia::cluster`. Matches spec §4.3.
 
-/// Errors returned by [`Clusterer::submit`](crate::cluster::Clusterer::submit)
-/// and [`cluster_offline`](crate::cluster::cluster_offline).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  /// The embedding slice passed to `cluster_offline` was empty.
-  #[error("empty input: at least one embedding is required")]
-  EmptyInput,
-
-  /// `max_speakers` was set to zero.
-  #[error("max_speakers must be at least 1")]
-  ZeroMaxSpeakers,
-
-  /// `min_speakers` was set to zero.
-  #[error("min_speakers must be at least 1")]
-  ZeroMinSpeakers,
-
-  /// `min_speakers` exceeds `max_speakers`.
-  #[error("min_speakers ({min}) must not exceed max_speakers ({max})")]
-  MinExceedsMax {
-    /// The `min_speakers` value supplied.
-    min: u32,
-    /// The `max_speakers` value supplied.
-    max: u32,
-  },
-
-  /// The number of open speaker slots has reached `max_speakers` and
-  /// [`OverflowStrategy::Reject`](crate::cluster::OverflowStrategy::Reject)
-  /// is active.
-  #[error("too many speakers: limit of {limit} reached")]
+  /// `Clusterer::submit` exceeded `max_speakers` AND
+  /// `overflow_strategy = Reject`. Caller decides whether to
+  /// proceed (e.g., bump the cap, run offline clustering, or drop).
+  #[error("speaker cap reached ({cap}) and overflow_strategy = Reject")]
   TooManySpeakers {
     /// The `max_speakers` cap that was hit.
-    limit: u32,
+    cap: u32,
   },
 
-  /// EMA α was outside `(0.0, 1.0]`.
-  #[error("invalid EMA alpha {alpha}: must be in (0, 1]")]
-  InvalidEmaAlpha {
-    /// The invalid α value.
-    alpha: f32,
+  /// `cluster_offline` was passed an empty embeddings list.
+  #[error("input embeddings list is empty")]
+  EmptyInput,
+
+  /// `target_speakers` strictly greater than the embedding count.
+  #[error("target_speakers ({target}) > input embeddings count ({n})")]
+  TargetExceedsInput {
+    /// The requested target speaker count.
+    target: u32,
+    /// The number of input embeddings.
+    n: usize,
   },
 
-  /// Similarity threshold was outside `[0.0, 1.0]`.
-  #[error("invalid similarity threshold {threshold}: must be in [0, 1]")]
-  InvalidThreshold {
-    /// The invalid threshold value.
-    threshold: f32,
-  },
+  /// `target_speakers = Some(0)`.
+  #[error("target_speakers must be >= 1")]
+  TargetTooSmall,
 
-  /// The number of embeddings in the input exceeds the platform's
-  /// `usize::MAX` or an internal allocation limit.
-  #[error("input too large: {count} embeddings exceed the processing limit")]
-  InputTooLarge {
-    /// Number of embeddings that were supplied.
-    count: usize,
-  },
+  /// Input contains NaN/inf — see also `DegenerateEmbedding`.
+  #[error("input contains NaN or non-finite values")]
+  NonFiniteInput,
+
+  /// Input contains a zero-norm or near-zero-norm embedding
+  /// (`||e|| < NORM_EPSILON`). Distinct from `NonFiniteInput`.
+  #[error("input contains a zero-norm or degenerate embedding")]
+  DegenerateEmbedding,
+
+  /// All pairwise similarities ≤ 0 OR at least one node is isolated
+  /// (`D_ii < NORM_EPSILON`) → spectral clustering's normalized
+  /// Laplacian is undefined. Spec §5.5 step 2.
+  #[error(
+    "affinity graph has an isolated node or all-zero similarities; spectral clustering undefined"
+  )]
+  AllDissimilar,
+
+  /// Eigendecomposition failed (matrix likely singular or pathological).
+  #[error("eigendecomposition failed")]
+  EigendecompositionFailed,
 }
 
 #[cfg(test)]
@@ -62,17 +55,16 @@ mod tests {
   use super::*;
 
   #[test]
-  fn empty_input_display() {
-    let e = Error::EmptyInput;
-    assert_eq!(
-      e.to_string(),
-      "empty input: at least one embedding is required"
-    );
+  fn too_many_speakers_message() {
+    let e = Error::TooManySpeakers { cap: 5 };
+    assert!(format!("{e}").contains("5"));
   }
 
   #[test]
-  fn too_many_speakers_display() {
-    let e = Error::TooManySpeakers { limit: 15 };
-    assert_eq!(e.to_string(), "too many speakers: limit of 15 reached");
+  fn target_exceeds_input_message() {
+    let e = Error::TargetExceedsInput { target: 10, n: 3 };
+    let s = format!("{e}");
+    assert!(s.contains("10"));
+    assert!(s.contains("3"));
   }
 }
