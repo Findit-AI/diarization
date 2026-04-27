@@ -6,16 +6,7 @@
 //! on a problem they should both find easy.
 
 use super::*;
-use crate::embed::{EMBEDDING_DIM, Embedding};
-
-/// Construct a unit-direction embedding `e_i` with a small leak into
-/// dimension `(i+1) % EMBEDDING_DIM`. Norm-1 by `Embedding::normalize_from`.
-fn perturbed_unit(i: usize, scale: f32) -> Embedding {
-  let mut v = [0.0f32; EMBEDDING_DIM];
-  v[i] = 1.0;
-  v[(i + 1) % EMBEDDING_DIM] = scale;
-  Embedding::normalize_from(v).unwrap()
-}
+use crate::cluster::test_util::perturbed_unit;
 
 #[test]
 fn online_separates_two_well_clustered_groups() {

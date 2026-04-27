@@ -31,6 +31,8 @@ mod online;
 mod spectral;
 
 #[cfg(test)]
+mod test_util;
+#[cfg(test)]
 mod tests;
 
 // Compile-time trait assertions. Catches a future field-type change that

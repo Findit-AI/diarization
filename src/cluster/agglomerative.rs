@@ -146,13 +146,10 @@ fn pair_distance(a: &[usize], b: &[usize], d: &[Vec<f32>], linkage: Linkage) -> 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{cluster::OfflineMethod, embed::EMBEDDING_DIM};
-
-  fn unit(i: usize) -> Embedding {
-    let mut v = [0.0f32; EMBEDDING_DIM];
-    v[i] = 1.0;
-    Embedding::normalize_from(v).unwrap()
-  }
+  use crate::{
+    cluster::{OfflineMethod, test_util::unit},
+    embed::EMBEDDING_DIM,
+  };
 
   fn opt_agg(linkage: Linkage) -> OfflineClusterOptions {
     OfflineClusterOptions::default().with_method(OfflineMethod::Agglomerative { linkage })

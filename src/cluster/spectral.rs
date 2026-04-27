@@ -56,10 +56,8 @@ pub(crate) fn cluster(
 
   // Step 6: take U = eigenvectors[:, 0..K] (smallest-K eigenvectors).
   let mut u = DMatrix::<f64>::zeros(n, k);
-  for j in 0..k {
-    for i in 0..n {
-      u[(i, j)] = eigenvectors[(i, j)];
-    }
+  for (j, src_col) in eigenvectors.column_iter().take(k).enumerate() {
+    u.set_column(j, &src_col);
   }
 
   // Step 7: row-normalize U. Rows below NORM_EPSILON are left unscaled —
@@ -361,6 +359,8 @@ pub(crate) fn kmeans_lloyd(mat: &DMatrix<f64>, initial_centroids: Vec<Vec<f64>>)
     if assignments == prev {
       break;
     }
+    // TODO(perf): swap with a temp buffer instead of cloning. O(N) clone
+    // per Lloyd iter is acceptable at v0.1.0 scale (N ≤ a few hundred).
     prev = assignments.clone();
 
     // Recompute centroids as cluster means.
@@ -550,13 +550,7 @@ mod eigen_tests {
     //   - Smallest eigenvalue close to 0 (single connected component
     //     within each group; nullspace dimension >= 1 → λ_0 ≈ 0).
     //   - Sorted ascending.
-    use crate::embed::EMBEDDING_DIM;
-    fn perturbed_unit(i: usize, scale: f32) -> crate::embed::Embedding {
-      let mut v = [0.0f32; EMBEDDING_DIM];
-      v[i] = 1.0;
-      v[(i + 1) % EMBEDDING_DIM] = scale;
-      crate::embed::Embedding::normalize_from(v).unwrap()
-    }
+    use crate::cluster::test_util::perturbed_unit;
 
     let mut e = Vec::new();
     for s in [0.0, 0.05, -0.05] {
@@ -607,13 +601,7 @@ mod eigen_tests {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::embed::EMBEDDING_DIM;
-
-  fn unit(i: usize) -> Embedding {
-    let mut v = [0.0f32; EMBEDDING_DIM];
-    v[i] = 1.0;
-    Embedding::normalize_from(v).unwrap()
-  }
+  use crate::{cluster::test_util::unit, embed::EMBEDDING_DIM};
 
   #[test]
   fn affinity_diagonal_is_zero() {
@@ -758,16 +746,9 @@ mod lloyd_tests {
 mod end_to_end_tests {
   use super::*;
   use crate::{
-    cluster::OfflineClusterOptions,
+    cluster::{OfflineClusterOptions, test_util::perturbed_unit},
     embed::{EMBEDDING_DIM, Embedding},
   };
-
-  fn perturbed(i: usize, scale: f32) -> Embedding {
-    let mut v = [0.0f32; EMBEDDING_DIM];
-    v[i] = 1.0;
-    v[(i + 1) % EMBEDDING_DIM] = scale;
-    Embedding::normalize_from(v).unwrap()
-  }
 
   #[test]
   fn spectral_separates_two_groups() {
@@ -775,10 +756,10 @@ mod end_to_end_tests {
     // (Spectral method, threshold 0.5, no target).
     let mut e = Vec::new();
     for s in [0.0, 0.05, -0.05] {
-      e.push(perturbed(0, s));
+      e.push(perturbed_unit(0, s));
     }
     for s in [0.0, 0.05, -0.05] {
-      e.push(perturbed(10, s));
+      e.push(perturbed_unit(10, s));
     }
     let labels = cluster(&e, &OfflineClusterOptions::default()).unwrap();
     assert_eq!(labels[0], labels[1]);
@@ -793,10 +774,10 @@ mod end_to_end_tests {
     // 6 mostly-orthogonal embeddings; target = 2 forces 2 clusters.
     // Use non-zero leakage between adjacent dims so the affinity graph
     // is connected (truly-orthogonal would trip AllDissimilar; see the
-    // docstring on `perturbed`).
+    // docstring on `perturbed_unit`).
     let mut e = Vec::new();
     for i in 0..6 {
-      e.push(perturbed(i, 0.1));
+      e.push(perturbed_unit(i, 0.1));
     }
     let labels = cluster(
       &e,
@@ -812,10 +793,10 @@ mod end_to_end_tests {
     // Same input + same opts → same labels. Default seed = 0.
     let mut e = Vec::new();
     for s in [0.0, 0.05, -0.05] {
-      e.push(perturbed(0, s));
+      e.push(perturbed_unit(0, s));
     }
     for s in [0.0, 0.05, -0.05] {
-      e.push(perturbed(10, s));
+      e.push(perturbed_unit(10, s));
     }
     let r1 = cluster(&e, &OfflineClusterOptions::default()).unwrap();
     let r2 = cluster(&e, &OfflineClusterOptions::default()).unwrap();
@@ -824,33 +805,28 @@ mod end_to_end_tests {
 
   #[test]
   fn eigengap_caps_at_max_auto_speakers() {
-    // MAX_AUTO_SPEAKERS + 5 mostly-orthogonal embeddings. The eigengap
-    // heuristic should NOT exceed MAX_AUTO_SPEAKERS = 15.
+    // MAX_AUTO_SPEAKERS + 5 embeddings constructed to guarantee positive
+    // pairwise similarity (no isolated nodes, so AllDissimilar should
+    // not fire). Confirms the eigengap heuristic respects the cap.
     //
-    // Use a small offset between dimensions so each pair has tiny
-    // similarity > 0 (pure orthogonal would AllDissimilar).
+    // Construction: v[i] dominates dim i, v[(i+1) % EMBEDDING_DIM] adds
+    // adjacent-dim leakage, AND every component has a small uniform
+    // baseline. The baseline ensures every pair has cosine sim > 0
+    // even when their non-baseline dims are orthogonal.
     let mut e = Vec::new();
     for i in 0..(MAX_AUTO_SPEAKERS as usize + 5) {
-      let mut v = [0.0f32; EMBEDDING_DIM];
+      let mut v = [0.01f32; EMBEDDING_DIM]; // uniform baseline
       v[i] = 0.95;
       v[(i + 1) % EMBEDDING_DIM] = 0.31;
       e.push(Embedding::normalize_from(v).unwrap());
     }
-    let r = cluster(&e, &OfflineClusterOptions::default());
-    match r {
-      Ok(labels) => {
-        let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
-        assert!(
-          unique.len() <= MAX_AUTO_SPEAKERS as usize,
-          "got {} clusters, cap is {}",
-          unique.len(),
-          MAX_AUTO_SPEAKERS
-        );
-      }
-      Err(Error::AllDissimilar) => {
-        // Acceptable — the synthetic structure may have isolated nodes.
-      }
-      Err(e) => panic!("unexpected error: {e}"),
-    }
+    let labels = cluster(&e, &OfflineClusterOptions::default()).unwrap();
+    let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
+    assert!(
+      unique.len() <= MAX_AUTO_SPEAKERS as usize,
+      "got {} clusters, cap is {}",
+      unique.len(),
+      MAX_AUTO_SPEAKERS
+    );
   }
 }
