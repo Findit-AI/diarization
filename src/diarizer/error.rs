@@ -6,7 +6,7 @@ use thiserror::Error;
 ///
 /// Wraps the per-module error types ([`crate::segment::Error`],
 /// [`crate::embed::Error`], [`crate::cluster::Error`]) plus
-/// diarizer-specific [`InternalError`] cases for state-machine
+/// diarizer-specific [`InternalError`] cases for integration-glue
 /// invariant violations.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -25,8 +25,13 @@ pub enum Error {
   #[error(transparent)]
   Cluster(#[from] crate::cluster::Error),
 
-  /// Internal Diarizer invariant violation. These should be
-  /// unreachable in practice; if you see one, file a bug.
+  /// An invariant of the Diarizer's internal state was violated.
+  /// Distinct from the wrapped variants because those wrap errors
+  /// FROM the underlying state machines; `Internal` covers the
+  /// integration glue itself (audio buffer indexing, activity range
+  /// reconciliation). Almost certainly a bug in dia or a pathological
+  /// caller (e.g., a custom mid-level composition supplying out-of-
+  /// order activities).
   #[error(transparent)]
   Internal(#[from] InternalError),
 }
@@ -34,40 +39,35 @@ pub enum Error {
 /// Internal Diarizer invariant violations. Surfaced by
 /// [`Error::Internal`].
 ///
-/// These represent state-machine inconsistencies that should be
-/// unreachable on well-formed input. The variant names are public
-/// but stable; a v0.X bump may add new variants. Match exhaustively
-/// only inside `dia::diarizer`; downstream callers should use a
-/// catch-all `_` arm.
+/// These represent integration-glue inconsistencies (audio buffer
+/// underflow / overrun) that should be unreachable per the §5.7
+/// segment-contract verification. Defense-in-depth.
+///
+/// `#[non_exhaustive]` — a v0.X bump may add new variants. Match
+/// exhaustively only inside `dia::diarizer`; downstream callers
+/// should use a catch-all `_` arm.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum InternalError {
-  /// `push_inference` called with a `WindowId` not pending in the
-  /// segmenter — typically a caller bug (mixing two sessions or
-  /// stale ids).
-  #[error("unknown WindowId from upstream segmenter")]
-  UnknownWindow,
+  /// An emitted activity's range start is older than the audio
+  /// buffer's earliest retained sample. Should never fire; defensive.
+  #[error("activity range start {activity_start} is below audio buffer base {audio_base} (delta = {} samples)", audio_base - activity_start)]
+  AudioBufferUnderflow {
+    /// Start of the activity range (absolute samples).
+    activity_start: u64,
+    /// Earliest retained sample in the audio buffer.
+    audio_base: u64,
+  },
 
-  /// Per-frame reconstruction received scores for a window already
-  /// finalized. Indicates an out-of-order push_inference or a
-  /// double-finalize bug.
-  #[error("inference scores arrived after window already finalized")]
-  LateScores,
-
-  /// `process_samples` extracted an embedding clip that, after
-  /// gathering by keep_mask, was below the embed::MIN_CLIP_SAMPLES
-  /// threshold AND the fallback path also failed.
-  ///
-  /// (This is distinct from `embed::Error::InvalidClip` which fires
-  /// at the embed layer; this variant is a reconstruction-layer
-  /// guard that we should always be able to handle gracefully.)
-  #[error("embedding clip too short after applying both clean and fallback masks")]
-  ClipTooShortAfterMasks,
-
-  /// Reconstruction state machine reached an impossible state
-  /// (e.g., negative chunk count). Indicates a Diarizer bug.
-  #[error("reconstruction state machine reached an unreachable state: {0}")]
-  Unreachable(&'static str),
+  /// An emitted activity's range end exceeds the audio buffer's
+  /// latest sample.
+  #[error("activity range end {activity_end} exceeds audio buffer end {audio_end}")]
+  AudioBufferOverrun {
+    /// End of the activity range (absolute samples).
+    activity_end: u64,
+    /// Latest sample in the audio buffer (`audio_base + buffered_samples`).
+    audio_end: u64,
+  },
 }
 
 #[cfg(test)]
@@ -75,27 +75,47 @@ mod tests {
   use super::*;
 
   #[test]
-  fn segment_error_round_trip() {
-    let e: Error = crate::segment::Error::InferenceShapeMismatch {
-      expected: 4123,
-      got: 100,
+  fn underflow_message_includes_delta() {
+    let e = InternalError::AudioBufferUnderflow {
+      activity_start: 100,
+      audio_base: 500,
+    };
+    let s = format!("{e}");
+    assert!(s.contains("100"));
+    assert!(s.contains("500"));
+    assert!(s.contains("400"), "delta 500-100=400 must appear: {s}");
+  }
+
+  #[test]
+  fn overrun_message_format() {
+    let e = InternalError::AudioBufferOverrun {
+      activity_end: 1500,
+      audio_end: 1000,
+    };
+    let s = format!("{e}");
+    assert!(s.contains("1500"));
+    assert!(s.contains("1000"));
+  }
+
+  #[test]
+  fn from_segment_error_compiles() {
+    // Verifies #[from] works for crate::segment::Error.
+    fn _accepts(e: crate::segment::Error) -> Error {
+      e.into()
     }
-    .into();
-    let s = format!("{e}");
-    assert!(s.contains("4123") || s.contains("100"));
   }
 
   #[test]
-  fn internal_unknown_window() {
-    let e: Error = InternalError::UnknownWindow.into();
-    let s = format!("{e}");
-    assert!(s.contains("WindowId") || s.contains("segmenter"));
+  fn from_embed_error_compiles() {
+    fn _accepts(e: crate::embed::Error) -> Error {
+      e.into()
+    }
   }
 
   #[test]
-  fn internal_unreachable_carries_message() {
-    let e = InternalError::Unreachable("test marker");
-    let s = format!("{e}");
-    assert!(s.contains("test marker"));
+  fn from_cluster_error_compiles() {
+    fn _accepts(e: crate::cluster::Error) -> Error {
+      e.into()
+    }
   }
 }
