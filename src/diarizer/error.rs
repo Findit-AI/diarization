@@ -34,6 +34,22 @@ pub enum Error {
   /// order activities).
   #[error(transparent)]
   Internal(#[from] InternalError),
+
+  /// The Diarizer encountered a non-recoverable error in a prior call
+  /// (e.g., an embedding failure mid-window). Subsequent
+  /// `process_samples` and `finish_stream` calls return this until
+  /// [`Diarizer::clear`](crate::diarizer::Diarizer::clear) resets the
+  /// state.
+  ///
+  /// This guards against silent partial-state corruption when a window's
+  /// activities are partially embedded/clustered before an error
+  /// propagates: rather than continue with an inconsistent reconstruction
+  /// state, the Diarizer refuses further work until the caller explicitly
+  /// recovers via `clear()`.
+  ///
+  /// Codex review HIGH.
+  #[error("Diarizer is poisoned by a prior error; call clear() to reset")]
+  Poisoned,
 }
 
 /// Internal Diarizer invariant violations. Surfaced by

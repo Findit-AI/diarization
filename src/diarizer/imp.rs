@@ -41,6 +41,22 @@ pub struct Diarizer {
   pub(crate) collected_embeddings: Vec<CollectedEmbedding>,
   /// Per-frame reconstruction state (filled in by Phase 10).
   pub(crate) reconstruct: crate::diarizer::reconstruct::ReconstructState,
+  /// Stashed in-flight segmentation inference. Set when
+  /// [`SegmentModel::infer`](crate::segment::SegmentModel::infer) returns
+  /// `Err` mid-drain so the next [`drain`](Self::drain) can retry the
+  /// same `(id, samples)` before polling new actions. Otherwise the
+  /// window's `id` would remain in [`Segmenter::pending`] forever and
+  /// its frames would silently disappear from the reconstruction.
+  /// Codex review HIGH.
+  pub(crate) pending_seg_inference: Option<(crate::segment::WindowId, Box<[f32]>)>,
+  /// Once `true`, [`process_samples`](Self::process_samples) and
+  /// [`finish_stream`](Self::finish_stream) immediately return
+  /// [`Error::Poisoned`] until [`clear`](Self::clear) resets the state.
+  /// Set on any non-recoverable error path that may have left
+  /// per-window activities partially embedded / clustered. The retryable
+  /// `pending_seg_inference` path is explicitly excluded — see
+  /// `process_samples` / `finish_stream`. Codex review HIGH.
+  pub(crate) poisoned: bool,
 }
 
 impl Diarizer {
@@ -57,6 +73,8 @@ impl Diarizer {
       total_samples_pushed: 0,
       collected_embeddings: Vec::new(),
       reconstruct: crate::diarizer::reconstruct::ReconstructState::new(),
+      pending_seg_inference: None,
+      poisoned: false,
     }
   }
 
@@ -96,6 +114,8 @@ impl Diarizer {
     self.total_samples_pushed = 0;
     self.collected_embeddings.clear();
     self.reconstruct.clear();
+    self.pending_seg_inference = None;
+    self.poisoned = false;
   }
 
   /// Borrow the per-activity context collected during streaming.
@@ -230,6 +250,15 @@ impl Diarizer {
   /// inference runs; per-window activities are observed). Embed, cluster,
   /// and reconstruct are NO-OPs awaiting Phases 9-11; no `DiarizedSpan`s
   /// are produced yet.
+  ///
+  /// **Poisoning** (Codex review HIGH): if a prior call to
+  /// `process_samples` or `finish_stream` returned `Err` from a
+  /// non-recoverable path (e.g., embed/cluster failure mid-window),
+  /// subsequent calls return [`Error::Poisoned`] until the caller
+  /// resets via [`clear`](Self::clear). The retryable
+  /// segmentation-inference path (stashed in
+  /// [`pending_seg_inference`](Self::pending_seg_inference)) does NOT
+  /// poison: callers can address the transient condition and retry.
   pub fn process_samples<F>(
     &mut self,
     seg_model: &mut SegmentModel,
@@ -240,8 +269,30 @@ impl Diarizer {
   where
     F: FnMut(DiarizedSpan),
   {
+    if self.poisoned {
+      return Err(Error::Poisoned);
+    }
+    let result = self.process_samples_inner(seg_model, embed_model, samples, &mut emit);
+    if result.is_err() && self.pending_seg_inference.is_none() {
+      // No retryable stash → not recoverable → poison so the caller
+      // can't continue past partial-state corruption.
+      self.poisoned = true;
+    }
+    result
+  }
+
+  fn process_samples_inner<F>(
+    &mut self,
+    seg_model: &mut SegmentModel,
+    embed_model: &mut EmbedModel,
+    samples: &[f32],
+    emit: &mut F,
+  ) -> Result<(), Error>
+  where
+    F: FnMut(DiarizedSpan),
+  {
     self.push_audio(samples);
-    self.drain(seg_model, embed_model, &mut emit)?;
+    self.drain(seg_model, embed_model, emit)?;
     self.trim_audio();
     Ok(())
   }
@@ -249,6 +300,9 @@ impl Diarizer {
   /// Finalize the stream: drain any pending segmentation work, then
   /// flush still-open per-cluster runs as `DiarizedSpan`s. After this
   /// call, `process_samples` must NOT be called again until [`clear`](Self::clear).
+  ///
+  /// Same poisoning semantics as
+  /// [`process_samples`](Self::process_samples). Codex review HIGH.
   pub fn finish_stream<F>(
     &mut self,
     seg_model: &mut SegmentModel,
@@ -258,12 +312,31 @@ impl Diarizer {
   where
     F: FnMut(DiarizedSpan),
   {
+    if self.poisoned {
+      return Err(Error::Poisoned);
+    }
+    let result = self.finish_stream_inner(seg_model, embed_model, &mut emit);
+    if result.is_err() && self.pending_seg_inference.is_none() {
+      self.poisoned = true;
+    }
+    result
+  }
+
+  fn finish_stream_inner<F>(
+    &mut self,
+    seg_model: &mut SegmentModel,
+    embed_model: &mut EmbedModel,
+    emit: &mut F,
+  ) -> Result<(), Error>
+  where
+    F: FnMut(DiarizedSpan),
+  {
     self.segmenter.finish();
-    self.drain(seg_model, embed_model, &mut emit)?;
+    self.drain(seg_model, embed_model, emit)?;
     // segment is finished → peek_next_window_start = u64::MAX → all
     // remaining frames finalize. flush_open_runs sets the boundary
     // explicitly and drains, plus closes any final open runs.
-    self.reconstruct.flush_open_runs(&mut emit);
+    self.reconstruct.flush_open_runs(emit);
     self.trim_audio();
     Ok(())
   }
@@ -297,11 +370,38 @@ impl Diarizer {
     // (a silent window's scores still need to drive boundary advance).
     let mut observed: Vec<WindowId> = Vec::new();
 
+    // Retry any stashed inference first. drain() previously consumed
+    // Action::NeedsInference and dropped (id, samples) on the stack if
+    // seg_model.infer errored, leaving the window in segmenter.pending
+    // with no way to retry. Now the stash retains it across drain()
+    // calls; on retry success the stash clears and push_inference
+    // commits. Codex review HIGH.
+    if let Some((id, samples)) = self.pending_seg_inference.take() {
+      match seg_model.infer(&samples) {
+        Ok(scores) => {
+          self.segmenter.push_inference(id, &scores)?;
+        }
+        Err(e) => {
+          self.pending_seg_inference = Some((id, samples));
+          return Err(e.into());
+        }
+      }
+    }
+
     while let Some(action) = self.segmenter.poll() {
       match action {
         Action::NeedsInference { id, samples } => {
-          let scores = seg_model.infer(&samples)?;
-          self.segmenter.push_inference(id, &scores)?;
+          // Stash before the call so a transient ort error doesn't
+          // lose the in-flight window. Codex review HIGH.
+          match seg_model.infer(&samples) {
+            Ok(scores) => {
+              self.segmenter.push_inference(id, &scores)?;
+            }
+            Err(e) => {
+              self.pending_seg_inference = Some((id, samples));
+              return Err(e.into());
+            }
+          }
         }
         Action::SpeakerScores {
           id,
