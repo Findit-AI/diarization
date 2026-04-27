@@ -25,7 +25,8 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! # #[cfg(feature = "ort")] {
+//! # #[cfg(feature = "ort")]
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! use dia::diarizer::{Diarizer, DiarizerOptions};
 //! use dia::embed::EmbedModel;
 //! use dia::segment::SegmentModel;
@@ -44,7 +45,7 @@
 //!   );
 //! })?;
 //! d.finish_stream(&mut seg, &mut emb, |_| {})?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # Ok(())
 //! # }
 //! ```
 //!
