@@ -148,6 +148,15 @@ pub(crate) struct ReconstructState {
   /// so disjoint runs retain distinct cluster mappings (Codex review
   /// CRITICAL).
   pub(crate) activities: Vec<ActivityCluster>,
+  /// `cluster_id` -> indices into `activities`, maintained alongside
+  /// the activities Vec so [`emit_finalized_frames`] only scans the
+  /// activities for the cluster currently being inspected, not every
+  /// activity ever recorded. For a long monologue (one cluster open
+  /// for hours) eviction can't drop entries the open run still
+  /// references, so `activities` grows large; without this index the
+  /// per-frame contributing-activities scan was O(N) where N = total
+  /// activities ever recorded (Codex review MEDIUM).
+  pub(crate) activities_by_cluster: HashMap<u64, Vec<usize>>,
   /// Indices into `activities` that have been logically dropped by
   /// `evict_finalized_window_metadata`. The Vec itself is append-only
   /// during a session so existing `contributing_activities` indices
@@ -185,6 +194,7 @@ impl ReconstructState {
     self.activations.clear();
     self.counts.clear();
     self.activities.clear();
+    self.activities_by_cluster.clear();
     self.evicted_activities.clear();
     self.window_starts.clear();
     self.open_runs.clear();
@@ -402,6 +412,10 @@ mod integrate_tests {
       cluster_id,
       used_clean_mask,
     });
+    s.activities_by_cluster
+      .entry(cluster_id)
+      .or_default()
+      .push(ai);
     ai
   }
 
@@ -795,27 +809,34 @@ impl ReconstructState {
         run.activation_sum_normalized += activation_normalized;
         run.frame_count += 1;
 
-        // Bookkeeping for activity_count and clean_mask_count: scan
-        // activities whose cluster matches AND whose absolute frame
-        // range covers `self.base_frame`. Per-activity (not per-(window,
-        // slot)) so disjoint runs of the same slot in the same window
-        // are counted separately (Codex review CRITICAL).
-        for (ai, ac) in self.activities.iter().enumerate() {
-          if self.evicted_activities.contains(&ai) || ac.cluster_id != *cluster_id {
-            continue;
-          }
-          let Some(&win_start) = self.window_starts.get(&ac.window_id) else {
-            continue; // window not yet integrated (defensive)
-          };
-          let win_start_frame = frame_index_of(win_start);
-          let abs_lo = win_start_frame + ac.frame_lo_in_window as u64;
-          let abs_hi = win_start_frame + ac.frame_hi_in_window as u64;
-          if self.base_frame >= abs_lo
-            && self.base_frame < abs_hi
-            && run.contributing_activities.insert(ai)
-            && ac.used_clean_mask
-          {
-            run.clean_mask_count += 1;
+        // Bookkeeping for activity_count and clean_mask_count.
+        //
+        // Scan only activities mapped to THIS cluster via the
+        // `activities_by_cluster` index — not every activity ever
+        // recorded. For a long monologue (one cluster open for hours),
+        // eviction can't drop entries the open run still references,
+        // so `activities` grows large; without this index the per-frame
+        // scan was O(N) where N = total activities ever recorded.
+        // Codex review MEDIUM.
+        if let Some(activity_indices) = self.activities_by_cluster.get(cluster_id) {
+          for &ai in activity_indices {
+            if self.evicted_activities.contains(&ai) {
+              continue;
+            }
+            let ac = &self.activities[ai];
+            let Some(&win_start) = self.window_starts.get(&ac.window_id) else {
+              continue; // window not yet integrated (defensive)
+            };
+            let win_start_frame = frame_index_of(win_start);
+            let abs_lo = win_start_frame + ac.frame_lo_in_window as u64;
+            let abs_hi = win_start_frame + ac.frame_hi_in_window as u64;
+            if self.base_frame >= abs_lo
+              && self.base_frame < abs_hi
+              && run.contributing_activities.insert(ai)
+              && ac.used_clean_mask
+            {
+              run.clean_mask_count += 1;
+            }
           }
         }
       }
@@ -856,6 +877,10 @@ mod emit_tests {
       cluster_id,
       used_clean_mask,
     });
+    s.activities_by_cluster
+      .entry(cluster_id)
+      .or_default()
+      .push(ai);
     ai
   }
 
@@ -963,6 +988,56 @@ mod emit_tests {
     assert!(
       !span_b.is_new_speaker(),
       "second emission of cluster 7 must NOT be marked new; got {span_b:?}"
+    );
+  }
+
+  #[test]
+  fn emit_finalized_frames_uses_per_cluster_index() {
+    // Codex review MEDIUM regression: emit_finalized_frames must scan
+    // only activities for the current active cluster, NOT every activity
+    // in the session. Seed 100 unrelated cluster-99 activities (in
+    // already-integrated earlier windows) plus 1 cluster-7 activity in
+    // the target window. Drive emit; the cluster-7 span must report
+    // activity_count == 1, NOT 101.
+    let mut s = ReconstructState::new();
+
+    // 100 unrelated cluster-99 activities in earlier windows. Their
+    // window_starts must be populated for the contributing-activities
+    // scan to consider them.
+    for i in 1..=100u64 {
+      let w_start = i * WINDOW_SAMPLES as u64;
+      let id_other = make_window_id(w_start as i64, i);
+      s.window_starts.insert(id_other, w_start);
+      let _ = push_activity(&mut s, id_other, 0, 0, FRAMES_PER_WINDOW as u32, 99, true);
+    }
+
+    // The real cluster-7 activity in the target (frame-0) window.
+    let id_target = make_window_id(0, 0);
+    let _ = push_activity(&mut s, id_target, 0, 100, 200, 7, true);
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for p in probs[0].iter_mut().skip(100).take(100) {
+      *p = 0.9;
+    }
+    s.integrate_window(id_target, 0, &probs, 0.5);
+
+    s.advance_finalization_boundary(u64::MAX);
+    let mut emitted = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted.push(span));
+
+    let span = emitted
+      .iter()
+      .find(|s| s.speaker_id() == 7)
+      .expect("expected one cluster-7 span");
+    assert_eq!(
+      span.activity_count(),
+      1,
+      "expected 1 contributing activity (just the cluster-7 one); got {}",
+      span.activity_count()
+    );
+    assert!(
+      (span.clean_mask_fraction() - 1.0).abs() < 1e-7,
+      "clean_mask_fraction = {}",
+      span.clean_mask_fraction()
     );
   }
 }
@@ -1184,6 +1259,10 @@ mod flush_eviction_tests {
       cluster_id,
       used_clean_mask,
     });
+    s.activities_by_cluster
+      .entry(cluster_id)
+      .or_default()
+      .push(ai);
     ai
   }
 

@@ -475,6 +475,10 @@ impl Diarizer {
           .div_ceil(crate::segment::options::WINDOW_SAMPLES as u64) as u32;
       let frame_hi_in_window =
         frame_hi_in_window.min(crate::segment::options::FRAMES_PER_WINDOW as u32);
+      // Record the new activity AND its index in the per-cluster index so
+      // emit_finalized_frames only scans activities for the current cluster
+      // (Codex review MEDIUM).
+      let activity_index = self.reconstruct.activities.len();
       self
         .reconstruct
         .activities
@@ -486,6 +490,12 @@ impl Diarizer {
           cluster_id,
           used_clean_mask: used_clean,
         });
+      self
+        .reconstruct
+        .activities_by_cluster
+        .entry(cluster_id)
+        .or_default()
+        .push(activity_index);
 
       // Optional collected_embeddings.
       if self.opts.collect_embeddings() {
