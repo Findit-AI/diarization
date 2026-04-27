@@ -10,7 +10,10 @@
 //! `cluster` is a `todo!()` placeholder; Tasks 19-21 wire in the rest.
 
 use crate::{
-  cluster::{Error, options::OfflineClusterOptions},
+  cluster::{
+    Error,
+    options::{MAX_AUTO_SPEAKERS, OfflineClusterOptions},
+  },
   embed::{Embedding, NORM_EPSILON},
 };
 use nalgebra::{DMatrix, DVector};
@@ -88,6 +91,148 @@ pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> 
   let inv_sqrt_diag = DMatrix::from_diagonal(&inv_sqrt);
   // L_sym = I - D^{-1/2} A D^{-1/2}.
   DMatrix::<f64>::identity(n, n) - &inv_sqrt_diag * a * &inv_sqrt_diag
+}
+
+/// Eigendecompose the symmetric Laplacian `L_sym` and return the eigenvalues
+/// and matching eigenvectors sorted by ascending eigenvalue.
+///
+/// Returns `(eigenvalues, eigenvectors)` where:
+/// - `eigenvalues[k]` is the k-th smallest eigenvalue of `L_sym` (ascending).
+/// - `eigenvectors[(row, k)]` is the k-th eigenvector (column-major; aligned
+///   with `eigenvalues[k]`).
+///
+/// Uses `nalgebra::SymmetricEigen`, which expects a real symmetric input —
+/// `L_sym` qualifies by construction in [`normalized_laplacian`]. nalgebra
+/// returns eigenvalues in implementation-defined order; this function sorts
+/// them ascending and reorders the eigenvector columns to match.
+///
+/// Returns [`Error::EigendecompositionFailed`] if any eigenvalue is non-finite
+/// (NaN or infinity), which signals a pathological / singular input matrix.
+#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
+pub(crate) fn eigendecompose(l: DMatrix<f64>) -> Result<(Vec<f64>, DMatrix<f64>), Error> {
+  let n = l.nrows();
+  // L_sym is real symmetric; SymmetricEigen is the numerically stable choice.
+  let sym = nalgebra::SymmetricEigen::new(l);
+
+  // Detect numerical failure first.
+  if sym.eigenvalues.iter().any(|v| !v.is_finite()) {
+    return Err(Error::EigendecompositionFailed);
+  }
+
+  // Pair each eigenvalue with its original column index, sort ascending.
+  let mut indexed: Vec<(f64, usize)> = sym
+    .eigenvalues
+    .iter()
+    .copied()
+    .enumerate()
+    .map(|(i, v)| (v, i))
+    .collect();
+  indexed.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+  // Materialize sorted vectors into a fresh DMatrix.
+  let mut sorted_vecs = DMatrix::<f64>::zeros(n, n);
+  let mut sorted_vals = Vec::with_capacity(n);
+  for (new_col, &(val, old_col)) in indexed.iter().enumerate() {
+    sorted_vals.push(val);
+    sorted_vecs.set_column(new_col, &sym.eigenvectors.column(old_col));
+  }
+
+  Ok((sorted_vals, sorted_vecs))
+}
+
+/// Choose K (number of clusters) via the eigengap heuristic, with a target
+/// override.
+///
+/// - If `target_speakers = Some(k)`, returns `k` directly.
+/// - Otherwise computes the largest gap `λ[k+1] − λ[k]` for k in
+///   `[0, k_max)` where `k_max = min(N − 1, MAX_AUTO_SPEAKERS = 15)` (spec
+///   §5.5 step 5; spec §4.3 line 697-698 caps the auto-detected count).
+/// - Returns `K = argmax_k (λ[k+1] − λ[k]) + 1`, floored at 1.
+///
+/// `eigenvalues` must be sorted ascending (as produced by [`eigendecompose`]).
+/// Indexing assumes `eigenvalues.len() == n`.
+#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
+pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>) -> usize {
+  if let Some(k) = target_speakers {
+    return k as usize;
+  }
+  // k_max bounds: at most N-1 gaps exist, capped at MAX_AUTO_SPEAKERS.
+  let k_max = (n.saturating_sub(1)).min(MAX_AUTO_SPEAKERS as usize);
+  if k_max < 1 {
+    return 1;
+  }
+
+  // Largest gap: argmax over windows of size 2 in the first k_max+1 entries.
+  let (best_k, _) = eigenvalues
+    .windows(2)
+    .take(k_max)
+    .enumerate()
+    .map(|(k, w)| (k + 1, w[1] - w[0]))
+    .max_by(|a, b| a.1.total_cmp(&b.1))
+    .unwrap_or((1, 0.0));
+
+  best_k.max(1)
+}
+
+#[cfg(test)]
+mod eigen_tests {
+  use super::*;
+
+  #[test]
+  fn eigendecompose_identity_yields_unit_eigenvalues() {
+    let id = DMatrix::<f64>::identity(4, 4);
+    let (vals, _) = eigendecompose(id).unwrap();
+    assert_eq!(vals.len(), 4);
+    for v in vals {
+      assert!(
+        (v - 1.0).abs() < 1e-10,
+        "identity should have all eigenvalues = 1.0; got {v}"
+      );
+    }
+  }
+
+  #[test]
+  fn eigendecompose_diagonal_sorts_ascending() {
+    // Diagonal matrix [3, 1, 2] → eigenvalues = [3, 1, 2] in arbitrary order;
+    // we want ascending [1, 2, 3].
+    let mut m = DMatrix::<f64>::zeros(3, 3);
+    m[(0, 0)] = 3.0;
+    m[(1, 1)] = 1.0;
+    m[(2, 2)] = 2.0;
+    let (vals, _) = eigendecompose(m).unwrap();
+    assert_eq!(vals.len(), 3);
+    assert!((vals[0] - 1.0).abs() < 1e-10);
+    assert!((vals[1] - 2.0).abs() < 1e-10);
+    assert!((vals[2] - 3.0).abs() < 1e-10);
+  }
+
+  #[test]
+  fn pick_k_target_speakers_overrides_eigengap() {
+    let eigs = vec![0.0, 0.5, 0.6, 0.95];
+    assert_eq!(pick_k(&eigs, 4, Some(3)), 3);
+    assert_eq!(pick_k(&eigs, 4, Some(1)), 1);
+  }
+
+  #[test]
+  fn pick_k_eigengap_picks_largest_jump() {
+    // Gaps: 0.01-0.0=0.01, 0.02-0.01=0.01, 0.9-0.02=0.88. Largest at k=2,
+    // returning best_k = 2 + 1 = 3.
+    let eigs = vec![0.0, 0.01, 0.02, 0.9];
+    assert_eq!(pick_k(&eigs, 4, None), 3);
+  }
+
+  #[test]
+  fn pick_k_caps_at_max_auto_speakers() {
+    // 30 ascending eigenvalues with uniform tiny gaps. The cap, not the
+    // argmax, drives the result.
+    let eigs: Vec<f64> = (0..30).map(|i| i as f64 * 0.01).collect();
+    let k = pick_k(&eigs, 30, None);
+    assert!(
+      k <= MAX_AUTO_SPEAKERS as usize,
+      "K must be ≤ MAX_AUTO_SPEAKERS = {}, got {k}",
+      MAX_AUTO_SPEAKERS
+    );
+  }
 }
 
 #[cfg(test)]
