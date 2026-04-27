@@ -238,8 +238,8 @@ pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>
 /// - All min/sum reductions left-to-right in `f64`.
 ///
 /// Caller invariants: `k >= 1`, `n >= k`, all `mat` rows finite. Caller
-/// (Task 21) guarantees these via [`validate_offline_input`] + the
-/// fast-path filter for N<=2.
+/// (`cluster_offline`) guarantees these via the validation pass and
+/// fast-path filter for N<=2 in `src/cluster/offline.rs`.
 pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec<f64>> {
   let n = mat.nrows();
   debug_assert!(k >= 1, "K must be >= 1");

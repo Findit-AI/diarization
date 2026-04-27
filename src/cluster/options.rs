@@ -19,7 +19,7 @@ pub const DEFAULT_EMA_ALPHA: f32 = 0.2;
 /// Hard upper bound on the auto-detected speaker count used by
 /// [`cluster_offline`](crate::cluster::cluster_offline) when
 /// [`OfflineClusterOptions::target_speakers`] is `None` (spec §4.3, §5.5).
-/// Has no effect on the online [`Clusterer`].
+/// Has no effect on the online [`Clusterer`](crate::cluster::Clusterer).
 pub const MAX_AUTO_SPEAKERS: u32 = 15;
 
 // ── Online clustering options ─────────────────────────────────────────────

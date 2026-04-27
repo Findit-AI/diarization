@@ -1,5 +1,5 @@
-//! Online streaming speaker clustering (`Clusterer`) plus offline batch
-//! clustering (`cluster_offline`).
+//! Online streaming speaker clustering ([`Clusterer`]) plus offline batch
+//! clustering ([`cluster_offline`]).
 //!
 //! # Online path
 //! [`Clusterer`] accepts one embedding at a time and maintains a set of
@@ -9,13 +9,17 @@
 //!
 //! # Offline path
 //! [`cluster_offline`] takes a slice of embeddings and returns a
-//! `Vec<u64>` of speaker labels (one per embedding).  Filled in by
-//! Task 14 (agglomerative) and Phase 4 (spectral).
+//! `Vec<u64>` of speaker labels (one per embedding). Dispatches to
+//! [`agglomerative`](OfflineMethod::Agglomerative) (Single / Complete /
+//! Average linkage) or [`spectral`](OfflineMethod::Spectral) (default;
+//! eigengap-K detection + K-means++ + Lloyd refinement, byte-deterministic
+//! via [`ChaCha8Rng`](rand_chacha::ChaCha8Rng)).
 
 mod error;
 mod options;
 mod types;
 
+pub use crate::embed::Embedding;
 pub use error::Error;
 pub use offline::cluster_offline;
 pub use online::Clusterer;
