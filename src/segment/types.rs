@@ -124,7 +124,13 @@ impl SpeakerActivity {
 /// participate in pattern matching, which is the standard Rust enum idiom.
 /// Structs with invariants (`WindowId`, `SpeakerActivity`) use private
 /// fields with accessors. The two conventions coexist deliberately.
+///
+/// **`#[non_exhaustive]`** (added in v0.X for the dia phase-2 release):
+/// downstream `match` expressions must include `_ => ...` to remain
+/// forward-compatible. New variants may be added in subsequent minor
+/// versions without a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Action {
   /// The caller must run ONNX inference on `samples` and call
   /// [`Segmenter::push_inference`](crate::segment::Segmenter::push_inference)
@@ -141,6 +147,30 @@ pub enum Action {
   /// A finalized speaker-agnostic voice region. Emit-only — never
   /// retracted once produced.
   VoiceSpan(TimeRange),
+  /// Per-window per-speaker per-frame raw probabilities. Emitted from
+  /// [`Segmenter::push_inference`](crate::segment::Segmenter::push_inference)
+  /// **immediately before** the `Activity` events for the same `id`.
+  ///
+  /// Carries the powerset-decoded per-frame voice probabilities for
+  /// each of the 3 speaker slots. Used by `dia::Diarizer` for
+  /// pyannote-style per-frame reconstruction (per-frame per-cluster
+  /// activation overlap-add, count-bounded argmax). Most callers
+  /// can ignore this variant via the `_ => ...` arm of `match`.
+  ///
+  /// Layout: `raw_probs[slot][frame]`. `MAX_SPEAKER_SLOTS = 3`,
+  /// `FRAMES_PER_WINDOW = 589`. ~7 KB allocation per emission;
+  /// see spec §15 #53 for a v0.1.1 pooling optimization.
+  SpeakerScores {
+    /// Correlation handle of the window these scores belong to.
+    id: WindowId,
+    /// Window start in absolute samples (`id.range().start_pts()` in `SAMPLE_RATE_TB`).
+    window_start: u64,
+    /// Per-(slot, frame) raw probabilities.
+    raw_probs: alloc::boxed::Box<
+      [[f32; crate::segment::options::FRAMES_PER_WINDOW];
+        crate::segment::options::MAX_SPEAKER_SLOTS as usize],
+    >,
+  },
 }
 
 /// Layer-2 emission events (Layer 2 hides `NeedsInference` from the caller).

@@ -225,6 +225,10 @@ impl Segmenter {
         }
         Action::Activity(a) => emit(Event::Activity(a)),
         Action::VoiceSpan(r) => emit(Event::VoiceSpan(r)),
+        // Layer 2 hides per-frame raw probabilities from the caller, the
+        // same way it hides `NeedsInference`. Diarizer-grade callers that
+        // need `SpeakerScores` use the Layer-1 `poll` API directly.
+        Action::SpeakerScores { .. } => {}
       }
     }
     Ok(())

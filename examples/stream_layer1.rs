@@ -43,6 +43,7 @@ fn main() -> Result<(), dia::segment::Error> {
           );
         }
         Action::VoiceSpan(r) => println!("voice span: {r:?}"),
+        _ => {}
       }
     }
   }
@@ -62,6 +63,7 @@ fn main() -> Result<(), dia::segment::Error> {
         a.range()
       ),
       Action::VoiceSpan(r) => println!("tail voice span: {r:?}"),
+      _ => {}
     }
   }
   Ok(())

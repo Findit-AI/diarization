@@ -27,6 +27,7 @@ fn bench_one_minute(c: &mut Criterion) {
                 seg.push_inference(id, &scores).unwrap();
               }
               Action::Activity(_) | Action::VoiceSpan(_) => {}
+              _ => {}
             }
           }
         }
