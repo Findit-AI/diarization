@@ -279,6 +279,15 @@ impl Segmenter {
       speaker_probs[2][f] = s[2];
     }
 
+    // Emit raw per-(slot, frame) probabilities BEFORE any activities for
+    // the same window so a downstream `Diarizer` can buffer scores per
+    // `WindowId` and then process the activities that follow.
+    self.pending_actions.push_back(Action::SpeakerScores {
+      id,
+      window_start: start,
+      raw_probs: Box::new(speaker_probs_to_array(&speaker_probs)),
+    });
+
     // Emit per-window speaker activities.
     self.emit_speaker_activities(id, start, &speaker_probs);
 
@@ -542,6 +551,21 @@ fn duration_to_samples(d: core::time::Duration) -> u64 {
 #[inline]
 fn total_frames_of(total_samples: u64) -> u64 {
   (total_samples * FRAMES_PER_WINDOW as u64).div_ceil(WINDOW_SAMPLES as u64)
+}
+
+/// Copy a `[Vec<f32>; MAX_SPEAKER_SLOTS]` (each of length
+/// `FRAMES_PER_WINDOW`) into a fixed-size array suitable for
+/// [`Action::SpeakerScores::raw_probs`].
+#[inline]
+fn speaker_probs_to_array(
+  probs: &[Vec<f32>; MAX_SPEAKER_SLOTS as usize],
+) -> [[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize] {
+  let mut out = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+  for (s, slot_probs) in probs.iter().enumerate() {
+    debug_assert_eq!(slot_probs.len(), FRAMES_PER_WINDOW);
+    out[s].copy_from_slice(slot_probs);
+  }
+  out
 }
 
 #[cfg(test)]
@@ -867,5 +891,40 @@ mod tests {
     // After all three, boundary should advance to next_window_idx * step.
     // We don't strictly assert a span here (depends on hysteresis crossing
     // a boundary); just confirm the pipeline ran without error.
+  }
+
+  #[test]
+  fn push_inference_emits_speaker_scores_before_activities() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.001f32; 160_000]);
+    let id = match s.poll() {
+      Some(Action::NeedsInference { id, .. }) => id,
+      other => panic!("expected NeedsInference, got {other:?}"),
+    };
+    let scores = vec![1.0f32 / POWERSET_CLASSES as f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    s.push_inference(id, &scores).unwrap();
+
+    let mut saw_scores = false;
+    while let Some(action) = s.poll() {
+      match action {
+        Action::SpeakerScores {
+          id: sid,
+          window_start,
+          raw_probs,
+        } => {
+          assert_eq!(sid, id);
+          assert_eq!(window_start, 0);
+          assert_eq!(raw_probs.len(), MAX_SPEAKER_SLOTS as usize);
+          assert_eq!(raw_probs[0].len(), FRAMES_PER_WINDOW);
+          saw_scores = true;
+        }
+        Action::Activity(_) => {
+          assert!(saw_scores, "Activity emitted before SpeakerScores");
+        }
+        Action::VoiceSpan(_) => {}
+        _ => {}
+      }
+    }
+    assert!(saw_scores, "no SpeakerScores emitted");
   }
 }
