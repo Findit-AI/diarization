@@ -16,8 +16,13 @@ use crate::{
   embed::Embedding,
 };
 
-/// Cluster `embeddings` agglomeratively. Caller guarantees `embeddings.len() >= 3`
-/// (the N<=2 fast path lives in `cluster_offline`).
+/// Cluster `embeddings` agglomeratively. Returns labels in `[0..k)` assigned
+/// in merge-order, parallel to the input slice.
+///
+/// Caller guarantees `embeddings.len() >= 3` (the N<=2 fast path lives in
+/// `cluster_offline`). Runs in O(N^3) time, O(N^2) space — Lance-Williams
+/// caching could amortize to O(N^2 · log N) but the current scale (≈100s of
+/// embeddings per session) doesn't justify the complexity.
 pub(crate) fn cluster(
   embeddings: &[Embedding],
   linkage: Linkage,
@@ -44,7 +49,9 @@ pub(crate) fn cluster(
   let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
   let stop_dist = 1.0 - opts.similarity_threshold();
 
-  // Step 3-4: agglomerative merge loop.
+  // Step 3-4: agglomerative merge loop. O(N) iterations × O(K^2) argmin
+  // = O(N^3) total. Acceptable at v0.1.0 scale; Lance-Williams update
+  // would amortize to O(N^2 · log N) for a future revision.
   loop {
     if clusters.len() == 1 {
       break;
@@ -92,6 +99,10 @@ pub(crate) fn cluster(
 
 /// Pairwise distance between two clusters under the given linkage.
 fn pair_distance(a: &[usize], b: &[usize], d: &[Vec<f32>], linkage: Linkage) -> f32 {
+  debug_assert!(
+    !a.is_empty() && !b.is_empty(),
+    "pair_distance requires non-empty clusters"
+  );
   match linkage {
     Linkage::Single => {
       // Min over a × b.
@@ -107,7 +118,7 @@ fn pair_distance(a: &[usize], b: &[usize], d: &[Vec<f32>], linkage: Linkage) -> 
     }
     Linkage::Complete => {
       // Max over a × b.
-      let mut worst = 0.0f32;
+      let mut worst = f32::NEG_INFINITY;
       for &i in a {
         for &j in b {
           if d[i][j] > worst {
