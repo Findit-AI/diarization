@@ -1,5 +1,132 @@
 # UNRELEASED
 
+This release ships `dia::embed`, `dia::cluster`, and `dia::Diarizer`,
+completing the v0.1.0 phase 2 vision. `dia::segment` gains an additive
+v0.X bump (see CORRECTNESS GUARANTEES below).
+
+FEATURES — `dia::embed`
+
+- **`Embedding`** newtype (256-d L2-normalized) with invariant
+  `||embedding|| > NORM_EPSILON`, enforced by `Embedding::normalize_from`
+  returning `None` on degenerate inputs.
+- **`compute_fbank`** kaldi-compatible feature extraction wrapping
+  `kaldi-native-fbank`. Verified against `torchaudio.compliance.kaldi.fbank`
+  per the spec §15 #43 pre-impl spike.
+- **`EmbedModel`** ort wrapper for WeSpeaker ResNet34. `from_file` /
+  `from_memory` constructors with `_with_options` variants. Auto-derives
+  `Send`; explicitly `!Sync` (matches `dia::segment::SegmentModel`).
+- **`embed`** / **`embed_with_meta`**: high-level API. Sliding-window
+  mean for clips > 2 s.
+- **`embed_weighted`** / **`embed_weighted_with_meta`**: per-sample
+  voice-probability soft weighting.
+- **`embed_masked`** / **`embed_masked_with_meta`**: rev-8 binary
+  keep-mask (gather-and-embed). Used by `Diarizer::exclude_overlap`.
+- **Generic `EmbeddingMeta<A=(), T=()>`**: caller-supplied metadata
+  flows through `EmbeddingResult`. Defaults to `()` so the unit-typed
+  metadata path is zero-cost.
+- **`cosine_similarity`** free function alongside `Embedding::similarity`.
+
+FEATURES — `dia::cluster`
+
+- **Online streaming `Clusterer`** with `submit(&Embedding)` returning
+  `ClusterAssignment { speaker_id, is_new_speaker, similarity }`.
+  `RollingMean` and `Ema(α)` update strategies on an unnormalized
+  accumulator (handles antipodal cancellation gracefully via lazy
+  `cached_centroid` refresh).
+- **`OverflowStrategy::Reject`** (default — caller decides) /
+  **`AssignClosest`** (no centroid update on forced assignment).
+- **Offline `cluster_offline`** with two methods:
+  - **Spectral** (default): cosine affinity + degree-matrix
+    precondition + normalized Laplacian + nalgebra eigendecomposition
+    + eigengap K-detection (capped at `MAX_AUTO_SPEAKERS = 15`) +
+    K-means++ + Lloyd. PRNG pinned to `rand_chacha::ChaCha8Rng` with
+    explicit byte-fixture regression test.
+  - **Agglomerative**: Single / Complete / Average linkage with
+    cosine distance ReLU-clamped to `[0, 1]`.
+- **Deterministic K-means++** seeding (Arthur & Vassilvitskii 2007).
+  Default seed `0`; same input + seed → same labels across runs.
+- **N ≤ 2 fast paths** before any matrix work; isolated-node
+  precondition catches dissimilar inputs without an undefined Laplacian.
+
+FEATURES — `dia::Diarizer` (rev-6 pyannote-style reconstruction)
+
+- **`process_samples`** / **`finish_stream`**: streaming entry points
+  borrowing `&mut SegmentModel` + `&mut EmbedModel` per call.
+- **VAD-friendly variable-length input**: empty / sub-window /
+  multi-clip / whole-stream pushes all handled without special-casing.
+- **`exclude_overlap`** mask (spec §5.8): per-window binarized + clean
+  masks → sample-rate `keep_mask`; clean used when its gathered length
+  ≥ `MIN_CLIP_SAMPLES`, else falls back to speaker-only. On doubly-
+  failed gather, skip-and-continue (matches pyannote
+  `speaker_verification.py:611-612`).
+- **Per-frame per-cluster overlap-add stitching** (spec §5.9):
+  collapse-by-max within cluster + overlap-add SUM across windows.
+- **Per-frame instantaneous-speaker-count tracking** (spec §5.10):
+  per-frame overlap-add MEAN with warm-up trim
+  (`speaker_count(warm_up=(0.1, 0.1))`), rounded.
+- **Count-bounded argmax + per-cluster RLE** (spec §5.11):
+  deterministic tie-break (smaller cluster_id wins).
+- **Output**: `DiarizedSpan { range, speaker_id, is_new_speaker,
+  average_activation, activity_count, clean_mask_fraction }` per
+  closed speaker turn.
+- **`collected_embeddings()`**: per-(window, slot) granularity context
+  retained across the session.
+- **Introspection**: `pending_inferences`, `buffered_samples`,
+  `buffered_frames`, `total_samples_pushed`, `num_speakers`, `speakers`.
+- **Auto-derived `Send + Sync`**.
+
+FEATURES — `dia::segment` v0.X bump
+
+- **`Action::SpeakerScores { id, window_start, raw_probs }`** variant
+  emitted from `push_inference` alongside `Action::Activity`.
+- **`Action` is now `#[non_exhaustive]`** so future additions are
+  non-breaking.
+- **`pub(crate) Segmenter::peek_next_window_start()`** for the
+  Diarizer's reconstruction finalization-boundary computation.
+
+CORRECTNESS GUARANTEES
+
+- **Bit-deterministic offline clustering** for a given input + seed,
+  enforced by `tests/chacha_keystream_fixture.rs` regression test.
+- **Frame-rate math verified**: `dia::segment::stitch::frame_to_sample`
+  yields ≈ 271.65 samples/frame (≈ 58.9 fps); the Diarizer carries a
+  `frame_to_sample_u64` helper bit-exactly equivalent to segment's
+  `u32` version.
+- **Documented divergences from pyannote** (spec §1): sliding-window
+  mean for long-clip embed, sample-rate vs frame-rate gather in
+  `exclude_overlap`, online vs batch clustering, default Spectral vs
+  pyannote VBx, deterministic argmax tie-break.
+
+TESTING
+
+- ~175 unit tests across `dia::embed`, `dia::cluster`, `dia::diarizer`.
+- 149 lib tests pass on `--no-default-features --features std` (no ort).
+- Gated integration tests for end-to-end Diarizer pump on a 30-s clip
+  (8 #[ignore]'d tests in `tests/integration_diarizer.rs`).
+- Pyannote parity harness (`tests/parity/run.sh`) — manual; targets
+  DER ≤ 10% absolute (rev-8 T3-I relaxed from 5%).
+
+BUILD
+
+- New deps: `nalgebra = "0.34"`, `rand = "0.10"` (default-features =
+  false), `rand_chacha = "0.10"` (default-features = false),
+  `kaldi-native-fbank = "0.1"`.
+
+KNOWN LIMITATIONS / DEFERRED TO v0.1.1+
+
+- No bundled WeSpeaker model (~25 MB); use
+  `scripts/download-embed-model.sh`.
+- VBx clustering (pyannote's offline default) not shipped; spec §15 #44.
+- HMM-GMM clustering not shipped; spec §15.
+- `min_cluster_size` cluster pruning not shipped; spec §15.
+- Configurable `warm_up` for speaker-count not shipped; hardcoded to
+  pyannote default `(0.1, 0.1)`. Spec §15 #47.
+- Configurable `min_duration_on/off` for span-merging not shipped;
+  spec §15 #48.
+- Mask-aware embedding ONNX export deferred; current path uses
+  sample-rate gather + sliding-window-mean (one extra divergence
+  from pyannote on long masked clips). Spec §15 #49.
+
 # 0.1.0 (2026-04-26)
 
 Initial release. Ships the `dia::segment` module — Sans-I/O speaker
