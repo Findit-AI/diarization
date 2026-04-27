@@ -12,7 +12,7 @@
 //! methods (`integrate_window`, `emit_finalized_frames`, `flush_open_runs`)
 //! land in Tasks 40-42.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::segment::{
   WindowId,
@@ -73,6 +73,32 @@ pub(crate) struct FrameCount {
   pub(crate) count_chunk_count: u32,
 }
 
+/// One activity (one contiguous run of a single slot in a single window)
+/// after embed-and-cluster.
+///
+/// Spec §5.9 / §5.11. A single window can yield MULTIPLE
+/// `Action::Activity` events for the same slot (pyannote hysteresis with
+/// per-frame onset/offset emits one Activity per contiguous active run).
+/// Each run gets embedded and clustered independently; each gets its own
+/// `ActivityCluster` record with the slot's window-local frame range so
+/// reconstruction applies the cluster ONLY to that range, not to every
+/// frame where the slot's raw probability is positive (Codex review
+/// CRITICAL: per-`(WindowId, slot)` keying collapsed disjoint activities
+/// into one entry — last insertion won, falsely re-attributing the early
+/// activity's frames to the late activity's cluster).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ActivityCluster {
+  pub(crate) window_id: WindowId,
+  pub(crate) slot: u8,
+  /// Window-local frame range covering this activity. Inclusive lower,
+  /// exclusive upper. Computed from the activity's TimeRange via
+  /// frame_index_of.
+  pub(crate) frame_lo_in_window: u32,
+  pub(crate) frame_hi_in_window: u32,
+  pub(crate) cluster_id: u64,
+  pub(crate) used_clean_mask: bool,
+}
+
 /// Per-cluster open-run state (spec §5.11). Lives in
 /// [`ReconstructState::open_runs`] until emitted as a
 /// [`crate::diarizer::DiarizedSpan`] by
@@ -90,10 +116,11 @@ pub(crate) struct PerClusterRun {
   pub(crate) activation_sum_normalized: f64,
   /// Number of frames that contributed to `activation_sum_normalized`.
   pub(crate) frame_count: u32,
-  /// Set of `(WindowId, slot)` pairs that contributed to this run.
-  /// Used for the `activity_count` and `clean_mask_fraction` quality
-  /// metrics on the emitted `DiarizedSpan`.
-  pub(crate) contributing_activities: HashSet<(WindowId, u8)>,
+  /// Set of activity indices (into `ReconstructState::activities`) that
+  /// contributed to this run. Used for the `activity_count` and
+  /// `clean_mask_fraction` quality metrics on the emitted
+  /// [`DiarizedSpan`](crate::diarizer::DiarizedSpan).
+  pub(crate) contributing_activities: HashSet<usize>,
   /// Of the contributing activities, how many used the clean
   /// (overlap-excluded) mask. `clean_mask_fraction =
   /// clean_mask_count / contributing_activities.len()`.
@@ -113,13 +140,19 @@ pub(crate) struct ReconstructState {
   pub(crate) activations: VecDeque<HashMap<u64, f32>>,
   /// Per-frame counts (parallel to `activations`).
   pub(crate) counts: VecDeque<FrameCount>,
-  /// `(window_id, slot) → cluster_id`. Populated by Phase 11's pump
-  /// (Task 43) when activities are clustered. Read by `integrate_window`.
-  /// `BTreeMap` (not `HashMap`) so iteration order is stable.
-  pub(crate) slot_to_cluster: BTreeMap<(WindowId, u8), u64>,
-  /// `(window_id, slot) → used_clean_mask_flag`. Populated alongside
-  /// `slot_to_cluster` for the `clean_mask_fraction` metric.
-  pub(crate) activity_clean_flags: HashMap<(WindowId, u8), bool>,
+  /// Append-only record of every embedded+clustered activity. Indexed
+  /// from `PerClusterRun::contributing_activities` and from the
+  /// `integrate_window` Step A loop. Pyannote hysteresis can emit
+  /// multiple disjoint activities for the same `(window_id, slot)` —
+  /// each gets its own record with its own window-local frame range,
+  /// so disjoint runs retain distinct cluster mappings (Codex review
+  /// CRITICAL).
+  pub(crate) activities: Vec<ActivityCluster>,
+  /// Indices into `activities` that have been logically dropped by
+  /// `evict_finalized_window_metadata`. The Vec itself is append-only
+  /// during a session so existing `contributing_activities` indices
+  /// remain stable; iteration sites filter on this set.
+  pub(crate) evicted_activities: HashSet<usize>,
   /// `window_id → window_start (absolute samples)`. Populated by
   /// `integrate_window`; consumed by the pump (Task 43) when slicing
   /// audio for embedding extraction.
@@ -151,8 +184,8 @@ impl ReconstructState {
     self.base_frame = 0;
     self.activations.clear();
     self.counts.clear();
-    self.slot_to_cluster.clear();
-    self.activity_clean_flags.clear();
+    self.activities.clear();
+    self.evicted_activities.clear();
     self.window_starts.clear();
     self.open_runs.clear();
     self.emitted_speaker_ids.clear();
@@ -173,20 +206,26 @@ impl ReconstructState {
   /// per-frame accumulators. Spec §5.9 / §5.10.
   ///
   /// **Pre-conditions** (caller / Phase 11 pump — Task 43):
-  /// - For every active `(window_id, slot)` in this window,
-  ///   `slot_to_cluster.insert((window_id, slot), cluster_id)` AND
-  ///   `activity_clean_flags.insert((window_id, slot), used_clean)`
-  ///   have been called.
-  /// - Slots NOT present in `slot_to_cluster` are "inactive" — silently
-  ///   skipped (matches pyannote's `inactive_speakers → -2` throwaway).
+  /// - For every embedded+clustered activity in this window, an
+  ///   [`ActivityCluster`] record has been pushed to
+  ///   [`Self::activities`] before this call. The pump records one
+  ///   record per `Action::Activity` (one record per contiguous
+  ///   active run for a slot in this window).
+  /// - Slots whose probability is positive but with no matching
+  ///   activity record are "inactive" — silently skipped (matches
+  ///   pyannote's `inactive_speakers → -2` throwaway).
   ///
   /// **Post-conditions:**
   /// - `window_starts[window_id] = window_start`.
   /// - `activations` and `counts` extended to cover this window's frames.
-  /// - For each frame: per-cluster max-collapsed activation summed into
-  ///   `activations[buf_idx]`; `activation_chunk_count` incremented.
+  /// - For each frame in each activity's range: that activity's cluster
+  ///   gets the slot's raw probability max-collapsed in. Disjoint
+  ///   activities for the same slot keep their own clusters (Codex
+  ///   review CRITICAL: per-`(window_id, slot)` keying collapsed
+  ///   them — last insertion won, falsely re-attributing the early
+  ///   activity's frames to the late activity's cluster).
   /// - For frames outside the warm-up margin: `count_sum` += (n active
-  ///   slots > threshold); `count_chunk_count` += 1.
+  ///   slots > threshold AND mapped); `count_chunk_count` += 1.
   ///
   /// **Frames before `base_frame` are skipped silently** (defensive;
   /// the segment contract guarantees windows arrive in non-decreasing
@@ -217,20 +256,28 @@ impl ReconstructState {
       }
     }
 
-    // ── Step A: collapse-by-max within each cluster for THIS window. ──
+    // ── Step A: collapse-by-max within each cluster, ranged by activity. ──
     //
-    // per_cluster_max[c][f] = max over slots-mapped-to-c of raw_probs[slot][f].
-    // Skips slots without a (window_id, slot) → cluster mapping (inactive).
+    // For each ActivityCluster recorded for this window, apply the
+    // activity's cluster ONLY to the activity's window-local frame range.
+    // Disjoint activities for the same slot now correctly retain their
+    // own cluster mappings (Codex review CRITICAL).
+    //
+    // `per_cluster_max[c][f]` = max over (activities-for-c-covering-f) of
+    // raw_probs[activity.slot][f]. Slots whose probability is positive but
+    // without any activity record are "inactive" — never touched.
     let mut per_cluster_max: HashMap<u64, [f32; FRAMES_PER_WINDOW]> = HashMap::new();
-    for slot in 0..MAX_SPEAKER_SLOTS {
-      let Some(&cluster_id) = self.slot_to_cluster.get(&(window_id, slot)) else {
+    for (ai, ac) in self.activities.iter().enumerate() {
+      if self.evicted_activities.contains(&ai) || ac.window_id != window_id {
         continue;
-      };
+      }
       let entry = per_cluster_max
-        .entry(cluster_id)
+        .entry(ac.cluster_id)
         .or_insert([0.0f32; FRAMES_PER_WINDOW]);
-      for (e, p) in entry.iter_mut().zip(raw_probs[slot as usize].iter()) {
-        *e = e.max(*p);
+      let lo = (ac.frame_lo_in_window as usize).min(FRAMES_PER_WINDOW);
+      let hi = (ac.frame_hi_in_window as usize).min(FRAMES_PER_WINDOW);
+      for f in lo..hi {
+        entry[f] = entry[f].max(raw_probs[ac.slot as usize][f]);
       }
     }
 
@@ -265,6 +312,14 @@ impl ReconstructState {
     // contribute (pyannote `speaker_count(warm_up=(0.1, 0.1))`).
     // count_sum / count_chunk_count → mean → round → cap by max_speakers
     // (capping happens in emit_finalized_frames / Task 41).
+    //
+    // "mapped slot" means: at least one non-evicted ActivityCluster
+    // exists for this (window_id, slot) AND its frame range covers
+    // `f_in_window`. Unmapped active slots are activity we couldn't
+    // embed — pretending their activity counts toward the speaker count
+    // would let an unmapped slot's speech steal the top-K active_set
+    // choice for an inactive mapped cluster (Codex review post-rev-9
+    // HIGH).
     let warm_left = SPEAKER_COUNT_WARM_UP_FRAMES_LEFT as usize;
     let warm_right = SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT as usize;
     // Drive the warm-up-trimmed frame loop with an enumerated iterator over
@@ -283,20 +338,33 @@ impl ReconstructState {
         continue;
       }
       let buf_idx = (abs_frame - self.base_frame) as usize;
-      // Cap n_active by mapped slots: unmapped active slots are activity
-      // we couldn't embed — pretending their activity counts toward the
-      // speaker count would let an unmapped slot's speech steal the
-      // top-K active_set choice for an inactive mapped cluster (Codex
-      // review post-rev-9 HIGH).
       let n_active = (0..MAX_SPEAKER_SLOTS as usize)
         .filter(|s| {
           raw_probs[*s][f_in_window] > binarize_threshold
-            && self.slot_to_cluster.contains_key(&(window_id, *s as u8))
+            && self.slot_is_mapped_at_frame(window_id, *s as u8, f_in_window as u32)
         })
         .count() as f32;
       self.counts[buf_idx].count_sum += n_active;
       self.counts[buf_idx].count_chunk_count += 1;
     }
+  }
+
+  /// `true` iff at least one non-evicted [`ActivityCluster`] record
+  /// exists for `(window_id, slot)` whose window-local frame range
+  /// covers `f_in_window`.
+  ///
+  /// Used by Step C of [`integrate_window`] to gate the speaker-count
+  /// signal: only mapped, frame-covered slots contribute to `count_sum`
+  /// (see Codex review post-rev-9 HIGH; preserved by the per-activity
+  /// refactor).
+  fn slot_is_mapped_at_frame(&self, window_id: WindowId, slot: u8, f_in_window: u32) -> bool {
+    self.activities.iter().enumerate().any(|(ai, ac)| {
+      !self.evicted_activities.contains(&ai)
+        && ac.window_id == window_id
+        && ac.slot == slot
+        && f_in_window >= ac.frame_lo_in_window
+        && f_in_window < ac.frame_hi_in_window
+    })
   }
 }
 
@@ -313,6 +381,30 @@ mod integrate_tests {
     )
   }
 
+  /// Test helper: push one [`ActivityCluster`] record covering the given
+  /// window-local frame range with the given cluster_id and clean-mask
+  /// flag. Returns the index in `activities`.
+  fn push_activity(
+    s: &mut ReconstructState,
+    window_id: WindowId,
+    slot: u8,
+    frame_lo_in_window: u32,
+    frame_hi_in_window: u32,
+    cluster_id: u64,
+    used_clean_mask: bool,
+  ) -> usize {
+    let ai = s.activities.len();
+    s.activities.push(ActivityCluster {
+      window_id,
+      slot,
+      frame_lo_in_window,
+      frame_hi_in_window,
+      cluster_id,
+      used_clean_mask,
+    });
+    ai
+  }
+
   #[test]
   fn integrate_window_grows_buffers_and_records_window_start() {
     let mut s = ReconstructState::new();
@@ -322,7 +414,7 @@ mod integrate_tests {
     for p in probs[0].iter_mut().take(200).skip(100) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id, 0), 7);
+    push_activity(&mut s, id, 0, 100, 200, 7, false);
 
     s.integrate_window(id, 0, &probs, 0.5);
 
@@ -377,8 +469,8 @@ mod integrate_tests {
     let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
     probs[0][100] = 0.6;
     probs[1][100] = 0.9;
-    s.slot_to_cluster.insert((id, 0), 7);
-    s.slot_to_cluster.insert((id, 1), 7);
+    push_activity(&mut s, id, 0, 100, 101, 7, false);
+    push_activity(&mut s, id, 1, 100, 101, 7, false);
 
     s.integrate_window(id, 0, &probs, 0.5);
 
@@ -398,8 +490,8 @@ mod integrate_tests {
     let id_a = make_window_id(0, 0);
     let id_b = make_window_id(step as i64, 1);
     let mut s = ReconstructState::new();
-    s.slot_to_cluster.insert((id_a, 0), 7);
-    s.slot_to_cluster.insert((id_b, 0), 7);
+    push_activity(&mut s, id_a, 0, 0, FRAMES_PER_WINDOW as u32, 7, false);
+    push_activity(&mut s, id_b, 0, 0, FRAMES_PER_WINDOW as u32, 7, false);
     let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
     for p in probs[0].iter_mut() {
       *p = 0.5;
@@ -420,14 +512,14 @@ mod integrate_tests {
 
   #[test]
   fn inactive_slots_are_skipped() {
-    // Slot 0 has high prob but no slot_to_cluster entry → no contribution.
+    // Slot 0 has high prob but no activity record → no contribution.
     let mut s = ReconstructState::new();
     let id = make_window_id(0, 0);
     let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
     for p in probs[0].iter_mut().take(200).skip(100) {
       *p = 0.9;
     }
-    // NOTE: slot_to_cluster is intentionally empty.
+    // NOTE: activities is intentionally empty — no slot is mapped.
 
     s.integrate_window(id, 0, &probs, 0.5);
 
@@ -465,8 +557,8 @@ mod integrate_tests {
     for p in probs[1].iter_mut().skip(400).take(100) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id, 0), 7);
-    // NOTE: no slot_to_cluster entry for (id, 1).
+    push_activity(&mut s, id, 0, 100, 200, 7, false);
+    // NOTE: no activity record for (id, 1) — slot 1 stays unmapped.
 
     s.integrate_window(id, 0, &probs, 0.5);
 
@@ -521,6 +613,42 @@ mod integrate_tests {
         "cluster 7 span [{frame_lo}, {frame_hi}) extends into unmapped slot 1's frames (400..500): {span:?}"
       );
     }
+  }
+
+  #[test]
+  fn two_disjoint_activities_same_slot_preserve_distinct_clusters() {
+    // Codex review CRITICAL regression: window W has two disjoint
+    // SpeakerActivity events for slot 0 — early one mapped to cluster 7,
+    // late one mapped to cluster 8. Without the fix, the second insertion
+    // overwrites the first in slot_to_cluster, and integrate_window's
+    // Step A applies cluster 8 to ALL slot-0 frames, falsely claiming
+    // cluster 8 spoke during the early activity's range too.
+    let mut s = ReconstructState::new();
+    let id = make_window_id(0, 0);
+    // Slot 0 active in two disjoint window-local ranges.
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for p in probs[0].iter_mut().skip(50).take(100) {
+      *p = 0.9; // early activity at frames 50..150
+    }
+    for p in probs[0].iter_mut().skip(400).take(100) {
+      *p = 0.9; // late activity at frames 400..500
+    }
+
+    // Record two disjoint activities for slot 0, mapped to different clusters.
+    push_activity(&mut s, id, 0, 50, 150, 7, true);
+    push_activity(&mut s, id, 0, 400, 500, 8, false);
+
+    s.integrate_window(id, 0, &probs, 0.5);
+
+    // Frame 100 (early activity) → cluster 7 only.
+    assert!(s.activations[100].contains_key(&7));
+    assert!(!s.activations[100].contains_key(&8));
+    assert!((s.activations[100][&7] - 0.9).abs() < 1e-6);
+
+    // Frame 450 (late activity) → cluster 8 only.
+    assert!(s.activations[450].contains_key(&8));
+    assert!(!s.activations[450].contains_key(&7));
+    assert!((s.activations[450][&8] - 0.9).abs() < 1e-6);
   }
 }
 
@@ -668,21 +796,24 @@ impl ReconstructState {
         run.frame_count += 1;
 
         // Bookkeeping for activity_count and clean_mask_count: scan
-        // slot_to_cluster for entries mapping to this cluster whose
-        // window covers `self.base_frame`.
-        for ((window_id, slot), bound_cluster) in self.slot_to_cluster.iter() {
-          if *bound_cluster != *cluster_id {
+        // activities whose cluster matches AND whose absolute frame
+        // range covers `self.base_frame`. Per-activity (not per-(window,
+        // slot)) so disjoint runs of the same slot in the same window
+        // are counted separately (Codex review CRITICAL).
+        for (ai, ac) in self.activities.iter().enumerate() {
+          if self.evicted_activities.contains(&ai) || ac.cluster_id != *cluster_id {
             continue;
           }
-          let Some(&win_start) = self.window_starts.get(window_id) else {
+          let Some(&win_start) = self.window_starts.get(&ac.window_id) else {
             continue; // window not yet integrated (defensive)
           };
-          let frame_lo = frame_index_of(win_start);
-          let frame_hi = frame_lo + FRAMES_PER_WINDOW as u64;
-          if self.base_frame >= frame_lo
-            && self.base_frame < frame_hi
-            && run.contributing_activities.insert((*window_id, *slot))
-            && let Some(&true) = self.activity_clean_flags.get(&(*window_id, *slot))
+          let win_start_frame = frame_index_of(win_start);
+          let abs_lo = win_start_frame + ac.frame_lo_in_window as u64;
+          let abs_hi = win_start_frame + ac.frame_hi_in_window as u64;
+          if self.base_frame >= abs_lo
+            && self.base_frame < abs_hi
+            && run.contributing_activities.insert(ai)
+            && ac.used_clean_mask
           {
             run.clean_mask_count += 1;
           }
@@ -707,6 +838,27 @@ mod emit_tests {
     )
   }
 
+  fn push_activity(
+    s: &mut ReconstructState,
+    window_id: WindowId,
+    slot: u8,
+    frame_lo_in_window: u32,
+    frame_hi_in_window: u32,
+    cluster_id: u64,
+    used_clean_mask: bool,
+  ) -> usize {
+    let ai = s.activities.len();
+    s.activities.push(ActivityCluster {
+      window_id,
+      slot,
+      frame_lo_in_window,
+      frame_hi_in_window,
+      cluster_id,
+      used_clean_mask,
+    });
+    ai
+  }
+
   #[test]
   fn single_window_single_speaker_emits_one_span() {
     let mut s = ReconstructState::new();
@@ -716,8 +868,7 @@ mod emit_tests {
     for p in probs[0].iter_mut().skip(100).take(100) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id, 0), 7);
-    s.activity_clean_flags.insert((id, 0), true);
+    push_activity(&mut s, id, 0, 100, 200, 7, true);
     s.integrate_window(id, 0, &probs, 0.5);
 
     // Force-finalize all frames.
@@ -755,7 +906,7 @@ mod emit_tests {
     for p in probs[0].iter_mut().take(50) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id, 0), 7);
+    push_activity(&mut s, id, 0, 0, 50, 7, false);
     s.integrate_window(id, 0, &probs, 0.5);
 
     s.advance_finalization_boundary(u64::MAX);
@@ -779,8 +930,7 @@ mod emit_tests {
     for p in probs_a[0].iter_mut().skip(100).take(100) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id_a, 0), 7);
-    s.activity_clean_flags.insert((id_a, 0), false);
+    push_activity(&mut s, id_a, 0, 100, 200, 7, false);
     s.integrate_window(id_a, 0, &probs_a, 0.5);
 
     // Finalize window A's frames.
@@ -800,8 +950,7 @@ mod emit_tests {
     for p in probs_b[0].iter_mut().skip(100).take(100) {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id_b, 0), 7);
-    s.activity_clean_flags.insert((id_b, 0), false);
+    push_activity(&mut s, id_b, 0, 100, 200, 7, false);
     s.integrate_window(id_b, WINDOW_SAMPLES as u64, &probs_b, 0.5);
 
     s.advance_finalization_boundary(u64::MAX);
@@ -957,13 +1106,16 @@ impl ReconstructState {
 
   /// Evict per-window-id metadata that's no longer referenced. Spec §11.13.
   ///
-  /// A window's entries (`slot_to_cluster`, `activity_clean_flags`,
-  /// `window_starts`) can be dropped once:
+  /// A window's entries (`activities`, `window_starts`) can be dropped
+  /// once:
   /// (a) all of its frames have finalized
   ///     (`base_frame >= window_start_frame + FRAMES_PER_WINDOW`), AND
   /// (b) no currently-open per-cluster run still references any
-  ///     `(window_id, slot)` pair from this window in
-  ///     `contributing_activities`.
+  ///     activity from this window in `contributing_activities`.
+  ///
+  /// `activities` is append-only during a session so existing
+  /// `contributing_activities` indices stay valid; eviction is recorded
+  /// in `evicted_activities`, which iteration sites filter on.
   ///
   /// Bounds memory on long sessions; correctness-relevant for runs
   /// spanning many finalized windows.
@@ -977,20 +1129,25 @@ impl ReconstructState {
         if self.base_frame < last_frame_excl {
           return false;
         }
-        // (b): no open run still references this window.
+        // (b): no open run still references any activity from this window.
         self.open_runs.values().all(|run| {
-          run
-            .contributing_activities
-            .iter()
-            .all(|(wid, _)| wid != *window_id)
+          run.contributing_activities.iter().all(|ai| {
+            self
+              .activities
+              .get(*ai)
+              .is_none_or(|ac| ac.window_id != **window_id)
+          })
         })
       })
       .map(|(w, _)| *w)
       .collect();
 
     for w in evictable {
-      self.slot_to_cluster.retain(|(wid, _), _| *wid != w);
-      self.activity_clean_flags.retain(|(wid, _), _| *wid != w);
+      for (ai, ac) in self.activities.iter().enumerate() {
+        if ac.window_id == w {
+          self.evicted_activities.insert(ai);
+        }
+      }
       self.window_starts.remove(&w);
     }
   }
@@ -1007,6 +1164,27 @@ mod flush_eviction_tests {
       TimeRange::new(start, start + WINDOW_SAMPLES as i64, SAMPLE_RATE_TB),
       generation,
     )
+  }
+
+  fn push_activity(
+    s: &mut ReconstructState,
+    window_id: WindowId,
+    slot: u8,
+    frame_lo_in_window: u32,
+    frame_hi_in_window: u32,
+    cluster_id: u64,
+    used_clean_mask: bool,
+  ) -> usize {
+    let ai = s.activities.len();
+    s.activities.push(ActivityCluster {
+      window_id,
+      slot,
+      frame_lo_in_window,
+      frame_hi_in_window,
+      cluster_id,
+      used_clean_mask,
+    });
+    ai
   }
 
   #[test]
@@ -1033,8 +1211,15 @@ mod flush_eviction_tests {
     {
       *p = 0.9;
     }
-    s.slot_to_cluster.insert((id, 0), 7);
-    s.activity_clean_flags.insert((id, 0), true);
+    push_activity(
+      &mut s,
+      id,
+      0,
+      warm_left as u32,
+      (FRAMES_PER_WINDOW - warm_right) as u32,
+      7,
+      true,
+    );
     s.integrate_window(id, 0, &probs, 0.5);
 
     let mut emitted = Vec::new();
@@ -1054,8 +1239,8 @@ mod flush_eviction_tests {
 
     s.window_starts.insert(id_a, 0);
     s.window_starts.insert(id_b, WINDOW_SAMPLES as u64);
-    s.slot_to_cluster.insert((id_a, 0), 7);
-    s.slot_to_cluster.insert((id_b, 0), 8);
+    let ai_a = push_activity(&mut s, id_a, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
+    let ai_b = push_activity(&mut s, id_b, 0, 0, FRAMES_PER_WINDOW as u32, 8, true);
 
     // Pretend we've finalized past id_a's last frame.
     s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
@@ -1071,29 +1256,29 @@ mod flush_eviction_tests {
       "id_b is still active (last frame > base_frame)"
     );
     assert!(
-      !s.slot_to_cluster.contains_key(&(id_a, 0)),
-      "id_a's slot mapping should be evicted"
+      s.evicted_activities.contains(&ai_a),
+      "id_a's activity should be marked evicted"
     );
     assert!(
-      s.slot_to_cluster.contains_key(&(id_b, 0)),
-      "id_b's slot mapping must be retained"
+      !s.evicted_activities.contains(&ai_b),
+      "id_b's activity must remain live"
     );
   }
 
   #[test]
   fn evict_keeps_metadata_when_open_run_references_it() {
     // id_a is finalized but cluster 7's open run still references
-    // (id_a, 0) → must be kept.
+    // an activity in it → must be kept.
     let mut s = ReconstructState::new();
     let id_a = make_window_id(0, 0);
     s.window_starts.insert(id_a, 0);
-    s.slot_to_cluster.insert((id_a, 0), 7);
+    let ai_a = push_activity(&mut s, id_a, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
     s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
 
     let run = s.open_runs.entry(7).or_default();
     run.start_frame = Some(0);
     run.last_active_frame = Some(50);
-    run.contributing_activities.insert((id_a, 0));
+    run.contributing_activities.insert(ai_a);
 
     s.evict_finalized_window_metadata();
 
@@ -1102,8 +1287,8 @@ mod flush_eviction_tests {
       "open run still references id_a → must keep window_start"
     );
     assert!(
-      s.slot_to_cluster.contains_key(&(id_a, 0)),
-      "must keep slot mapping while open_run references it"
+      !s.evicted_activities.contains(&ai_a),
+      "must keep activity while open_run references it"
     );
   }
 }

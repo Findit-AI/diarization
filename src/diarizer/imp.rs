@@ -458,14 +458,34 @@ impl Diarizer {
       // Cluster.
       let assignment = self.clusterer.submit(&embedding)?;
       let cluster_id = assignment.speaker_id();
+
+      // Record one ActivityCluster per activity (Codex review CRITICAL:
+      // pyannote hysteresis can emit MULTIPLE disjoint Activity events
+      // for the same (window_id, slot) within one window — each gets
+      // its own embedding+cluster, and reconstruction must apply each
+      // cluster only to its activity's frame range, not to every frame
+      // where the slot's raw probability is positive).
+      let activity_start_in_win = s0.saturating_sub(window_start);
+      let activity_end_in_win = s1.saturating_sub(window_start);
+      let frame_lo_in_window = (activity_start_in_win
+        * crate::segment::options::FRAMES_PER_WINDOW as u64
+        / crate::segment::options::WINDOW_SAMPLES as u64) as u32;
+      let frame_hi_in_window =
+        (activity_end_in_win * crate::segment::options::FRAMES_PER_WINDOW as u64)
+          .div_ceil(crate::segment::options::WINDOW_SAMPLES as u64) as u32;
+      let frame_hi_in_window =
+        frame_hi_in_window.min(crate::segment::options::FRAMES_PER_WINDOW as u32);
       self
         .reconstruct
-        .slot_to_cluster
-        .insert((window_id, s), cluster_id);
-      self
-        .reconstruct
-        .activity_clean_flags
-        .insert((window_id, s), used_clean);
+        .activities
+        .push(crate::diarizer::reconstruct::ActivityCluster {
+          window_id,
+          slot: s,
+          frame_lo_in_window,
+          frame_hi_in_window,
+          cluster_id,
+          used_clean_mask: used_clean,
+        });
 
       // Optional collected_embeddings.
       if self.opts.collect_embeddings() {
