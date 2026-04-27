@@ -4,10 +4,10 @@
 
 mod error;
 mod hysteresis;
-mod options;
+pub(crate) mod options;
 mod powerset;
 mod segmenter;
-mod stitch;
+pub(crate) mod stitch;
 mod types;
 mod window;
 

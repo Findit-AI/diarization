@@ -13,7 +13,6 @@ mod span;
 
 #[cfg(feature = "ort")]
 mod imp;
-#[cfg(feature = "ort")]
 mod overlap;
 #[cfg(feature = "ort")]
 mod reconstruct;
