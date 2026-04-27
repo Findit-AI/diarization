@@ -16,11 +16,10 @@ pub const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.5;
 /// Range: `(0.0, 1.0]`. Smaller values give older observations more weight.
 pub const DEFAULT_EMA_ALPHA: f32 = 0.2;
 
-/// Hard cap on the number of auto-assigned speaker slots used as a fallback
-/// when `ClusterOptions::max_speakers` is not `None`.
-///
-/// Kept for reference; the default for `ClusterOptions::max_speakers` is
-/// `None` (no cap).
+/// Hard upper bound on the auto-detected speaker count used by
+/// [`cluster_offline`](crate::cluster::cluster_offline) when
+/// [`OfflineClusterOptions::target_speakers`] is `None` (spec §4.3, §5.5).
+/// Has no effect on the online [`Clusterer`].
 pub const MAX_AUTO_SPEAKERS: u32 = 15;
 
 // ── Online clustering options ─────────────────────────────────────────────

@@ -41,8 +41,9 @@ struct SpeakerEntry {
 /// a new speaker slot was opened.
 ///
 /// # Thread safety
-/// `Clusterer` is **not** `Sync`; wrap it in a `Mutex` if you need to share
-/// it across threads.
+/// `Clusterer` is `Send + Sync`. However, `submit` takes `&mut self`, so
+/// concurrent updates from multiple threads require external synchronization
+/// (e.g., a `Mutex`).
 pub struct Clusterer {
   opts: ClusterOptions,
   /// Active speaker slots.
@@ -144,10 +145,12 @@ impl Clusterer {
       let mut best_idx = 0usize;
       let mut best_sim = f32::NEG_INFINITY;
       for (i, s) in self.speakers.iter().enumerate() {
-        let mut sim = 0.0f32;
-        for k in 0..EMBEDDING_DIM {
-          sim += s.cached_centroid[k] * embedding.0[k];
-        }
+        let sim: f32 = s
+          .cached_centroid
+          .iter()
+          .zip(embedding.0.iter())
+          .map(|(a, b)| a * b)
+          .sum();
         if sim > best_sim {
           best_sim = sim;
           best_idx = i;
@@ -216,14 +219,14 @@ impl Clusterer {
     let entry = &mut self.speakers[idx];
     match self.opts.update_strategy() {
       UpdateStrategy::RollingMean => {
-        for k in 0..EMBEDDING_DIM {
-          entry.accumulator[k] += e.0[k];
+        for (a, x) in entry.accumulator.iter_mut().zip(e.0.iter()) {
+          *a += *x;
         }
       }
       UpdateStrategy::Ema(alpha) => {
         let one_minus = 1.0 - alpha;
-        for k in 0..EMBEDDING_DIM {
-          entry.accumulator[k] = one_minus * entry.accumulator[k] + alpha * e.0[k];
+        for (a, x) in entry.accumulator.iter_mut().zip(e.0.iter()) {
+          *a = one_minus * *a + alpha * *x;
         }
       }
     }
@@ -231,14 +234,24 @@ impl Clusterer {
 
     // Refresh cached_centroid from accumulator IFF norm >= eps.
     // Otherwise leave at last-known-good value (spec §5.4).
-    let mut sq = 0.0f64;
-    for k in 0..EMBEDDING_DIM {
-      sq += (entry.accumulator[k] as f64) * (entry.accumulator[k] as f64);
-    }
+    //
+    // f64 accumulator: 256 squared-f32 terms can lose ~8 bits of mantissa
+    // in f32 (sum of values ~1.0). Promote for stability, demote at the
+    // end. Not perf-critical — runs once per assignment.
+    let sq: f64 = entry
+      .accumulator
+      .iter()
+      .map(|&a| (a as f64) * (a as f64))
+      .sum();
     let n = sq.sqrt() as f32;
     if n >= NORM_EPSILON {
-      for k in 0..EMBEDDING_DIM {
-        entry.cached_centroid[k] = entry.accumulator[k] / n;
+      let inv_n = n.recip();
+      for (c, a) in entry
+        .cached_centroid
+        .iter_mut()
+        .zip(entry.accumulator.iter())
+      {
+        *c = *a * inv_n;
       }
     }
     // else: cached_centroid retains its prior value.
@@ -352,20 +365,31 @@ mod tests {
 
   #[test]
   fn argmax_tie_break_lowest_speaker_id_wins() {
-    // Both centroids identical to query — tie. Lower id should win.
+    // Spec §5.4: when multiple centroids share the maximum similarity to
+    // the query, the lowest-index speaker wins (`>` strict in argmax).
     let mut c = Clusterer::new(ClusterOptions::default());
     let _ = c.submit(&unit(0));
-    // Force a second speaker by submitting orthogonal first.
     let _ = c.submit(&unit(1));
-    // Now query with something equidistant. Use 0.5*unit(0) + 0.5*unit(1)
-    // → cosine to both is ≈ 0.707. Tie → speaker 0 wins.
+    // Query = (1/√2)·unit(0) + (1/√2)·unit(1). Cosine similarity to
+    // both centroids is exactly 1/√2 — a perfect tie. Lower-index
+    // (speaker 0) must win.
     let mut v = [0.0f32; EMBEDDING_DIM];
-    v[0] = 0.5;
-    v[1] = 0.5;
+    let s = core::f32::consts::FRAC_1_SQRT_2;
+    v[0] = s;
+    v[1] = s;
     let e = Embedding::normalize_from(v).unwrap();
     let a = c.submit(&e).unwrap();
-    // Sim to both speakers is identical. Lower id wins per §5.4.
-    assert!(a.speaker_id() == 0 || a.speaker_id() == 1);
+    assert_eq!(
+      a.speaker_id(),
+      0,
+      "tie-break must pick lower-index speaker id"
+    );
+    assert!(!a.is_new_speaker());
+    let sim = a.similarity().expect("not the first-ever assignment");
+    assert!(
+      (sim - core::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5,
+      "expected cosine ≈ 1/√2; got {sim}"
+    );
   }
 
   #[test]
