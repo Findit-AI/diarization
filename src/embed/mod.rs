@@ -14,6 +14,9 @@ mod types;
 
 pub use error::Error;
 pub use fbank::compute_fbank;
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use options::EmbedModelOptions;
 pub use options::{
   EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, HOP_SAMPLES, MIN_CLIP_SAMPLES,
   NORM_EPSILON,
