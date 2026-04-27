@@ -1192,6 +1192,16 @@ impl ReconstructState {
   /// `contributing_activities` indices stay valid; eviction is recorded
   /// in `evicted_activities`, which iteration sites filter on.
   ///
+  /// **Memory bound** (Codex review MEDIUM): this prunes
+  /// `activities_by_cluster` so per-frame scans stay bounded by live
+  /// activities. The append-only `activities` Vec itself still grows
+  /// for the session lifetime — compacting it would require rewriting
+  /// all `PerClusterRun::contributing_activities` indices. For typical
+  /// session lengths (≪ 10k activities), the Vec's memory footprint
+  /// is negligible. For unbounded multi-hour sessions, `activities`
+  /// is O(total activities ever recorded) but the per-frame scan cost
+  /// is O(live activities for the active cluster).
+  ///
   /// Bounds memory on long sessions; correctness-relevant for runs
   /// spanning many finalized windows.
   #[allow(dead_code)] // wired into pump in Task 43
@@ -1218,12 +1228,28 @@ impl ReconstructState {
       .collect();
 
     for w in evictable {
+      self.window_starts.remove(&w);
+      // Mark this window's activities as evicted AND prune them from
+      // activities_by_cluster so per-frame scans don't iterate dead
+      // indices forever. Codex review MEDIUM.
+      let mut newly_evicted: Vec<(u64, usize)> = Vec::new();
       for (ai, ac) in self.activities.iter().enumerate() {
-        if ac.window_id == w {
-          self.evicted_activities.insert(ai);
+        if ac.window_id == w && !self.evicted_activities.contains(&ai) {
+          newly_evicted.push((ac.cluster_id, ai));
         }
       }
-      self.window_starts.remove(&w);
+      for (_, ai) in &newly_evicted {
+        self.evicted_activities.insert(*ai);
+      }
+      // Remove the evicted indices from activities_by_cluster's buckets.
+      for (cluster_id, ai) in newly_evicted {
+        if let Some(bucket) = self.activities_by_cluster.get_mut(&cluster_id) {
+          bucket.retain(|&idx| idx != ai);
+          if bucket.is_empty() {
+            self.activities_by_cluster.remove(&cluster_id);
+          }
+        }
+      }
     }
   }
 }
@@ -1342,6 +1368,41 @@ mod flush_eviction_tests {
       !s.evicted_activities.contains(&ai_b),
       "id_b's activity must remain live"
     );
+  }
+
+  #[test]
+  fn evict_prunes_activities_by_cluster_index() {
+    // Codex review MEDIUM regression: after eviction, the per-cluster
+    // index must not retain dead indices, otherwise per-frame scans
+    // grow unbounded for long sessions.
+    let mut s = ReconstructState::new();
+    let id_old = make_window_id(0, 0);
+    let id_live = make_window_id(WINDOW_SAMPLES as i64, 1);
+
+    s.window_starts.insert(id_old, 0);
+    s.window_starts.insert(id_live, WINDOW_SAMPLES as u64);
+
+    let _ai_old = push_activity(&mut s, id_old, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
+    let ai_live = push_activity(&mut s, id_live, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
+
+    // Pre-eviction: cluster 7 has 2 entries.
+    assert_eq!(s.activities_by_cluster.get(&7).map(|v| v.len()), Some(2));
+
+    // Force-finalize past id_old's last frame; id_live is still in flight.
+    s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
+    s.evict_finalized_window_metadata();
+
+    // After eviction: cluster 7's bucket has only the live entry.
+    let bucket = s
+      .activities_by_cluster
+      .get(&7)
+      .expect("cluster 7 should still have a bucket");
+    assert_eq!(
+      bucket.len(),
+      1,
+      "expected one live activity; got {bucket:?}"
+    );
+    assert_eq!(bucket[0], ai_live);
   }
 
   #[test]
