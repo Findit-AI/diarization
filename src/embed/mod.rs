@@ -9,11 +9,16 @@
 
 mod error;
 mod fbank;
+#[cfg(feature = "ort")]
+mod model;
 mod options;
 mod types;
 
 pub use error::Error;
 pub use fbank::compute_fbank;
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use model::EmbedModel;
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
 pub use options::EmbedModelOptions;
