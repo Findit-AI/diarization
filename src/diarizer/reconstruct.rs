@@ -426,6 +426,300 @@ mod integrate_tests {
   }
 }
 
+use mediatime::TimeRange;
+
+use crate::{diarizer::span::DiarizedSpan, segment::options::SAMPLE_RATE_TB};
+
+impl ReconstructState {
+  /// Advance the finalization boundary based on the segment's
+  /// [`Segmenter::peek_next_window_start`](crate::segment::Segmenter::peek_next_window_start).
+  /// Frames before the boundary are finalized — no future window can
+  /// contribute to them (the segment guarantees a non-decreasing
+  /// `next_window_start` per spec §5.7 / §11.5 trim discipline).
+  ///
+  /// Monotonic: never moves backward, even if the caller passes a smaller
+  /// value (defensive — should not happen on well-behaved input).
+  ///
+  /// `next_window_start == u64::MAX` (post-`finish_stream`) finalizes
+  /// everything.
+  #[allow(dead_code)] // wired into pump in Task 43
+  pub(crate) fn advance_finalization_boundary(&mut self, next_window_start: u64) {
+    let next_frame = if next_window_start == u64::MAX {
+      u64::MAX
+    } else {
+      frame_index_of(next_window_start)
+    };
+    if next_frame > self.finalization_boundary {
+      self.finalization_boundary = next_frame;
+    }
+  }
+
+  /// Emit DiarizedSpans for all finalized frames. Drains `activations`
+  /// and `counts` up to `finalization_boundary`. Spec §5.10 + §5.11.
+  ///
+  /// Algorithm per finalized frame:
+  /// 1. `count_at_frame` = `round(count_sum / count_chunk_count)` capped
+  ///    at `max_speakers`. Zero if `count_chunk_count == 0` (warm-up
+  ///    trimmed everywhere — no count signal).
+  /// 2. `active_set` = top-`count_at_frame` clusters by activation, with
+  ///    smaller-cluster-id tie-break (rev-3 deterministic; pyannote uses
+  ///    `np.argsort` which is also stable, but explicit is better).
+  /// 3. Close runs for any open cluster not in `active_set`; emit span.
+  /// 4. Open or extend runs for clusters in `active_set`.
+  ///
+  /// `max_speakers` caps the per-frame speaker count. Pass `u32::MAX`
+  /// for no cap.
+  #[allow(dead_code)] // wired into pump in Task 43
+  pub(crate) fn emit_finalized_frames<F: FnMut(DiarizedSpan)>(
+    &mut self,
+    max_speakers: u32,
+    mut emit: F,
+  ) {
+    while self.base_frame < self.finalization_boundary {
+      let Some(frame_state) = self.activations.pop_front() else {
+        break;
+      };
+      let frame_count_state = self
+        .counts
+        .pop_front()
+        .expect("counts and activations grow in lockstep");
+
+      // ── Step 1: count_at_frame ──
+      let count_at_frame = if frame_count_state.count_chunk_count == 0 {
+        0u32
+      } else {
+        let mean = frame_count_state.count_sum / frame_count_state.count_chunk_count as f32;
+        (mean.round() as u32).min(max_speakers)
+      };
+
+      // ── Step 2: active_set (top-K by activation, deterministic tie-break) ──
+      let active_set: HashSet<u64> = if count_at_frame > 0 {
+        let mut sorted: Vec<(u64, f32)> = frame_state.iter().map(|(&c, &a)| (c, a)).collect();
+        sorted.sort_by(|(a_id, a_v), (b_id, b_v)| b_v.total_cmp(a_v).then(a_id.cmp(b_id)));
+        sorted
+          .into_iter()
+          .take(count_at_frame as usize)
+          .map(|(c, _)| c)
+          .collect()
+      } else {
+        HashSet::new()
+      };
+
+      // ── Step 3: close runs not in active_set ──
+      // Collect IDs first (avoid mutable-while-iterating).
+      let to_close: Vec<u64> = self
+        .open_runs
+        .iter()
+        .filter(|(c, run)| run.start_frame.is_some() && !active_set.contains(*c))
+        .map(|(c, _)| *c)
+        .collect();
+      for cluster_id in to_close {
+        let run = self
+          .open_runs
+          .get_mut(&cluster_id)
+          .expect("cluster is in open_runs by construction");
+        let start = run.start_frame.take().expect("run was open");
+        let end = run
+          .last_active_frame
+          .expect("open run must have last_active_frame")
+          + 1;
+        let s0 = frame_to_sample_u64(start) as i64;
+        let s1 = frame_to_sample_u64(end) as i64;
+        let range = TimeRange::new(s0, s1, SAMPLE_RATE_TB);
+
+        let is_new_speaker = !self.emitted_speaker_ids.contains(&cluster_id);
+        if is_new_speaker {
+          self.emitted_speaker_ids.insert(cluster_id);
+        }
+        let activity_count = run.contributing_activities.len() as u32;
+        let avg_activation = (run.activation_sum_normalized / run.frame_count.max(1) as f64) as f32;
+        let clean_fraction = if activity_count == 0 {
+          0.0
+        } else {
+          run.clean_mask_count as f32 / activity_count as f32
+        };
+
+        emit(DiarizedSpan {
+          range,
+          speaker_id: cluster_id,
+          is_new_speaker,
+          average_activation: avg_activation,
+          activity_count,
+          clean_mask_fraction: clean_fraction,
+        });
+
+        // Reset for next run on this cluster.
+        run.last_active_frame = None;
+        run.activation_sum_normalized = 0.0;
+        run.frame_count = 0;
+        run.contributing_activities.clear();
+        run.clean_mask_count = 0;
+      }
+
+      // ── Step 4: open / extend runs for active clusters ──
+      let activation_chunk_count = frame_count_state.activation_chunk_count.max(1) as f32;
+      for cluster_id in &active_set {
+        let activation_at_frame = frame_state[cluster_id];
+        let activation_normalized = (activation_at_frame / activation_chunk_count) as f64;
+        let run = self.open_runs.entry(*cluster_id).or_default();
+        if run.start_frame.is_none() {
+          run.start_frame = Some(self.base_frame);
+        }
+        run.last_active_frame = Some(self.base_frame);
+        run.activation_sum_normalized += activation_normalized;
+        run.frame_count += 1;
+
+        // Bookkeeping for activity_count and clean_mask_count: scan
+        // slot_to_cluster for entries mapping to this cluster whose
+        // window covers `self.base_frame`.
+        for ((window_id, slot), bound_cluster) in self.slot_to_cluster.iter() {
+          if *bound_cluster != *cluster_id {
+            continue;
+          }
+          let Some(&win_start) = self.window_starts.get(window_id) else {
+            continue; // window not yet integrated (defensive)
+          };
+          let frame_lo = frame_index_of(win_start);
+          let frame_hi = frame_lo + FRAMES_PER_WINDOW as u64;
+          if self.base_frame >= frame_lo
+            && self.base_frame < frame_hi
+            && run.contributing_activities.insert((*window_id, *slot))
+            && let Some(&true) = self.activity_clean_flags.get(&(*window_id, *slot))
+          {
+            run.clean_mask_count += 1;
+          }
+        }
+      }
+
+      self.base_frame += 1;
+    }
+  }
+}
+
+#[cfg(test)]
+mod emit_tests {
+  use super::*;
+  use crate::segment::options::SAMPLE_RATE_TB;
+  use mediatime::TimeRange;
+
+  fn make_window_id(start: i64, generation: u64) -> WindowId {
+    WindowId::new(
+      TimeRange::new(start, start + WINDOW_SAMPLES as i64, SAMPLE_RATE_TB),
+      generation,
+    )
+  }
+
+  #[test]
+  fn single_window_single_speaker_emits_one_span() {
+    let mut s = ReconstructState::new();
+    let id = make_window_id(0, 0);
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    // Slot 0 high probability for frames 100..200.
+    for p in probs[0].iter_mut().skip(100).take(100) {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id, 0), 7);
+    s.activity_clean_flags.insert((id, 0), true);
+    s.integrate_window(id, 0, &probs, 0.5);
+
+    // Force-finalize all frames.
+    s.advance_finalization_boundary(u64::MAX);
+    let mut emitted = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted.push(span));
+
+    let spans_for_7: Vec<&DiarizedSpan> = emitted.iter().filter(|s| s.speaker_id() == 7).collect();
+    assert_eq!(
+      spans_for_7.len(),
+      1,
+      "expected 1 span for cluster 7; got emissions {emitted:?}"
+    );
+    let span = spans_for_7[0];
+    assert_eq!(span.activity_count(), 1, "1 activity contributed");
+    assert!(span.is_new_speaker());
+    assert!(
+      (span.clean_mask_fraction() - 1.0).abs() < 1e-7,
+      "1/1 = 1.0 clean fraction"
+    );
+    assert!(
+      span.average_activation() > 0.5,
+      "expected avg > 0.5; got {}",
+      span.average_activation()
+    );
+  }
+
+  #[test]
+  fn count_zero_in_warm_up_emits_nothing() {
+    // Slot 0 active ONLY in warm-up region (frames 0..50). count_chunk_count
+    // = 0 there → count_at_frame = 0 → no cluster ever in active_set.
+    let mut s = ReconstructState::new();
+    let id = make_window_id(0, 0);
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for p in probs[0].iter_mut().take(50) {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id, 0), 7);
+    s.integrate_window(id, 0, &probs, 0.5);
+
+    s.advance_finalization_boundary(u64::MAX);
+    let mut emitted = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted.push(span));
+
+    assert!(
+      emitted.is_empty(),
+      "expected 0 spans (warm-up only); got {emitted:?}"
+    );
+  }
+
+  #[test]
+  fn second_speaker_run_marked_not_new() {
+    // Two windows, each opening + closing cluster 7. First emission has
+    // is_new_speaker=true; second has is_new_speaker=false.
+    let mut s = ReconstructState::new();
+
+    let id_a = make_window_id(0, 0);
+    let mut probs_a = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for p in probs_a[0].iter_mut().skip(100).take(100) {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id_a, 0), 7);
+    s.activity_clean_flags.insert((id_a, 0), false);
+    s.integrate_window(id_a, 0, &probs_a, 0.5);
+
+    // Finalize window A's frames.
+    s.advance_finalization_boundary(WINDOW_SAMPLES as u64);
+    let mut emitted = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted.push(span));
+    assert!(
+      emitted
+        .iter()
+        .any(|sp| sp.speaker_id() == 7 && sp.is_new_speaker()),
+      "first emission must mark cluster 7 as new"
+    );
+
+    // Window B at offset = WINDOW_SAMPLES (no overlap).
+    let id_b = make_window_id(WINDOW_SAMPLES as i64, 1);
+    let mut probs_b = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for p in probs_b[0].iter_mut().skip(100).take(100) {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id_b, 0), 7);
+    s.activity_clean_flags.insert((id_b, 0), false);
+    s.integrate_window(id_b, WINDOW_SAMPLES as u64, &probs_b, 0.5);
+
+    s.advance_finalization_boundary(u64::MAX);
+    let mut emitted2 = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted2.push(span));
+    let span_b = emitted2
+      .iter()
+      .find(|sp| sp.speaker_id() == 7)
+      .expect("second window should re-emit cluster 7");
+    assert!(
+      !span_b.is_new_speaker(),
+      "second emission of cluster 7 must NOT be marked new; got {span_b:?}"
+    );
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
