@@ -220,8 +220,9 @@ impl Diarizer {
     Ok(())
   }
 
-  /// Finalize the stream. Flushes any tail-anchor inference plus
-  /// (in Phase 11) any open per-cluster runs.
+  /// Finalize the stream: drain any pending segmentation work, then
+  /// flush still-open per-cluster runs as `DiarizedSpan`s. After this
+  /// call, `process_samples` must NOT be called again until [`clear`](Self::clear).
   pub fn finish_stream<F>(
     &mut self,
     seg_model: &mut SegmentModel,
@@ -233,34 +234,222 @@ impl Diarizer {
   {
     self.segmenter.finish();
     self.drain(seg_model, embed_model, &mut emit)?;
-    // Phase 11 will add: self.reconstruct.flush_open_runs(&mut emit);
+    // segment is finished → peek_next_window_start = u64::MAX → all
+    // remaining frames finalize. flush_open_runs sets the boundary
+    // explicitly and drains, plus closes any final open runs.
+    self.reconstruct.flush_open_runs(&mut emit);
+    self.trim_audio();
     Ok(())
   }
 
   fn drain<F>(
     &mut self,
     seg_model: &mut SegmentModel,
-    _embed_model: &mut EmbedModel,
-    _emit: &mut F,
+    embed_model: &mut EmbedModel,
+    emit: &mut F,
   ) -> Result<(), Error>
   where
     F: FnMut(DiarizedSpan),
   {
+    use std::collections::HashMap;
+
+    use crate::segment::{
+      SpeakerActivity, WindowId,
+      options::{FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS},
+    };
+
+    // Per-WindowId batching. Action::SpeakerScores arrives BEFORE the
+    // window's Activity events (Task 30 contract), but we make the
+    // pump robust to any order by buffering until both have been seen.
+    type RawProbs = Box<[[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize]>;
+    let mut pending_scores: HashMap<WindowId, RawProbs> = HashMap::new();
+    let mut pending_window_starts: HashMap<WindowId, u64> = HashMap::new();
+    let mut pending_activities: HashMap<WindowId, Vec<SpeakerActivity>> = HashMap::new();
+    // Track which window IDs have been observed AT ALL during this drain.
+    // After the segmenter is fully drained for one drain() call, we
+    // process every window that has scores — even with zero activities
+    // (a silent window's scores still need to drive boundary advance).
+    let mut observed: Vec<WindowId> = Vec::new();
+
     while let Some(action) = self.segmenter.poll() {
       match action {
         Action::NeedsInference { id, samples } => {
           let scores = seg_model.infer(&samples)?;
           self.segmenter.push_inference(id, &scores)?;
         }
-        Action::SpeakerScores { .. } => {
-          // Phase 11: buffer per WindowId for the reconstruct state machine.
+        Action::SpeakerScores {
+          id,
+          window_start,
+          raw_probs,
+        } => {
+          if !observed.contains(&id) {
+            observed.push(id);
+          }
+          pending_scores.insert(id, raw_probs);
+          pending_window_starts.insert(id, window_start);
         }
-        Action::Activity(_) => {
-          // Phase 11: cluster + reconstruct.
+        Action::Activity(activity) => {
+          let id = activity.window_id();
+          if !observed.contains(&id) {
+            observed.push(id);
+          }
+          pending_activities.entry(id).or_default().push(activity);
         }
         Action::VoiceSpan(_) => {
-          // Diarizer doesn't surface VoiceSpan currently.
+          // Diarizer doesn't currently surface VoiceSpan.
         }
+      }
+    }
+
+    // Process every observed window (in arrival order — `observed` is
+    // a Vec, not a HashSet) once the segmenter is drained. A window is
+    // only processed after `push_inference` has fired its Activity +
+    // SpeakerScores events, so by the time we get here, every observed
+    // window has its scores ready.
+    for id in observed {
+      let Some(raw_probs) = pending_scores.remove(&id) else {
+        // No scores → this WindowId only had activities but no
+        // SpeakerScores. Should never happen given Task 30's
+        // contract; skip defensively.
+        continue;
+      };
+      let window_start = pending_window_starts.remove(&id).unwrap_or(0);
+      let activities = pending_activities.remove(&id).unwrap_or_default();
+
+      // Embed each activity, cluster, record (window, slot) → cluster_id.
+      self.process_window_activities(id, window_start, &raw_probs, &activities, embed_model)?;
+
+      // Integrate this window into reconstruction.
+      self.reconstruct.integrate_window(
+        id,
+        window_start,
+        &raw_probs,
+        self.opts.binarize_threshold(),
+      );
+    }
+
+    // Advance finalization boundary based on segmenter state.
+    let next = self.segmenter.peek_next_window_start();
+    self.reconstruct.advance_finalization_boundary(next);
+
+    // Emit any finalized DiarizedSpans.
+    let max_spk = self
+      .opts
+      .cluster_options()
+      .max_speakers()
+      .unwrap_or(u32::MAX);
+    self.reconstruct.emit_finalized_frames(max_spk, &mut *emit);
+
+    // Bound memory.
+    self.reconstruct.evict_finalized_window_metadata();
+
+    Ok(())
+  }
+
+  /// Process all activities for a single window: derive `keep_mask`,
+  /// extract embedding via [`EmbedModel::embed_masked`], cluster the
+  /// embedding, record `(window_id, slot) → cluster_id` mapping, and
+  /// optionally collect the embedding for post-hoc analysis.
+  ///
+  /// Implements the §5.8 fall-back chain:
+  /// 1. With `exclude_overlap = true`: try the clean (overlap-excluded)
+  ///    mask first.
+  /// 2. If `embed_masked` returns `Error::InvalidClip`, retry with the
+  ///    speaker-only mask.
+  /// 3. If THAT also fails with `InvalidClip`, skip the activity (matches
+  ///    pyannote `speaker_verification.py:611-612`).
+  ///
+  /// With `exclude_overlap = false`: skip step 1, use a `[true; len]`
+  /// mask directly (equivalent to `EmbedModel::embed`).
+  fn process_window_activities(
+    &mut self,
+    window_id: crate::segment::WindowId,
+    window_start: u64,
+    raw_probs: &[[f32; crate::segment::options::FRAMES_PER_WINDOW];
+       crate::segment::options::MAX_SPEAKER_SLOTS as usize],
+    activities: &[crate::segment::SpeakerActivity],
+    embed_model: &mut EmbedModel,
+  ) -> Result<(), Error> {
+    use crate::{
+      diarizer::overlap::{
+        binarize_per_frame, decide_keep_mask, frame_mask_to_sample_keep_mask, speaker_mask_for_slot,
+      },
+      embed::Error as EmbedError,
+    };
+
+    for activity in activities {
+      let s = activity.speaker_slot();
+      let s0 = activity.range().start_pts() as u64;
+      let s1 = activity.range().end_pts() as u64;
+
+      // Slice the audio for this activity.
+      let activity_samples = self.slice_audio(s0, s1)?;
+
+      // Build the initial mask (clean if exclude_overlap = true; all-true otherwise).
+      let want_clean = self.opts.exclude_overlap();
+      let (mask, used_clean_initial) = if want_clean {
+        let dec = decide_keep_mask(
+          raw_probs,
+          self.opts.binarize_threshold(),
+          s,
+          window_start,
+          s0,
+          s1,
+        );
+        (dec.keep_mask, dec.used_clean)
+      } else {
+        let all_true = vec![true; activity_samples.len()];
+        (all_true, false)
+      };
+
+      // Try embed_masked. On InvalidClip from a clean mask, fall back
+      // to a speaker-only mask. On InvalidClip even on speaker-only,
+      // skip the activity (pyannote semantics).
+      let (embedding_opt, used_clean) = match embed_model.embed_masked(&activity_samples, &mask) {
+        Ok(r) => (Some(*r.embedding()), used_clean_initial),
+        Err(EmbedError::InvalidClip { .. }) if used_clean_initial => {
+          // Fall back to speaker-only mask.
+          let binarized = binarize_per_frame(raw_probs, self.opts.binarize_threshold());
+          let speaker = speaker_mask_for_slot(&binarized, s);
+          let speaker_keep = frame_mask_to_sample_keep_mask(&speaker, window_start, s0, s1);
+          match embed_model.embed_masked(&activity_samples, &speaker_keep) {
+            Ok(r) => (Some(*r.embedding()), false),
+            Err(EmbedError::InvalidClip { .. }) => (None, false), // skip
+            Err(e) => return Err(e.into()),
+          }
+        }
+        Err(EmbedError::InvalidClip { .. }) => {
+          // First attempt was speaker-only or all-true; persistent failure → skip.
+          (None, false)
+        }
+        Err(e) => return Err(e.into()),
+      };
+
+      let Some(embedding) = embedding_opt else {
+        continue; // skipped (matches pyannote skip semantics)
+      };
+
+      // Cluster.
+      let assignment = self.clusterer.submit(&embedding)?;
+      let cluster_id = assignment.speaker_id();
+      self
+        .reconstruct
+        .slot_to_cluster
+        .insert((window_id, s), cluster_id);
+      self
+        .reconstruct
+        .activity_clean_flags
+        .insert((window_id, s), used_clean);
+
+      // Optional collected_embeddings.
+      if self.opts.collect_embeddings() {
+        self.collected_embeddings.push(CollectedEmbedding {
+          range: activity.range(),
+          embedding,
+          online_speaker_id: cluster_id,
+          speaker_slot: s,
+          used_clean_mask: used_clean,
+        });
       }
     }
     Ok(())
