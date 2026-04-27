@@ -1,45 +1,41 @@
 # dia
 
-Sans-I/O speaker diarization for streaming audio.
+Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
 
-`dia` is a Rust port of two findit-studio Python projects: `findit-pyannote-seg`
-(speaker segmentation) and `findit-speaker-embedding` (speaker embedding). The
-v0.1.0 release ships **segmentation only** (`dia::segment`); embedding and
-cross-window clustering will follow in subsequent releases.
+[![Crates.io](https://img.shields.io/crates/v/dia.svg)](https://crates.io/crates/dia)
+[![Documentation](https://docs.rs/dia/badge.svg)](https://docs.rs/dia)
+[![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)](https://github.com/al8n/dia)
 
-## Design
+## Status
 
-The core (`dia::segment::Segmenter`) is a Sans-I/O state machine: it never
-opens a file, runs a model, or spawns a thread. Callers push 16 kHz mono PCM
-in, drain `Action`s out, run ONNX inference themselves, and push scores back.
-This makes the segmenter testable with synthetic scores (no model file
-required) and lets callers choose any inference policy — synchronous, async,
-batched across streams, GPU, mocked.
+v0.1.0 ships:
 
-A convenience layer (gated on the default `ort` feature) provides
-`process_samples` / `finish_stream` methods that drive a bundled
-`SegmentModel` ONNX wrapper, mirroring `silero`'s streaming idiom.
+- `dia::segment` — speaker segmentation (pyannote/segmentation-3.0 ONNX)
+- `dia::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX + kaldi fbank)
+- `dia::cluster` — online streaming + offline (spectral + agglomerative)
+- `dia::Diarizer` — top-level orchestrator with pyannote-style per-frame
+  reconstruction (overlap-add cluster activations, count-bounded argmax,
+  per-cluster RLE-to-spans)
 
-## Quickstart
+## Pipeline
 
-```rust
-use dia::segment::{Segmenter, SegmentModel, SegmentOptions, Event};
-
-let mut model = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
-let mut seg   = Segmenter::new(SegmentOptions::default());
-
-while let Some(frame) = audio_in.next() {
-    seg.process_samples(&mut model, &frame, |event| match event {
-        Event::Activity(a)  => println!("{:?}", a),
-        Event::VoiceSpan(r) => println!("{:?}", r),
-    })?;
-}
-seg.finish_stream(&mut model, |_| {})?;
-# Ok::<(), dia::segment::Error>(())
+```
+audio decoder → resample to 16 kHz → VAD → dia::Diarizer → downstream services
 ```
 
-For Sans-I/O usage (no `ort` dependency), see `examples/stream_layer1.rs`.
+VAD-filtered, variable-length pushes are first-class. See
+[`docs/superpowers/specs/`](docs/superpowers/specs/) for the design spec.
+
+## Quick start
+
+```sh
+./scripts/download-model.sh         # pyannote/segmentation-3.0
+./scripts/download-embed-model.sh   # WeSpeaker ResNet34
+cargo run --release --features ort --example diarize_from_wav -- path/to/clip.wav
+```
+
+See `examples/diarize_from_wav.rs` for the full source.
 
 ## License
 
-`dia` is dual-licensed under MIT or Apache 2.0 at your option.
+MIT OR Apache-2.0.

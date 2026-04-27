@@ -5,7 +5,7 @@
 //! mean — divisor lives in [`FrameCount::activation_chunk_count`]),
 //! per-frame instantaneous-speaker-count (mean-with-warm-up-trim per
 //! pyannote `speaker_count(warm_up=(0.1, 0.1))`), and per-cluster
-//! open-run state for RLE-to-[`DiarizedSpan`](crate::diarizer::DiarizedSpan)
+//! open-run state for RLE-to-[`crate::diarizer::DiarizedSpan`]
 //! emission.
 //!
 //! **Phase 10:** this file currently defines TYPES only. The algorithmic
@@ -75,7 +75,7 @@ pub(crate) struct FrameCount {
 
 /// Per-cluster open-run state (spec §5.11). Lives in
 /// [`ReconstructState::open_runs`] until emitted as a
-/// [`DiarizedSpan`](crate::diarizer::DiarizedSpan) by
+/// [`crate::diarizer::DiarizedSpan`] by
 /// `emit_finalized_frames` or `flush_open_runs`.
 #[allow(dead_code)] // fields consumed by emit_finalized_frames / flush_open_runs in Tasks 41-42
 #[derive(Debug, Default)]
