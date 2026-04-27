@@ -246,7 +246,15 @@ impl ReconstructState {
       }
       let buf_idx = (abs_frame - self.base_frame) as usize;
       for (cluster_id, frame_scores) in per_cluster_max.iter() {
-        *self.activations[buf_idx].entry(*cluster_id).or_insert(0.0) += frame_scores[f_in_window];
+        let score = frame_scores[f_in_window];
+        // Sparse storage: don't materialize 0.0 entries. Prevents false-
+        // cluster assignment when count_at_frame elsewhere would pick a
+        // zero-scored cluster as the only candidate (Codex review post-
+        // rev-9 HIGH).
+        if score == 0.0 {
+          continue;
+        }
+        *self.activations[buf_idx].entry(*cluster_id).or_insert(0.0) += score;
       }
       self.counts[buf_idx].activation_chunk_count += 1;
     }
@@ -275,8 +283,16 @@ impl ReconstructState {
         continue;
       }
       let buf_idx = (abs_frame - self.base_frame) as usize;
+      // Cap n_active by mapped slots: unmapped active slots are activity
+      // we couldn't embed — pretending their activity counts toward the
+      // speaker count would let an unmapped slot's speech steal the
+      // top-K active_set choice for an inactive mapped cluster (Codex
+      // review post-rev-9 HIGH).
       let n_active = (0..MAX_SPEAKER_SLOTS as usize)
-        .filter(|s| raw_probs[*s][f_in_window] > binarize_threshold)
+        .filter(|s| {
+          raw_probs[*s][f_in_window] > binarize_threshold
+            && self.slot_to_cluster.contains_key(&(window_id, *s as u8))
+        })
         .count() as f32;
       self.counts[buf_idx].count_sum += n_active;
       self.counts[buf_idx].count_chunk_count += 1;
@@ -320,12 +336,14 @@ mod integrate_tests {
     assert!(s.activations[100].contains_key(&7));
     assert!((s.activations[100][&7] - 0.9).abs() < 1e-6);
     // Frame 50: slot 0 is mapped to cluster 7 but its probability is 0.0
-    // there, so the entry exists with value 0.0 (the algorithm
-    // unconditionally accumulates per-frame for any cluster bound to the
-    // window — the zero-valued entry is benign and §5.11 normalization
-    // handles it via activation_chunk_count).
-    assert!(s.activations[50].contains_key(&7));
-    assert!(s.activations[50][&7].abs() < 1e-6);
+    // there. Sparse storage drops zero-valued entries (Codex review
+    // post-rev-9 fix) — the frame state is empty, NOT cluster 7 with
+    // value 0.0.
+    assert!(
+      s.activations[50].is_empty(),
+      "frame 50 must have no cluster entries (slot 0 inactive there); got {:?}",
+      s.activations[50]
+    );
 
     // Activation chunk count = 1 for EVERY frame (this single window).
     for fc in &s.counts {
@@ -422,6 +440,86 @@ mod integrate_tests {
     // mass to add).
     for fc in &s.counts {
       assert_eq!(fc.activation_chunk_count, 1);
+    }
+  }
+
+  #[test]
+  fn unmapped_active_slot_does_not_steal_mapped_cluster_activation() {
+    // Codex review HIGH-severity regression: window W has slot 0 mapped
+    // (active at early frames) and slot 1 unmapped (active at later
+    // frames). Without the fix, count_at_frame at slot-1's active region
+    // would be 1, frame_state would only contain cluster 7 with 0.0,
+    // and emit_finalized_frames would falsely open cluster 7's span over
+    // slot 1's speech.
+    use crate::segment::options::SAMPLE_RATE_TB;
+    use mediatime::TimeRange;
+
+    let mut s = ReconstructState::new();
+    let id = WindowId::new(TimeRange::new(0, WINDOW_SAMPLES as i64, SAMPLE_RATE_TB), 0);
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    // Slot 0 active at frames 100..200 (mapped to cluster 7).
+    for p in probs[0].iter_mut().skip(100).take(100) {
+      *p = 0.9;
+    }
+    // Slot 1 active at frames 400..500 (UNMAPPED — embedding was skipped).
+    for p in probs[1].iter_mut().skip(400).take(100) {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id, 0), 7);
+    // NOTE: no slot_to_cluster entry for (id, 1).
+
+    s.integrate_window(id, 0, &probs, 0.5);
+
+    // Slot 0's mapped frames: cluster 7 has its max-collapsed score.
+    assert!(s.activations[150].contains_key(&7));
+    assert!((s.activations[150][&7] - 0.9).abs() < 1e-6);
+
+    // Slot 1's unmapped frames: cluster 7 must NOT be present (slot 0
+    // contributed nothing here, so per_cluster_max[7][450] = 0.0; sparse
+    // storage drops the entry).
+    assert!(
+      !s.activations[450].contains_key(&7),
+      "false cluster 7 entry at frame 450 (slot 1's unmapped speech): {:?}",
+      s.activations[450]
+    );
+
+    // Speaker count at frame 450: slot 1 is unmapped, so it must NOT
+    // contribute to count_sum. n_active should be 0 → count_chunk_count
+    // increments but count_sum stays 0.
+    let warm_left = SPEAKER_COUNT_WARM_UP_FRAMES_LEFT as usize;
+    let warm_right = SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT as usize;
+    assert!(
+      (warm_left..(FRAMES_PER_WINDOW - warm_right)).contains(&450),
+      "test setup: frame 450 must be in the count region"
+    );
+    assert_eq!(
+      s.counts[450].count_chunk_count, 1,
+      "frame 450 is in the count region; chunk_count should be 1"
+    );
+    assert_eq!(
+      s.counts[450].count_sum, 0.0,
+      "unmapped slot must NOT contribute to count_sum; got {}",
+      s.counts[450].count_sum
+    );
+
+    // Smoke: drive emit_finalized_frames and verify NO span is emitted
+    // for cluster 7 covering slot 1's range.
+    s.advance_finalization_boundary(u64::MAX);
+    let mut emitted = Vec::new();
+    s.emit_finalized_frames(15, |span| emitted.push(span));
+    for span in &emitted {
+      if span.speaker_id() != 7 {
+        continue;
+      }
+      let s0 = span.range().start_pts() as u64;
+      let s1 = span.range().end_pts() as u64;
+      let frame_lo = frame_index_of(s0);
+      let frame_hi = frame_index_of(s1);
+      // Span must NOT extend into the unmapped slot 1's range (400..500).
+      assert!(
+        frame_hi <= 400,
+        "cluster 7 span [{frame_lo}, {frame_hi}) extends into unmapped slot 1's frames (400..500): {span:?}"
+      );
     }
   }
 }
