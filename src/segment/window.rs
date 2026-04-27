@@ -21,7 +21,7 @@ pub(crate) fn plan_starts(total_samples: u64, step_samples: u32) -> Vec<u64> {
     return Vec::new();
   }
   let step = step_samples as u64;
-  debug_assert!(step > 0, "step_samples must be > 0");
+  assert!(step > 0, "step_samples must be > 0");
   let win = WINDOW_SAMPLES as u64;
 
   let mut out = Vec::new();

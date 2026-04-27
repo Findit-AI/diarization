@@ -108,7 +108,16 @@ pub struct Segmenter {
 
 impl Segmenter {
   /// Construct a new segmenter. Consumes one process-wide generation token.
+  ///
+  /// # Panics
+  /// Panics if `opts.step_samples() == 0`. Zero step would hang the
+  /// streaming pump (Codex review post-rev-9). Defense-in-depth: the
+  /// option setters [`SegmentOptions::with_step_samples`] /
+  /// [`SegmentOptions::set_step_samples`] already panic on zero, so
+  /// this trip only fires if a future refactor constructs a
+  /// `SegmentOptions` value that bypasses those setters.
   pub fn new(opts: SegmentOptions) -> Self {
+    assert!(opts.step_samples() > 0, "step_samples must be > 0");
     let onset = opts.onset_threshold();
     let offset = opts.offset_threshold();
     Self {

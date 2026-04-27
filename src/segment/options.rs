@@ -93,7 +93,13 @@ impl SegmentOptions {
     self
   }
   /// Builder: set the sliding-window step in samples.
+  ///
+  /// # Panics
+  /// Panics if `v == 0`. Zero step would hang the streaming pump
+  /// (`schedule_ready_windows` would emit windows starting at 0
+  /// forever). Codex review post-rev-9.
   pub const fn with_step_samples(mut self, v: u32) -> Self {
+    assert!(v > 0, "step_samples must be > 0");
     self.step_samples = v;
     self
   }
@@ -124,7 +130,11 @@ impl SegmentOptions {
     self
   }
   /// Mutating: set the sliding-window step in samples.
+  ///
+  /// # Panics
+  /// Panics if `v == 0`. See [`with_step_samples`](Self::with_step_samples).
   pub fn set_step_samples(&mut self, v: u32) -> &mut Self {
+    assert!(v > 0, "step_samples must be > 0");
     self.step_samples = v;
     self
   }
@@ -180,5 +190,18 @@ mod tests {
   fn sample_rate_tb_matches_constant() {
     assert_eq!(SAMPLE_RATE_TB.den().get(), SAMPLE_RATE_HZ);
     assert_eq!(SAMPLE_RATE_TB.num(), 1);
+  }
+
+  #[test]
+  #[should_panic(expected = "step_samples must be > 0")]
+  fn with_step_samples_zero_panics() {
+    let _ = SegmentOptions::default().with_step_samples(0);
+  }
+
+  #[test]
+  #[should_panic(expected = "step_samples must be > 0")]
+  fn set_step_samples_zero_panics() {
+    let mut o = SegmentOptions::default();
+    o.set_step_samples(0);
   }
 }
