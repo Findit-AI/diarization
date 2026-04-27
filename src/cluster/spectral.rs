@@ -204,7 +204,7 @@ use rand_chacha::ChaCha8Rng;
 /// fast-path filter for N<=2.
 #[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec<f64>> {
-  let (n, _dim) = (mat.nrows(), mat.ncols());
+  let n = mat.nrows();
   debug_assert!(k >= 1, "K must be >= 1");
   debug_assert!(n >= k, "N must be >= K");
 
@@ -251,10 +251,20 @@ pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec
     }
 
     // Step 2c: u ~ U[0, 1); t = u * S; smallest j with cumulative > t.
+    // u ~ U[0, 1) (half-open). The strict `>` below requires u*S < S
+    // strictly, which the half-open interval guarantees: cum can equal S
+    // when accumulating all elements, but never exceed it for any prior
+    // index when t < S.
     let u: f64 = rng.random::<f64>();
     let t = u * s;
     let mut cum = 0.0f64;
-    let mut pick = n - 1; // fallback if floating-point drift means cum never > t
+    // pick fallback = n - 1: if floating-point drift means cum never
+    // strictly exceeds t (e.g., when t is very close to S), the last
+    // index is the correct answer because cum reaches S exactly at j=n-1.
+    // Plan code used pick = 0 (initial value); n - 1 is mathematically
+    // the same probability mass for the boundary case but more defensible
+    // semantically (you get the entry with the largest D^2 contribution).
+    let mut pick = n - 1;
     for (j, &dj) in d.iter().enumerate() {
       cum += dj;
       if cum > t {
@@ -286,6 +296,40 @@ mod kmeans_seed_tests {
     let a = kmeans_pp_seed(&mat, 2, 42);
     let b = kmeans_pp_seed(&mat, 2, 42);
     assert_eq!(a, b, "same seed must produce identical centroid picks");
+  }
+
+  #[test]
+  fn kmeans_pp_seed_byte_determinism_fixture() {
+    // Reference fixture for byte-determinism. Pins kmeans_pp_seed
+    // output for a known input+seed. Future drift in the cumulative-
+    // mass walk, summation order, f64 reductions, or rand 0.10
+    // upgrades would fail this assertion FIRST — before Task 21
+    // amplifies the failure into a label-stability regression.
+    //
+    // Companion to tests/chacha_keystream_fixture.rs (which pins the
+    // underlying ChaCha8Rng keystream); this fixture pins the
+    // algorithm-level output one layer up.
+    let mat = DMatrix::<f64>::from_row_slice(4, 2, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 10.0, 10.0]);
+    let centroids = kmeans_pp_seed(&mat, 2, 42);
+    assert_eq!(centroids.len(), 2);
+    assert_eq!(centroids[0].len(), 2);
+    assert_eq!(centroids[1].len(), 2);
+
+    // Exact byte-stable values pinned 2026-04-26 against rand 0.10.1 +
+    // rand_chacha 0.10.0. If this test fails after a `cargo update`,
+    // ChaCha8Rng → kmeans_pp_seed determinism has drifted; investigate
+    // and re-pin only after auditing the rand changelog.
+    let expected: [[f64; 2]; 2] = [[0.0, 0.0], [10.0, 10.0]];
+    assert_eq!(
+      centroids[0], expected[0],
+      "centroid 0 byte-determinism drift: expected {:?}, got {:?}",
+      expected[0], centroids[0]
+    );
+    assert_eq!(
+      centroids[1], expected[1],
+      "centroid 1 byte-determinism drift: expected {:?}, got {:?}",
+      expected[1], centroids[1]
+    );
   }
 
   #[test]
