@@ -11,16 +11,24 @@
 //! `DIA_SEGMENT_MODEL_PATH` / `DIA_EMBED_MODEL_PATH` or falls back to
 //! `models/segmentation-3.0.onnx` / `models/wespeaker_resnet34_lm.onnx`.
 
-#![cfg(feature = "ort")]
+#[cfg(not(feature = "ort"))]
+fn main() {
+  eprintln!(
+    "This example requires the `ort` feature: cargo run --features ort --example diarize_from_wav"
+  );
+}
 
+#[cfg(feature = "ort")]
 use std::{env, error::Error, path::PathBuf};
 
+#[cfg(feature = "ort")]
 use dia::{
   diarizer::{Diarizer, DiarizerOptions},
   embed::EmbedModel,
   segment::SegmentModel,
 };
 
+#[cfg(feature = "ort")]
 fn segment_model_path() -> PathBuf {
   if let Ok(p) = env::var("DIA_SEGMENT_MODEL_PATH") {
     return PathBuf::from(p);
@@ -28,6 +36,7 @@ fn segment_model_path() -> PathBuf {
   PathBuf::from("models/segmentation-3.0.onnx")
 }
 
+#[cfg(feature = "ort")]
 fn embed_model_path() -> PathBuf {
   if let Ok(p) = env::var("DIA_EMBED_MODEL_PATH") {
     return PathBuf::from(p);
@@ -35,6 +44,7 @@ fn embed_model_path() -> PathBuf {
   PathBuf::from("models/wespeaker_resnet34_lm.onnx")
 }
 
+#[cfg(feature = "ort")]
 fn main() -> Result<(), Box<dyn Error>> {
   let args: Vec<String> = env::args().collect();
   let clip_path = args.get(1).ok_or("usage: diarize_from_wav <clip.wav>")?;
@@ -89,6 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
   Ok(())
 }
 
+#[cfg(feature = "ort")]
 fn print_span(span: dia::diarizer::DiarizedSpan, flushed: bool) {
   let suffix = if flushed { " [flushed]" } else { "" };
   println!(
