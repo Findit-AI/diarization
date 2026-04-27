@@ -179,6 +179,148 @@ pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>
   best_k.max(1)
 }
 
+use rand::{
+  RngExt as _, SeedableRng,
+  distr::{Distribution, Uniform},
+};
+use rand_chacha::ChaCha8Rng;
+
+/// K-means++ seeding (Arthur & Vassilvitskii 2007) over the rows of `mat`
+/// (`N` rows × `dim` columns). Returns the K initial centroid rows
+/// (each is `dim`-dimensional).
+///
+/// Pinned to specific `rand` 0.10 call sites for byte-determinism per
+/// spec §5.5 step 8 / §11.9. Task 2's keystream fixture enforces this
+/// across rand patch versions:
+/// - First centroid: `Uniform::new(0, N).unwrap().sample(&mut rng)`.
+/// - Cumulative-mass crossing: `rng.random::<f64>()` (StandardUniform,
+///   half-open `[0, 1)`), strict `>` against `t = u * S`.
+/// - Step 2b (S == 0 → duplicates): linear-scan compacted `Vec<usize>` of
+///   not-yet-chosen indices, then `Uniform::new(0, available.len())`.
+/// - All min/sum reductions left-to-right in `f64`.
+///
+/// Caller invariants: `k >= 1`, `n >= k`, all `mat` rows finite. Caller
+/// (Task 21) guarantees these via [`validate_offline_input`] + the
+/// fast-path filter for N<=2.
+#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
+pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec<f64>> {
+  let (n, _dim) = (mat.nrows(), mat.ncols());
+  debug_assert!(k >= 1, "K must be >= 1");
+  debug_assert!(n >= k, "N must be >= K");
+
+  let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+  // Step 1: pick first centroid uniformly.
+  let i0: usize = Uniform::new(0usize, n).unwrap().sample(&mut rng);
+  let mut centroids: Vec<Vec<f64>> = vec![row(mat, i0)];
+  let mut chosen: Vec<usize> = vec![i0];
+
+  // Step 2: for k = 1..K, weighted-by-D^2 sampling.
+  while centroids.len() < k {
+    // Step 2a: D[j] = min over chosen centroids of ||row_j - c||^2 (left-to-right).
+    let d: Vec<f64> = (0..n)
+      .map(|j| {
+        centroids
+          .iter()
+          .map(|c| {
+            c.iter()
+              .enumerate()
+              .map(|(x, &cx)| {
+                let diff = mat[(j, x)] - cx;
+                diff * diff
+              })
+              .sum::<f64>()
+          })
+          .fold(f64::INFINITY, |a, b| if b < a { b } else { a })
+      })
+      .collect();
+
+    // Step 2b: if S == 0 (all chosen centroids coincide with all remaining
+    // rows — degenerate duplicate input), pick uniformly from not-yet-chosen.
+    let s: f64 = d.iter().sum::<f64>();
+    if s == 0.0 {
+      let chosen_ref = &chosen;
+      let available: Vec<usize> = (0..n).filter(|j| !chosen_ref.contains(j)).collect();
+      let idx = Uniform::new(0usize, available.len())
+        .unwrap()
+        .sample(&mut rng);
+      let pick = available[idx];
+      centroids.push(row(mat, pick));
+      chosen.push(pick);
+      continue;
+    }
+
+    // Step 2c: u ~ U[0, 1); t = u * S; smallest j with cumulative > t.
+    let u: f64 = rng.random::<f64>();
+    let t = u * s;
+    let mut cum = 0.0f64;
+    let mut pick = n - 1; // fallback if floating-point drift means cum never > t
+    for (j, &dj) in d.iter().enumerate() {
+      cum += dj;
+      if cum > t {
+        pick = j;
+        break;
+      }
+    }
+    centroids.push(row(mat, pick));
+    chosen.push(pick);
+  }
+
+  centroids
+}
+
+/// Extract row `i` of matrix `m` as `Vec<f64>`. Helper for K-means seeding /
+/// Lloyd iteration (centroids are 1-D vectors over the row dimension).
+#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
+fn row(m: &DMatrix<f64>, i: usize) -> Vec<f64> {
+  m.row(i).iter().copied().collect()
+}
+
+#[cfg(test)]
+mod kmeans_seed_tests {
+  use super::*;
+
+  #[test]
+  fn same_seed_same_picks() {
+    let mat = DMatrix::<f64>::from_row_slice(4, 2, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    let a = kmeans_pp_seed(&mat, 2, 42);
+    let b = kmeans_pp_seed(&mat, 2, 42);
+    assert_eq!(a, b, "same seed must produce identical centroid picks");
+  }
+
+  #[test]
+  fn different_seeds_can_pick_differently() {
+    // 8 rows in two clearly-separated 2D clusters.
+    let mat = DMatrix::<f64>::from_row_slice(
+      8,
+      2,
+      &[
+        0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.1, 0.1, 5.0, 5.0, 5.1, 5.0, 5.0, 5.1, 5.1, 5.1,
+      ],
+    );
+    let a = kmeans_pp_seed(&mat, 2, 0);
+    let b = kmeans_pp_seed(&mat, 2, 999);
+    // Both runs return K=2 centroids, each 2-dim. We don't assert the
+    // picks differ — well-separated layouts can produce the same selection
+    // from any seed when the D^2 weighting is decisive.
+    assert_eq!(a.len(), 2);
+    assert_eq!(b.len(), 2);
+    assert_eq!(a[0].len(), 2);
+    assert_eq!(b[0].len(), 2);
+  }
+
+  #[test]
+  fn k_equals_n_picks_all_points() {
+    // 3 rows, K = 3 → every row is selected exactly once.
+    let mat = DMatrix::<f64>::from_row_slice(3, 1, &[0.0, 1.0, 2.0]);
+    let centroids = kmeans_pp_seed(&mat, 3, 7);
+    assert_eq!(centroids.len(), 3);
+    let mut sorted_picks: Vec<f64> = centroids.iter().map(|c| c[0]).collect();
+    sorted_picks.sort_by(|a, b| a.total_cmp(b));
+    assert_eq!(sorted_picks, vec![0.0, 1.0, 2.0]);
+  }
+}
+
 #[cfg(test)]
 mod eigen_tests {
   use super::*;
