@@ -120,3 +120,135 @@ fn end_to_end_pump_30s_fixture() {
   // The synthetic-tone fixture produces no real speech; a real
   // multi-speaker fixture would yield > 0 spans.
 }
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn empty_push_is_noop() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  let mut spans = Vec::new();
+  d.process_samples(&mut seg, &mut emb, &[], |s| spans.push(s))
+    .expect("empty push completes");
+
+  assert_eq!(d.total_samples_pushed(), 0);
+  assert!(spans.is_empty());
+  assert_eq!(d.pending_inferences(), 0);
+}
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn sub_window_push_no_spans_until_finish() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  let half_second = vec![0.001f32; 8_000];
+
+  let mut spans = Vec::new();
+  d.process_samples(&mut seg, &mut emb, &half_second, |s| spans.push(s))
+    .expect("sub-window push completes");
+  // 0.5 s is far below the 10 s segment window; no inference scheduled.
+  assert_eq!(d.pending_inferences(), 0);
+  assert!(spans.is_empty());
+
+  // finish_stream's tail-anchor processes the partial buffer.
+  d.finish_stream(&mut seg, &mut emb, |s| spans.push(s))
+    .expect("finish_stream completes");
+
+  assert_eq!(d.total_samples_pushed(), 8_000);
+  // Span count depends on the model — 0 for silent input is fine.
+}
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn multiple_short_pushes_accumulate() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+
+  for _ in 0..5 {
+    let chunk = vec![0.001f32; 16_000]; // 1 s × 5 = 5 s
+    d.process_samples(&mut seg, &mut emb, &chunk, |_| {})
+      .expect("push completes");
+  }
+
+  assert_eq!(d.total_samples_pushed(), 5 * 16_000);
+  // Still under one window's worth (10 s); no inference scheduled.
+  assert_eq!(d.pending_inferences(), 0);
+}
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn long_single_push_processes_multiple_windows() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  let sixty_seconds = vec![0.001f32; 60 * 16_000];
+
+  let mut spans = Vec::new();
+  d.process_samples(&mut seg, &mut emb, &sixty_seconds, |s| spans.push(s))
+    .expect("60 s push completes");
+
+  // Synchronous pump drains all scheduled inferences.
+  assert_eq!(d.pending_inferences(), 0);
+  // For 60 s with the default 2.5 s segment step: ~20 regular windows.
+  // No assertion on span count (silent input).
+  eprintln!(
+    "60s pump: {} spans, {} speakers",
+    spans.len(),
+    d.num_speakers()
+  );
+}
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn total_samples_pushed_monotonic_resets_on_clear() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+
+  d.process_samples(&mut seg, &mut emb, &vec![0.001f32; 10_000], |_| {})
+    .expect("first push");
+  d.process_samples(&mut seg, &mut emb, &vec![0.001f32; 7_000], |_| {})
+    .expect("second push");
+  assert_eq!(d.total_samples_pushed(), 17_000);
+
+  d.clear();
+  assert_eq!(d.total_samples_pushed(), 0);
+
+  d.process_samples(&mut seg, &mut emb, &vec![0.001f32; 5_000], |_| {})
+    .expect("post-clear push");
+  assert_eq!(d.total_samples_pushed(), 5_000);
+}
+
+#[test]
+#[ignore = "requires both ONNX models"]
+fn buffered_frames_steady_state() {
+  let Some((mut seg, mut emb)) = try_load_models() else {
+    return;
+  };
+  let mut d = Diarizer::new(DiarizerOptions::default());
+
+  d.process_samples(&mut seg, &mut emb, &vec![0.001f32; 30 * 16_000], |_| {})
+    .expect("30s push");
+
+  // After 30 s of steady-state streaming, the reconstruction buffer
+  // holds the un-finalized frames. ~10 s of audio × 58.9 fps ≈ 589
+  // frames bounded above by the segment lookback.
+  let buffered = d.buffered_frames();
+  eprintln!("buffered_frames after 30s push: {buffered}");
+  // Lower bound: at least one window's worth of frames hasn't yet
+  // finalized (peek_next_window_start hasn't advanced past them).
+  assert!(buffered > 0, "expected un-finalized frames; got {buffered}");
+  // Upper bound: bounded by the segmenter's lookback (~589 frames per
+  // window plus some slack for in-flight windows).
+  assert!(
+    buffered < 1500,
+    "expected steady-state ≈ 589 frames; got {buffered}"
+  );
+}
