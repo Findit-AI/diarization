@@ -21,6 +21,10 @@ pub(crate) fn validate_offline_input(
     return Err(Error::EmptyInput);
   }
   for e in embeddings {
+    // f64 accumulator: 256 squared-f32 terms can lose ~8 bits of mantissa
+    // in f32 (sum of values ~1.0). Promote for stability, demote at the
+    // end. Mirrors online.rs::update_speaker. Not perf-critical — runs
+    // once per embedding at validation time.
     let mut sq = 0.0f64;
     for &x in e.as_array() {
       if !x.is_finite() {
@@ -183,5 +187,24 @@ mod tests {
     let e = Embedding([0.0f32; EMBEDDING_DIM]);
     let r = cluster_offline(&[e, unit(0)], &OfflineClusterOptions::default());
     assert!(matches!(r, Err(Error::DegenerateEmbedding)));
+  }
+
+  #[test]
+  fn validate_returns_n_on_valid_no_target() {
+    let n = validate_offline_input(&[unit(0), unit(1), unit(2)], None).unwrap();
+    assert_eq!(n, 3);
+  }
+
+  #[test]
+  fn validate_returns_n_on_valid_with_target() {
+    let n = validate_offline_input(&[unit(0), unit(1), unit(2)], Some(2)).unwrap();
+    assert_eq!(n, 3);
+  }
+
+  #[test]
+  fn validate_target_equals_n_ok() {
+    // target == n is allowed (every embedding can be its own cluster).
+    let n = validate_offline_input(&[unit(0), unit(1)], Some(2)).unwrap();
+    assert_eq!(n, 2);
   }
 }

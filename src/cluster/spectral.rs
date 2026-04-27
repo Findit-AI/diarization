@@ -5,10 +5,12 @@ use crate::{
   embed::Embedding,
 };
 
-/// Stub. Real impl arrives in Tasks 17-21.
+/// Stub. Real implementation arrives in Tasks 17-21. Currently
+/// unreachable because `cluster_offline` short-circuits N<=2 and
+/// Task 14 tests never invoke an N>=3 dispatch.
 pub(crate) fn cluster(
   _embeddings: &[Embedding],
   _opts: &OfflineClusterOptions,
 ) -> Result<Vec<u64>, Error> {
-  Err(Error::EmptyInput) // placeholder — never reached by Task 14 tests.
+  unreachable!("spectral::cluster stub — Tasks 17-21 will implement this")
 }
