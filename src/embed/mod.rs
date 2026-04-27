@@ -7,6 +7,8 @@
 //! - Low-level: `compute_fbank`, `EmbedModel::embed_features`,
 //!   `EmbedModel::embed_features_batch` (added in phase 5)
 
+#[cfg(feature = "ort")]
+mod embedder;
 mod error;
 mod fbank;
 #[cfg(feature = "ort")]
