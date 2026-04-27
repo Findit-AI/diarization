@@ -70,22 +70,31 @@ impl Diarizer {
     &self.opts
   }
 
-  /// Reset for a new session. Spec §4.4 / rev-7 §11.12:
+  /// Reset for a new session. Drops ALL session-local state including
+  /// collected per-activity context.
+  ///
+  /// Spec §4.4 / rev-7 §11.12 + Codex review post-rev-9:
   /// - [`Segmenter`] cleared (generation bump → stale window-ids reject).
   /// - [`Clusterer`] cleared (`speaker_id` resets to 0).
   /// - Audio buffer drained; `audio_base = 0`; `total_samples_pushed = 0`.
   /// - Per-frame stitching state dropped; open per-cluster runs are
   ///   DROPPED (NOT auto-emitted — call `finish_stream` first if you
   ///   want them out).
-  /// - `collected_embeddings` is **NOT** cleared. Call
-  ///   [`clear_collected`](Self::clear_collected) to drop those.
+  /// - `collected_embeddings` dropped (rev-9 + Codex review fix:
+  ///   privacy/tenant-isolation safety for pooled diarizers).
   /// - Configured options are preserved.
+  ///
+  /// If you want to extract collected embeddings before resetting (for
+  /// offline re-clustering or audit), call
+  /// [`take_collected`](Self::take_collected) first — it returns the
+  /// embeddings AND clears them in one operation.
   pub fn clear(&mut self) {
     self.segmenter.clear();
     self.clusterer.clear();
     self.audio_buffer.clear();
     self.audio_base = 0;
     self.total_samples_pushed = 0;
+    self.collected_embeddings.clear();
     self.reconstruct.clear();
   }
 
@@ -96,9 +105,26 @@ impl Diarizer {
     &self.collected_embeddings
   }
 
-  /// Drop all collected per-activity context.
+  /// Drop all collected per-activity context, leaving session state
+  /// (segmenter, clusterer, audio buffer, reconstruction) intact.
+  ///
+  /// Use [`clear`](Self::clear) for a full session reset (which now
+  /// also drops collected embeddings). This method is for the rare
+  /// case where a caller wants to preserve session state but reset
+  /// audit data.
   pub fn clear_collected(&mut self) {
     self.collected_embeddings.clear();
+  }
+
+  /// Take the collected per-activity context, leaving the Diarizer's
+  /// `collected_embeddings` empty. Useful for the offline-re-clustering
+  /// pattern: extract embeddings → re-cluster → continue the session.
+  ///
+  /// Equivalent to `std::mem::take(&mut diarizer.collected_embeddings)`
+  /// but provides a public-API entry point (the field itself is
+  /// `pub(crate)`).
+  pub fn take_collected(&mut self) -> Vec<CollectedEmbedding> {
+    core::mem::take(&mut self.collected_embeddings)
   }
 
   /// Number of segmentation windows awaiting `push_inference`.

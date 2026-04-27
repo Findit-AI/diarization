@@ -23,12 +23,56 @@ fn builder_round_trip() {
 }
 
 #[test]
-fn clear_resets_state_but_preserves_collected() {
+fn clear_resets_collected_embeddings_too() {
+  // Codex review post-rev-9 HIGH: clear() must drop collected_embeddings
+  // for tenant-isolation safety in pooled diarizers. Behaviour change
+  // from rev-9 (which preserved them on the assumption that callers
+  // would offline-re-cluster after clear()).
   let mut d = Diarizer::new(DiarizerOptions::default());
-  // total_samples_pushed bumps via push_audio (added in Task 36).
-  // For Task 35 just verify clear() doesn't panic on a fresh instance.
+  d.collected_embeddings
+    .push(crate::diarizer::CollectedEmbedding {
+      range: mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
+      embedding: crate::embed::Embedding::normalize_from({
+        let mut v = [0.0f32; 256];
+        v[0] = 1.0;
+        v
+      })
+      .unwrap(),
+      online_speaker_id: 0,
+      speaker_slot: 0,
+      used_clean_mask: true,
+    });
+  assert_eq!(d.collected_embeddings().len(), 1);
   d.clear();
   assert_eq!(d.total_samples_pushed(), 0);
+  assert!(
+    d.collected_embeddings().is_empty(),
+    "clear() must drop collected_embeddings (Codex review fix)"
+  );
+}
+
+#[test]
+fn take_collected_returns_and_drops() {
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  // The collected_embeddings field is pub(crate); we can populate
+  // it directly from inside the diarizer module's tests.
+  d.collected_embeddings
+    .push(crate::diarizer::CollectedEmbedding {
+      range: mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
+      embedding: crate::embed::Embedding::normalize_from({
+        let mut v = [0.0f32; 256];
+        v[0] = 1.0;
+        v
+      })
+      .unwrap(),
+      online_speaker_id: 0,
+      speaker_slot: 0,
+      used_clean_mask: true,
+    });
+  assert_eq!(d.collected_embeddings().len(), 1);
+  let taken = d.take_collected();
+  assert_eq!(taken.len(), 1);
+  assert!(d.collected_embeddings().is_empty());
 }
 
 #[test]
