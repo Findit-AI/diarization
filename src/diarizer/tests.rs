@@ -67,6 +67,27 @@ fn poisoned_state_blocks_further_work() {
 }
 
 #[test]
+fn finished_state_blocks_further_work_until_clear() {
+  // Codex review HIGH: after `finish_stream` completes, `process_samples`
+  // and a second `finish_stream` must return Error::Finished, not be
+  // silently accepted. Without this gate, push_audio still grows the
+  // audio buffer and `total_samples_pushed`, but the inner Segmenter
+  // drops the samples — desynchronizing the public counter from
+  // segmentation.
+  //
+  // We can't instantiate real SegmentModel/EmbedModel in a unit test
+  // (both require ONNX files), so this test exercises the flag toggle
+  // through clear() directly, mirroring `poisoned_state_blocks_further_work`.
+  // The full lifecycle path is covered by the integration tests gated on
+  // model availability.
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  assert!(!d.finished, "fresh Diarizer must not be finished");
+  d.finished = true;
+  d.clear();
+  assert!(!d.finished, "clear() must reset the finished flag");
+}
+
+#[test]
 fn clear_resets_pending_seg_inference() {
   // Codex review HIGH: clear() must drop any stashed in-flight
   // segmentation inference so a fresh session doesn't accidentally

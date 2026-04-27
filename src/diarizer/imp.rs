@@ -57,6 +57,18 @@ pub struct Diarizer {
   /// `pending_seg_inference` path is explicitly excluded — see
   /// `process_samples` / `finish_stream`. Codex review HIGH.
   pub(crate) poisoned: bool,
+  /// Once `true`, [`process_samples`](Self::process_samples) and a
+  /// second [`finish_stream`](Self::finish_stream) return
+  /// [`Error::Finished`] until [`clear`](Self::clear) resets the state.
+  /// Set after [`finish_stream`](Self::finish_stream) completes
+  /// successfully. Without this terminal-state guard, post-finish
+  /// `process_samples` calls would still grow `audio_buffer` and
+  /// `total_samples_pushed` even though the inner [`Segmenter`] drops
+  /// them — silently desynchronizing the public counter from
+  /// segmentation. Codex review HIGH.
+  ///
+  /// [`Segmenter`]: crate::segment::Segmenter
+  pub(crate) finished: bool,
 }
 
 impl Diarizer {
@@ -75,6 +87,7 @@ impl Diarizer {
       reconstruct: crate::diarizer::reconstruct::ReconstructState::new(),
       pending_seg_inference: None,
       poisoned: false,
+      finished: false,
     }
   }
 
@@ -116,6 +129,7 @@ impl Diarizer {
     self.reconstruct.clear();
     self.pending_seg_inference = None;
     self.poisoned = false;
+    self.finished = false;
   }
 
   /// Borrow the per-activity context collected during streaming.
@@ -272,6 +286,13 @@ impl Diarizer {
     if self.poisoned {
       return Err(Error::Poisoned);
     }
+    if self.finished {
+      // Audio buffer is locked after finish_stream. Without this gate,
+      // push_audio would still append samples and increment
+      // total_samples_pushed but the inner Segmenter silently drops
+      // them — counter advances, segmentation does not.
+      return Err(Error::Finished);
+    }
     let result = self.process_samples_inner(seg_model, embed_model, samples, &mut emit);
     if result.is_err() && self.pending_seg_inference.is_none() {
       // No retryable stash → not recoverable → poison so the caller
@@ -315,9 +336,22 @@ impl Diarizer {
     if self.poisoned {
       return Err(Error::Poisoned);
     }
+    if self.finished {
+      // Already finished — flushing twice would re-emit `flush_open_runs`
+      // against an empty state and is meaningless. Make it loud so the
+      // caller catches lifecycle bugs instead of getting a silent no-op.
+      return Err(Error::Finished);
+    }
     let result = self.finish_stream_inner(seg_model, embed_model, &mut emit);
     if result.is_err() && self.pending_seg_inference.is_none() {
       self.poisoned = true;
+    }
+    if result.is_ok() {
+      // Latch the terminal state only on a clean finish. On error we
+      // either poisoned (handled above) or stashed a retryable
+      // inference; in the latter case the caller must be allowed to
+      // call finish_stream again.
+      self.finished = true;
     }
     result
   }
@@ -594,6 +628,15 @@ impl Diarizer {
         .reconstruct
         .activities_by_cluster
         .entry(cluster_id)
+        .or_default()
+        .push(activity_index);
+      // Per-window index: lets `integrate_window` Step A and
+      // `slot_is_mapped_at_frame` scan only this window's activities
+      // instead of `self.activities` in full. Codex review HIGH.
+      self
+        .reconstruct
+        .activities_by_window
+        .entry(window_id)
         .or_default()
         .push(activity_index);
 

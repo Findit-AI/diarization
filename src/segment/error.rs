@@ -47,6 +47,19 @@ pub enum Error {
     id: WindowId,
   },
 
+  /// `push_inference` received a `scores` slice containing one or more
+  /// non-finite values (`NaN`, `+inf`, or `-inf`).
+  ///
+  /// The [`WindowId`] is left in the pending set so the caller can
+  /// re-run inference (e.g. retry on a transient backend failure that
+  /// produced bad logits) without losing the window.
+  #[error("inference scores for WindowId {id:?} contain non-finite values")]
+  NonFiniteScores {
+    /// The window whose scores were rejected. Still pending; safe to
+    /// retry `push_inference` after producing valid logits.
+    id: WindowId,
+  },
+
   /// A loaded ONNX model's input or output dimensions don't match what
   /// `dia::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
   /// output, where `*` is a free batch dimension).

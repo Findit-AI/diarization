@@ -258,7 +258,15 @@ impl Segmenter {
   ///    range happens to match a current pending window's range
   ///    (different generation; rejected).
   ///
-  /// Returns [`Error::InferenceShapeMismatch`] if `scores.len()` is wrong.
+  /// Returns [`Error::InferenceShapeMismatch`] if `scores.len()` is wrong,
+  /// or [`Error::NonFiniteScores`] if any score is NaN or infinite.
+  ///
+  /// On `NonFiniteScores`, the [`WindowId`] is left in the pending set so
+  /// the caller can retry with valid logits (e.g. from a fallback model
+  /// or a re-run of the same model). Without this validation, NaN
+  /// propagates through `softmax_row` and downstream comparisons treat
+  /// the entire window as silent — silently dropping the audio with no
+  /// retry path. Codex review HIGH.
   pub fn push_inference(&mut self, id: WindowId, scores: &[f32]) -> Result<(), Error> {
     let expected = FRAMES_PER_WINDOW * POWERSET_CLASSES;
     if scores.len() != expected {
@@ -267,10 +275,18 @@ impl Segmenter {
         got: scores.len(),
       });
     }
-    let start = self
-      .pending
-      .remove(&id)
-      .ok_or(Error::UnknownWindow { id })?;
+    // Verify the window is pending BEFORE rejecting non-finite scores so
+    // an unknown id keeps reporting `UnknownWindow` (a stable contract
+    // for callers using stale ids after `clear()`).
+    if !self.pending.contains_key(&id) {
+      return Err(Error::UnknownWindow { id });
+    }
+    if !scores.iter().all(|x| x.is_finite()) {
+      // Leave `id` in `pending` so the caller can retry with valid
+      // logits. The window is not consumed.
+      return Err(Error::NonFiniteScores { id });
+    }
+    let start = self.pending.remove(&id).expect("presence checked above");
 
     // Decode powerset row by row.
     let mut speaker_probs: [Vec<f32>; MAX_SPEAKER_SLOTS as usize] = [
@@ -712,6 +728,57 @@ mod tests {
       Err(Error::UnknownWindow { .. }) => {}
       other => panic!("expected UnknownWindow on second call, got {other:?}"),
     }
+  }
+
+  /// Non-finite logits (`NaN`, `+inf`, `-inf`) must be rejected BEFORE
+  /// the pending entry is consumed so the caller can retry. Without
+  /// this gate, `softmax_row` produces `NaN` probabilities, downstream
+  /// comparisons treat the window as silent, and the audio is silently
+  /// dropped. Codex review HIGH.
+  #[test]
+  fn push_inference_rejects_non_finite_and_keeps_pending() {
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+      let mut s = Segmenter::new(opts());
+      s.push_samples(&vec![0.0; 160_000]);
+      let id = match s.poll().unwrap() {
+        Action::NeedsInference { id, .. } => id,
+        _ => unreachable!(),
+      };
+      assert_eq!(s.pending_inferences(), 1);
+
+      // Inject `bad` somewhere in the middle of an otherwise valid slice.
+      let mut scores = synth_logits(0..0);
+      scores[100] = bad;
+      match s.push_inference(id, &scores) {
+        Err(Error::NonFiniteScores { id: ret_id }) => assert_eq!(ret_id, id),
+        other => panic!("expected NonFiniteScores for {bad}, got {other:?}"),
+      }
+      // Crucial: pending entry must still be there so caller can retry.
+      assert_eq!(s.pending_inferences(), 1);
+
+      // Retry with valid scores succeeds.
+      let good = synth_logits(0..0);
+      s.push_inference(id, &good).expect("retry should succeed");
+      assert_eq!(s.pending_inferences(), 0);
+    }
+  }
+
+  /// All-non-finite row: every score is NaN. Same rejection path; the
+  /// window stays pending.
+  #[test]
+  fn push_inference_rejects_all_nan_row() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.0; 160_000]);
+    let id = match s.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    let scores = vec![f32::NAN; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    match s.push_inference(id, &scores) {
+      Err(Error::NonFiniteScores { .. }) => {}
+      other => panic!("expected NonFiniteScores, got {other:?}"),
+    }
+    assert_eq!(s.pending_inferences(), 1);
   }
 
   /// Stale-id from before clear() is rejected (spec §11.9).

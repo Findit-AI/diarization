@@ -157,6 +157,15 @@ pub(crate) struct ReconstructState {
   /// per-frame contributing-activities scan was O(N) where N = total
   /// activities ever recorded (Codex review MEDIUM).
   pub(crate) activities_by_cluster: HashMap<u64, Vec<usize>>,
+  /// `window_id` → indices into `activities`, maintained alongside the
+  /// activities Vec so `integrate_window` Step A and
+  /// `slot_is_mapped_at_frame` only scan the activities for the window
+  /// being integrated, not every activity ever recorded. Without this
+  /// index, both scans were O(total_activities) per call — driving the
+  /// total cost to O(total_activities × frames × slots) per new window
+  /// and making session length the dominant factor on the
+  /// reconstruction hot path. Codex review HIGH.
+  pub(crate) activities_by_window: HashMap<WindowId, Vec<usize>>,
   /// Indices into `activities` that have been logically dropped by
   /// `evict_finalized_window_metadata`. The Vec itself is append-only
   /// during a session so existing `contributing_activities` indices
@@ -195,6 +204,7 @@ impl ReconstructState {
     self.counts.clear();
     self.activities.clear();
     self.activities_by_cluster.clear();
+    self.activities_by_window.clear();
     self.evicted_activities.clear();
     self.window_starts.clear();
     self.open_runs.clear();
@@ -276,18 +286,28 @@ impl ReconstructState {
     // `per_cluster_max[c][f]` = max over (activities-for-c-covering-f) of
     // raw_probs[activity.slot][f]. Slots whose probability is positive but
     // without any activity record are "inactive" — never touched.
+    //
+    // Use the `activities_by_window` index so this scan is bounded by
+    // the activities for THIS window, not all activities ever recorded.
+    // Codex review HIGH.
     let mut per_cluster_max: HashMap<u64, [f32; FRAMES_PER_WINDOW]> = HashMap::new();
-    for (ai, ac) in self.activities.iter().enumerate() {
-      if self.evicted_activities.contains(&ai) || ac.window_id != window_id {
-        continue;
-      }
-      let entry = per_cluster_max
-        .entry(ac.cluster_id)
-        .or_insert([0.0f32; FRAMES_PER_WINDOW]);
-      let lo = (ac.frame_lo_in_window as usize).min(FRAMES_PER_WINDOW);
-      let hi = (ac.frame_hi_in_window as usize).min(FRAMES_PER_WINDOW);
-      for f in lo..hi {
-        entry[f] = entry[f].max(raw_probs[ac.slot as usize][f]);
+    if let Some(activity_indices) = self.activities_by_window.get(&window_id) {
+      for &ai in activity_indices {
+        if self.evicted_activities.contains(&ai) {
+          continue;
+        }
+        let ac = match self.activities.get(ai) {
+          Some(a) => a,
+          None => continue,
+        };
+        let entry = per_cluster_max
+          .entry(ac.cluster_id)
+          .or_insert([0.0f32; FRAMES_PER_WINDOW]);
+        let lo = (ac.frame_lo_in_window as usize).min(FRAMES_PER_WINDOW);
+        let hi = (ac.frame_hi_in_window as usize).min(FRAMES_PER_WINDOW);
+        for f in lo..hi {
+          entry[f] = entry[f].max(raw_probs[ac.slot as usize][f]);
+        }
       }
     }
 
@@ -367,13 +387,26 @@ impl ReconstructState {
   /// signal: only mapped, frame-covered slots contribute to `count_sum`
   /// (see Codex review post-rev-9 HIGH; preserved by the per-activity
   /// refactor).
+  ///
+  /// Lookup is via `activities_by_window` so the scan is bounded by
+  /// the activities for THIS window. Codex review HIGH.
   fn slot_is_mapped_at_frame(&self, window_id: WindowId, slot: u8, f_in_window: u32) -> bool {
-    self.activities.iter().enumerate().any(|(ai, ac)| {
-      !self.evicted_activities.contains(&ai)
-        && ac.window_id == window_id
-        && ac.slot == slot
-        && f_in_window >= ac.frame_lo_in_window
-        && f_in_window < ac.frame_hi_in_window
+    let activity_indices = match self.activities_by_window.get(&window_id) {
+      Some(v) => v,
+      None => return false,
+    };
+    activity_indices.iter().any(|&ai| {
+      if self.evicted_activities.contains(&ai) {
+        return false;
+      }
+      match self.activities.get(ai) {
+        Some(ac) => {
+          ac.slot == slot
+            && f_in_window >= ac.frame_lo_in_window
+            && f_in_window < ac.frame_hi_in_window
+        }
+        None => false,
+      }
     })
   }
 }
@@ -414,6 +447,10 @@ mod integrate_tests {
     });
     s.activities_by_cluster
       .entry(cluster_id)
+      .or_default()
+      .push(ai);
+    s.activities_by_window
+      .entry(window_id)
       .or_default()
       .push(ai);
     ai
@@ -881,6 +918,10 @@ mod emit_tests {
       .entry(cluster_id)
       .or_default()
       .push(ai);
+    s.activities_by_window
+      .entry(window_id)
+      .or_default()
+      .push(ai);
     ai
   }
 
@@ -1230,13 +1271,26 @@ impl ReconstructState {
     for w in evictable {
       self.window_starts.remove(&w);
       // Mark this window's activities as evicted AND prune them from
-      // activities_by_cluster so per-frame scans don't iterate dead
-      // indices forever. Codex review MEDIUM.
+      // activities_by_cluster / activities_by_window so per-frame scans
+      // don't iterate dead indices forever. Codex review MEDIUM (cluster
+      // index) + HIGH (window index).
+      //
+      // Use the per-window index to find the activities to evict in
+      // O(activities_for_w) time instead of scanning `self.activities`
+      // in full. Once we've consumed it, drop the bucket — every
+      // remaining live activity for this window is either already
+      // evicted (no-op insert) or will be flipped here.
+      let activities_for_window = self.activities_by_window.remove(&w).unwrap_or_default();
       let mut newly_evicted: Vec<(u64, usize)> = Vec::new();
-      for (ai, ac) in self.activities.iter().enumerate() {
-        if ac.window_id == w && !self.evicted_activities.contains(&ai) {
-          newly_evicted.push((ac.cluster_id, ai));
+      for ai in activities_for_window {
+        if self.evicted_activities.contains(&ai) {
+          continue;
         }
+        let cluster_id = match self.activities.get(ai) {
+          Some(ac) => ac.cluster_id,
+          None => continue,
+        };
+        newly_evicted.push((cluster_id, ai));
       }
       for (_, ai) in &newly_evicted {
         self.evicted_activities.insert(*ai);
@@ -1287,6 +1341,10 @@ mod flush_eviction_tests {
     });
     s.activities_by_cluster
       .entry(cluster_id)
+      .or_default()
+      .push(ai);
+    s.activities_by_window
+      .entry(window_id)
       .or_default()
       .push(ai);
     ai
@@ -1403,6 +1461,99 @@ mod flush_eviction_tests {
       "expected one live activity; got {bucket:?}"
     );
     assert_eq!(bucket[0], ai_live);
+  }
+
+  #[test]
+  fn evict_prunes_activities_by_window_index() {
+    // Codex review HIGH regression: integrate_window Step A and
+    // slot_is_mapped_at_frame iterate via activities_by_window. After
+    // eviction, the bucket for the evicted window MUST be removed —
+    // otherwise dead indices accumulate and per-window scans grow with
+    // total session history rather than live activity count.
+    let mut s = ReconstructState::new();
+    let id_old = make_window_id(0, 0);
+    let id_live = make_window_id(WINDOW_SAMPLES as i64, 1);
+
+    s.window_starts.insert(id_old, 0);
+    s.window_starts.insert(id_live, WINDOW_SAMPLES as u64);
+
+    let _ai_old = push_activity(&mut s, id_old, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
+    let ai_live = push_activity(&mut s, id_live, 0, 0, FRAMES_PER_WINDOW as u32, 7, true);
+
+    // Pre-eviction: both windows have buckets.
+    assert_eq!(
+      s.activities_by_window.get(&id_old).map(|v| v.len()),
+      Some(1)
+    );
+    assert_eq!(
+      s.activities_by_window.get(&id_live).map(|v| v.len()),
+      Some(1)
+    );
+
+    // Finalize past id_old's last frame; id_live is still in flight.
+    s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
+    s.evict_finalized_window_metadata();
+
+    // The evicted window's bucket is gone outright (no need to keep an
+    // empty bucket; it would never be looked up again).
+    assert!(
+      !s.activities_by_window.contains_key(&id_old),
+      "evicted window's bucket must be removed"
+    );
+
+    // The live window's bucket is untouched.
+    let live_bucket = s
+      .activities_by_window
+      .get(&id_live)
+      .expect("live window keeps its bucket");
+    assert_eq!(live_bucket.as_slice(), &[ai_live]);
+  }
+
+  #[test]
+  fn integrate_window_uses_per_window_index_not_full_scan() {
+    // Codex review HIGH regression: integrate_window Step A must look
+    // up activities through `activities_by_window`, NOT scan
+    // `self.activities` in full. To prove the index is the source of
+    // truth, we install an activity directly into `activities` (and
+    // `activities_by_cluster`) but DELIBERATELY skip
+    // `activities_by_window`; integrate_window must then ignore it.
+    let mut s = ReconstructState::new();
+    let id = make_window_id(0, 0);
+
+    // Simulate a stale leftover index entry: an ActivityCluster that is
+    // present in `self.activities` but not registered in
+    // `activities_by_window`. This represents the bug-state we want to
+    // make sure does NOT affect output: if integrate_window were still
+    // doing a linear scan over `self.activities`, it would pick this
+    // up; with the per-window index, it must not.
+    s.activities.push(ActivityCluster {
+      window_id: id,
+      slot: 0,
+      frame_lo_in_window: 0,
+      frame_hi_in_window: FRAMES_PER_WINDOW as u32,
+      cluster_id: 99,
+      used_clean_mask: true,
+    });
+    // Note: deliberately NOT touching activities_by_window.
+
+    // Build raw_probs so slot 0 is "very active" everywhere.
+    let mut raw_probs: [[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize] =
+      [[0.0; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    for cell in raw_probs[0].iter_mut() {
+      *cell = 0.95;
+    }
+
+    s.integrate_window(id, 0, &raw_probs, 0.5);
+
+    // No activations for cluster 99 should have been recorded — the
+    // activity was not in the per-window index, so it must be invisible.
+    for buf in s.activations.iter() {
+      assert!(
+        !buf.contains_key(&99),
+        "cluster 99 must not appear in activations: integrate_window must consult \
+         activities_by_window, not activities"
+      );
+    }
   }
 
   #[test]

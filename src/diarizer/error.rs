@@ -50,6 +50,24 @@ pub enum Error {
   /// Codex review HIGH.
   #[error("Diarizer is poisoned by a prior error; call clear() to reset")]
   Poisoned,
+
+  /// [`finish_stream`](crate::diarizer::Diarizer::finish_stream) has
+  /// already completed for this session. Once finished, the audio
+  /// buffer is locked: further [`process_samples`] / [`finish_stream`]
+  /// calls return this error until [`clear`](crate::diarizer::Diarizer::clear)
+  /// starts a new session.
+  ///
+  /// Without this terminal-state check, [`process_samples`] would still
+  /// append to the audio buffer and increment the public sample
+  /// counter, but the inner [`Segmenter`](crate::segment::Segmenter)
+  /// silently drops post-finish samples — they would never reach
+  /// segmentation, producing a counter/segmenter divergence with no
+  /// surfaced error. Codex review HIGH.
+  ///
+  /// [`process_samples`]: crate::diarizer::Diarizer::process_samples
+  /// [`finish_stream`]: crate::diarizer::Diarizer::finish_stream
+  #[error("Diarizer stream is already finished; call clear() to start a new session")]
+  Finished,
 }
 
 /// Internal Diarizer invariant violations. Surfaced by
