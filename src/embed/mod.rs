@@ -26,7 +26,7 @@ pub use model::EmbedModel;
 pub use options::EmbedModelOptions;
 pub use options::{
   EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, HOP_SAMPLES, MIN_CLIP_SAMPLES,
-  NORM_EPSILON,
+  NORM_EPSILON, SAMPLE_RATE_HZ,
 };
 pub use types::{Embedding, EmbeddingMeta, EmbeddingResult, cosine_similarity};
 

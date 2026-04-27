@@ -122,8 +122,6 @@ pub struct EmbeddingResult<A = (), T = ()> {
 
 impl<A, T> EmbeddingResult<A, T> {
   /// Construct (typically from inside `EmbedModel`).
-  #[allow(dead_code)] // used in tests; EmbedModel added in a later phase
-  // TODO(phase-5): drop #[allow(dead_code)] once EmbedModel uses this constructor
   pub(crate) fn new(
     embedding: Embedding,
     source_duration: Duration,

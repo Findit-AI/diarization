@@ -29,6 +29,10 @@ pub const EMBEDDING_DIM: usize = 256;
 /// `embedder.py:85`); diverging would lose Python parity in edge cases.
 pub const NORM_EPSILON: f32 = 1e-12;
 
+/// 16 kHz mono — the WeSpeaker ResNet34 expected sample rate.
+/// Matches [`dia::segment::SAMPLE_RATE_HZ`](crate::segment::SAMPLE_RATE_HZ).
+pub const SAMPLE_RATE_HZ: u32 = 16_000;
+
 // ── EmbedModelOptions ─────────────────────────────────────────────────────
 
 #[cfg(feature = "ort")]
