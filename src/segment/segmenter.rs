@@ -210,11 +210,18 @@ impl Segmenter {
       samples: Box::from(samples.as_slice()),
     });
 
-    // Drop samples no future regular window will need. The next window
-    // starts at (next_window_idx + 1) * step_samples; everything before
-    // that can go.
-    let next_start = (self.next_window_idx + 1) as u64 * self.opts.step_samples() as u64;
-    self.trim_input_to(next_start);
+    // Drop samples no future regular window OR finish() tail anchor will
+    // need. The next regular window starts at (next_window_idx + 1) *
+    // step_samples. The latest possible tail anchor (from plan_starts in
+    // finish()) is at total_samples_pushed - WINDOW_SAMPLES. Keep at least
+    // the rolling last-WINDOW_SAMPLES window so a later tail can replay
+    // audio with correct absolute alignment (Codex review).
+    let next_regular_start = (self.next_window_idx + 1) as u64 * self.opts.step_samples() as u64;
+    let tail_floor = self
+      .total_samples_pushed
+      .saturating_sub(WINDOW_SAMPLES as u64);
+    let trim_to = next_regular_start.min(tail_floor);
+    self.trim_input_to(trim_to);
   }
 
   fn trim_input_to(&mut self, abs_sample: u64) {
@@ -946,6 +953,64 @@ mod tests {
     s.push_samples(&[0.001; 16_000]);
     s.finish();
     assert_eq!(s.peek_next_window_start(), u64::MAX);
+  }
+
+  #[test]
+  fn tail_window_audio_aligned_with_claimed_start() {
+    // Codex review HIGH-severity regression: with default step = 40_000
+    // and WINDOW_SAMPLES = 160_000, push 230_000 samples in one shot.
+    // Two regular windows fire (idx 0 → 0, idx 1 → 40_000). finish()
+    // then schedules a tail window at 230_000 - 160_000 = 70_000.
+    // Without the fix, consumed_samples advances to 80_000 after the
+    // second regular emit, and the tail window's audio is shifted by
+    // 10_000 samples while the WindowId still claims start = 70_000.
+    let mut s = Segmenter::new(opts());
+
+    // Build a sentinel signal: every sample equals its own absolute index
+    // (cast to f32). Any misalignment shows up as a constant offset in
+    // the emitted samples.
+    let total: i32 = 230_000;
+    let samples: Vec<f32> = (0..total).map(|i| i as f32).collect();
+    s.push_samples(&samples);
+    s.finish();
+
+    // Drain all NeedsInference actions; record (claimed start, samples).
+    let mut emitted: Vec<(u64, Box<[f32]>)> = Vec::new();
+    let scores = vec![1.0f32 / POWERSET_CLASSES as f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    while let Some(action) = s.poll() {
+      if let Action::NeedsInference { id, samples } = action {
+        emitted.push((id.range().start_pts() as u64, samples));
+        s.push_inference(id, &scores).unwrap();
+      }
+    }
+
+    // We expect exactly 3 windows: 0, 40_000, 70_000 (tail).
+    assert!(
+      emitted.iter().any(|(start, _)| *start == 0),
+      "missing regular window at 0"
+    );
+    assert!(
+      emitted.iter().any(|(start, _)| *start == 40_000),
+      "missing regular window at 40_000"
+    );
+    let tail = emitted
+      .iter()
+      .find(|(start, _)| *start == 70_000)
+      .expect("missing tail window at 70_000");
+
+    // The tail window's samples must satisfy: samples[k] == 70_000 + k as f32
+    // for every k in [0, total - 70_000) = [0, 160_000). Since the input
+    // ended at sample 230_000 (== 70_000 + 160_000), the entire window
+    // is covered with no zero padding. (If our fix is broken, samples[k]
+    // for small k would be 80_000 + k or zero-padding instead.)
+    for (k, &v) in tail.1.iter().enumerate() {
+      let expected = 70_000.0 + k as f32;
+      assert_eq!(
+        v, expected,
+        "tail window sample[{k}] = {v}, expected {expected} (audio misaligned)"
+      );
+    }
+    assert_eq!(tail.1.len(), WINDOW_SAMPLES as usize);
   }
 
   #[test]
