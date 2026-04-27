@@ -25,22 +25,13 @@ pub(crate) fn cluster(
   embeddings: &[Embedding],
   opts: &OfflineClusterOptions,
 ) -> Result<Vec<u64>, Error> {
-  let n = embeddings.len();
-  debug_assert!(n >= 3, "fast path covers N <= 2");
-
-  // Step 1: affinity matrix A[i][j] = max(0, e_i · e_j); A_ii = 0.
-  let a = build_affinity(embeddings);
-
-  // Step 2: degree vector D_ii = sum_j A_ij. Returns AllDissimilar
-  // if any node is isolated (D_ii < NORM_EPSILON) — covers both the
-  // all-zero affinity case and the rev-3 widened isolated-node case.
-  let degrees = compute_degrees(&a)?;
-
-  // Step 3: normalized Laplacian L_sym = I - D^{-1/2} A D^{-1/2}.
-  let _l = normalized_laplacian(&a, &degrees);
-
-  // Steps 4-9 (eigendecomp + K-detection + row-normalize + K-means)
-  // arrive in Tasks 19-21.
+  debug_assert!(embeddings.len() >= 3, "fast path covers N <= 2");
+  // Pipeline overview (full impl arrives in Tasks 19-21):
+  //   let a = build_affinity(embeddings);
+  //   let degrees = compute_degrees(&a)?;
+  //   let l = normalized_laplacian(&a, &degrees);
+  //   ... eigendecomp, K-detection, row-normalize, K-means++, Lloyd ...
+  let _ = embeddings;
   let _ = opts;
   todo!("Tasks 19-21 fill in the remaining spectral pipeline")
 }
@@ -49,6 +40,10 @@ pub(crate) fn cluster(
 ///
 /// Affinity is f64 for numerical stability through the eigendecomposition.
 /// ReLU clamp matches spec §5.5 step 1 (rev-3).
+///
+/// Relies on the [`Embedding`] L2-normalized invariant: dot product equals
+/// cosine similarity. `Embedding::similarity` enforces this.
+#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn build_affinity(embeddings: &[Embedding]) -> DMatrix<f64> {
   let n = embeddings.len();
   let mut a = DMatrix::<f64>::zeros(n, n);
@@ -68,6 +63,11 @@ pub(crate) fn build_affinity(embeddings: &[Embedding]) -> DMatrix<f64> {
 /// [`Error::AllDissimilar`] if any `D_ii < NORM_EPSILON`
 /// (rev-3 isolated-node precondition; covers both the all-zero
 /// affinity case and individually-isolated nodes).
+///
+/// Real embed-model outputs are L2-normalized and cannot be
+/// degenerate, so hitting this error is almost certainly a
+/// caller-fabricated input. See spec §4.3.
+#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
   let eps = NORM_EPSILON as f64;
   let degrees: Vec<f64> = a.row_iter().map(|row| row.sum()).collect();
@@ -80,6 +80,7 @@ pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
 /// Normalized symmetric Laplacian `L_sym = I - D^{-1/2} A D^{-1/2}`.
 /// Caller guarantees `D_ii >= NORM_EPSILON` for all i (enforced by
 /// [`compute_degrees`]).
+#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> {
   let n = a.nrows();
   // D^{-1/2} as a diagonal matrix.
@@ -120,6 +121,28 @@ mod tests {
     assert_eq!(a[(1, 0)], 0.0);
     // e[0] · e[2] = 0 (orthogonal axes); ReLU keeps as 0.
     assert_eq!(a[(0, 2)], 0.0);
+  }
+
+  #[test]
+  fn affinity_identical_embeddings_is_one() {
+    // Three copies of unit(0): cosine similarity = 1.0 between every
+    // pair; ReLU clamp leaves it at 1.0. Confirms the positive path
+    // through the .max(0.0) doesn't accidentally clamp positives.
+    let e = vec![unit(0), unit(0), unit(0)];
+    let a = build_affinity(&e);
+    for i in 0..3 {
+      for j in 0..3 {
+        if i == j {
+          assert_eq!(a[(i, j)], 0.0, "diagonal must stay 0");
+        } else {
+          assert!(
+            (a[(i, j)] - 1.0).abs() < 1e-6,
+            "identical embeddings: A[{i}][{j}] should be ~1.0; got {}",
+            a[(i, j)]
+          );
+        }
+      }
+    }
   }
 
   #[test]
