@@ -153,6 +153,11 @@ pub(crate) fn eigendecompose(l: DMatrix<f64>) -> Result<(Vec<f64>, DMatrix<f64>)
 /// Indexing assumes `eigenvalues.len() == n`.
 #[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>) -> usize {
+  debug_assert_eq!(
+    eigenvalues.len(),
+    n,
+    "pick_k: eigenvalues slice length must equal n"
+  );
   if let Some(k) = target_speakers {
     return k as usize;
   }
@@ -231,6 +236,76 @@ mod eigen_tests {
       k <= MAX_AUTO_SPEAKERS as usize,
       "K must be ≤ MAX_AUTO_SPEAKERS = {}, got {k}",
       MAX_AUTO_SPEAKERS
+    );
+  }
+
+  #[test]
+  fn pick_k_target_equals_n_returns_n() {
+    // target = N is allowed (every embedding can be its own cluster);
+    // pick_k should pass it through unchanged.
+    let eigs = vec![0.0, 0.5, 0.6, 0.95];
+    assert_eq!(pick_k(&eigs, 4, Some(4)), 4);
+  }
+
+  #[test]
+  fn pipeline_two_clear_clusters_separates_eigenvalues() {
+    // End-to-end smoke: 6 embeddings forming two well-separated groups
+    // (3 near unit(0), 3 near unit(10)) → run through the full Phase-3
+    // pipeline up to eigendecomposition. Expect:
+    //   - All N eigenvalues finite and >= 0 (PSD Laplacian).
+    //   - Smallest eigenvalue close to 0 (single connected component
+    //     within each group; nullspace dimension >= 1 → λ_0 ≈ 0).
+    //   - Sorted ascending.
+    use crate::embed::EMBEDDING_DIM;
+    fn perturbed_unit(i: usize, scale: f32) -> crate::embed::Embedding {
+      let mut v = [0.0f32; EMBEDDING_DIM];
+      v[i] = 1.0;
+      v[(i + 1) % EMBEDDING_DIM] = scale;
+      crate::embed::Embedding::normalize_from(v).unwrap()
+    }
+
+    let mut e = Vec::new();
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed_unit(0, s));
+    }
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed_unit(10, s));
+    }
+
+    let aff = build_affinity(&e);
+    let d =
+      compute_degrees(&aff).expect("two well-separated clusters → AllDissimilar should not fire");
+    let l = normalized_laplacian(&aff, &d);
+    let (vals, vecs) = eigendecompose(l).expect("symmetric Laplacian must decompose cleanly");
+
+    // Output shape: N eigenvalues, N×N eigenvector matrix.
+    assert_eq!(vals.len(), 6);
+    assert_eq!(vecs.nrows(), 6);
+    assert_eq!(vecs.ncols(), 6);
+
+    // PSD: all eigenvalues finite and >= -tolerance (the small negative
+    // tolerance covers f64 rounding around λ ≈ 0).
+    let tolerance = 1e-9;
+    for (k, v) in vals.iter().enumerate() {
+      assert!(v.is_finite(), "eigenvalue {k} = {v} should be finite");
+      assert!(
+        *v >= -tolerance,
+        "eigenvalue {k} = {v} should be >= 0 (PSD Laplacian)"
+      );
+    }
+
+    // Sorted ascending: vals[0] <= vals[1] <= ... <= vals[N-1].
+    for w in vals.windows(2) {
+      assert!(w[0] <= w[1], "eigenvalues must be sorted ascending");
+    }
+
+    // Smallest eigenvalue close to 0 (the all-ones vector lies in the
+    // nullspace of the normalized Laplacian for a connected graph; with
+    // two disconnected clusters there's at least a 2D nullspace).
+    assert!(
+      vals[0].abs() < 1e-6,
+      "λ_0 should be ≈ 0 for the connected/disconnected-component normalized Laplacian; got {}",
+      vals[0]
     );
   }
 }
