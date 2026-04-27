@@ -2,12 +2,8 @@
 //!
 //! Pipeline: cosine affinity (ReLU-clamped) → degree precondition →
 //! normalized Laplacian L_sym = I - D^{-1/2} A D^{-1/2} →
-//! eigendecomposition (Task 19) → eigengap-K (Task 19) → row-normalized
-//! eigenvector matrix (Task 21) → K-means++ seeding (Task 20) → Lloyd
-//! refinement (Task 21) → labels.
-//!
-//! This file currently implements steps 1-3 (affinity + degree + Laplacian).
-//! `cluster` is a `todo!()` placeholder; Tasks 19-21 wire in the rest.
+//! eigendecomposition → eigengap-K → row-normalized eigenvector matrix →
+//! K-means++ seeding → Lloyd refinement → labels.
 
 use crate::{
   cluster::{
@@ -17,26 +13,81 @@ use crate::{
   embed::{Embedding, NORM_EPSILON},
 };
 use nalgebra::{DMatrix, DVector};
+use rand::{
+  RngExt as _, SeedableRng,
+  distr::{Distribution, Uniform},
+};
+use rand_chacha::ChaCha8Rng;
 
-/// Cluster `embeddings` via spectral clustering. Caller guarantees
-/// `embeddings.len() >= 3` (the N<=2 fast path lives in `cluster_offline`).
+/// Cluster `embeddings` via spectral clustering (spec §5.5).
 ///
-/// Currently a partial implementation: only steps 1-3 are wired up.
-/// The eigendecomposition + K-detection + K-means stages arrive in
-/// Tasks 19-21.
+/// Pipeline:
+/// 1. Build cosine affinity matrix `A` (ReLU-clamped).
+/// 2. Compute degree vector `D`; reject if any node is isolated.
+/// 3. Form normalized Laplacian `L_sym = I - D^{-1/2} A D^{-1/2}`.
+/// 4. Eigendecompose `L_sym`; sort eigenvalues ascending.
+/// 5. Choose K (eigengap heuristic capped at [`MAX_AUTO_SPEAKERS`], or
+///    `target_speakers` override).
+/// 6. Take `U[:, 0..K]` (smallest-K eigenvectors as columns).
+/// 7. Row-normalize `U` (each row to unit L2 norm; rows below
+///    `NORM_EPSILON` are left unscaled to avoid divide-by-zero).
+/// 8. K-means++ seeding (byte-deterministic via `ChaCha8Rng`).
+/// 9. Lloyd's algorithm to convergence (≤100 iterations).
+///
+/// Caller guarantees `embeddings.len() >= 3` (the N≤2 fast path lives in
+/// `cluster_offline`).
 pub(crate) fn cluster(
   embeddings: &[Embedding],
   opts: &OfflineClusterOptions,
 ) -> Result<Vec<u64>, Error> {
-  debug_assert!(embeddings.len() >= 3, "fast path covers N <= 2");
-  // Pipeline overview (full impl arrives in Tasks 19-21):
-  //   let a = build_affinity(embeddings);
-  //   let degrees = compute_degrees(&a)?;
-  //   let l = normalized_laplacian(&a, &degrees);
-  //   ... eigendecomp, K-detection, row-normalize, K-means++, Lloyd ...
-  let _ = embeddings;
-  let _ = opts;
-  todo!("Tasks 19-21 fill in the remaining spectral pipeline")
+  let n = embeddings.len();
+  debug_assert!(n >= 3, "fast path covers N <= 2");
+
+  // Steps 1-3: affinity + degrees + Laplacian.
+  let a = build_affinity(embeddings);
+  let d = compute_degrees(&a)?;
+  let l = normalized_laplacian(&a, &d);
+
+  // Step 4: eigendecompose.
+  let (eigenvalues, eigenvectors) = eigendecompose(l)?;
+
+  // Step 5: pick K.
+  let k = pick_k(&eigenvalues, n, opts.target_speakers());
+
+  // Step 6: take U = eigenvectors[:, 0..K] (smallest-K eigenvectors).
+  let mut u = DMatrix::<f64>::zeros(n, k);
+  for j in 0..k {
+    for i in 0..n {
+      u[(i, j)] = eigenvectors[(i, j)];
+    }
+  }
+
+  // Step 7: row-normalize U. Rows below NORM_EPSILON are left unscaled —
+  // the embedding sat very close to the eigenspace origin in the first
+  // place, and dividing by ~0 would explode. Spec §5.5 step 7.
+  for i in 0..n {
+    let mut sq = 0.0f64;
+    for j in 0..k {
+      sq += u[(i, j)] * u[(i, j)];
+    }
+    let norm = sq.sqrt();
+    if norm > NORM_EPSILON as f64 {
+      let inv = 1.0 / norm;
+      for j in 0..k {
+        u[(i, j)] *= inv;
+      }
+    }
+  }
+
+  // Step 8: K-means++ seeding (byte-deterministic via ChaCha8Rng).
+  // seed = None → 0 (matches spec §4.3 line 882-895 for "deterministic
+  // output for a given input AND deterministic K-means initialization").
+  let seed = opts.seed().unwrap_or(0);
+  let initial = kmeans_pp_seed(&u, k, seed);
+
+  // Step 9: Lloyd refinement, then convert to u64 labels.
+  let assignments = kmeans_lloyd(&u, initial);
+  Ok(assignments.into_iter().map(|x| x as u64).collect())
 }
 
 /// Build the N x N affinity matrix `A[i][j] = max(0, e_i · e_j)`; `A[i][i] = 0`.
@@ -46,7 +97,6 @@ pub(crate) fn cluster(
 ///
 /// Relies on the [`Embedding`] L2-normalized invariant: dot product equals
 /// cosine similarity. `Embedding::similarity` enforces this.
-#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn build_affinity(embeddings: &[Embedding]) -> DMatrix<f64> {
   let n = embeddings.len();
   let mut a = DMatrix::<f64>::zeros(n, n);
@@ -70,7 +120,6 @@ pub(crate) fn build_affinity(embeddings: &[Embedding]) -> DMatrix<f64> {
 /// Real embed-model outputs are L2-normalized and cannot be
 /// degenerate, so hitting this error is almost certainly a
 /// caller-fabricated input. See spec §4.3.
-#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
   let eps = NORM_EPSILON as f64;
   let degrees: Vec<f64> = a.row_iter().map(|row| row.sum()).collect();
@@ -83,7 +132,6 @@ pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
 /// Normalized symmetric Laplacian `L_sym = I - D^{-1/2} A D^{-1/2}`.
 /// Caller guarantees `D_ii >= NORM_EPSILON` for all i (enforced by
 /// [`compute_degrees`]).
-#[allow(dead_code)] // used in tests; wired into cluster() in Tasks 19-21
 pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> {
   let n = a.nrows();
   // D^{-1/2} as a diagonal matrix.
@@ -108,7 +156,6 @@ pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> 
 ///
 /// Returns [`Error::EigendecompositionFailed`] if any eigenvalue is non-finite
 /// (NaN or infinity), which signals a pathological / singular input matrix.
-#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 pub(crate) fn eigendecompose(l: DMatrix<f64>) -> Result<(Vec<f64>, DMatrix<f64>), Error> {
   let n = l.nrows();
   // L_sym is real symmetric; SymmetricEigen is the numerically stable choice.
@@ -151,7 +198,6 @@ pub(crate) fn eigendecompose(l: DMatrix<f64>) -> Result<(Vec<f64>, DMatrix<f64>)
 ///
 /// `eigenvalues` must be sorted ascending (as produced by [`eigendecompose`]).
 /// Indexing assumes `eigenvalues.len() == n`.
-#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>) -> usize {
   debug_assert_eq!(
     eigenvalues.len(),
@@ -179,12 +225,6 @@ pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>
   best_k.max(1)
 }
 
-use rand::{
-  RngExt as _, SeedableRng,
-  distr::{Distribution, Uniform},
-};
-use rand_chacha::ChaCha8Rng;
-
 /// K-means++ seeding (Arthur & Vassilvitskii 2007) over the rows of `mat`
 /// (`N` rows × `dim` columns). Returns the K initial centroid rows
 /// (each is `dim`-dimensional).
@@ -202,7 +242,6 @@ use rand_chacha::ChaCha8Rng;
 /// Caller invariants: `k >= 1`, `n >= k`, all `mat` rows finite. Caller
 /// (Task 21) guarantees these via [`validate_offline_input`] + the
 /// fast-path filter for N<=2.
-#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec<f64>> {
   let n = mat.nrows();
   debug_assert!(k >= 1, "K must be >= 1");
@@ -279,9 +318,78 @@ pub(crate) fn kmeans_pp_seed(mat: &DMatrix<f64>, k: usize, seed: u64) -> Vec<Vec
   centroids
 }
 
+/// Lloyd's K-means algorithm (Step 9 of spec §5.5). Up to 100 iterations or
+/// until the assignment vector stops changing.
+///
+/// Caller provides initial centroids (typically from
+/// [`kmeans_pp_seed`]). Returns the per-row cluster assignment, parallel to
+/// the input matrix's rows.
+///
+/// Empty-cluster policy: if a cluster ends up with no members in the
+/// re-assignment step, its centroid is preserved from the previous
+/// iteration (no random restart, no reinitialization). This is a defensive
+/// choice — Lloyd may converge with one cluster permanently empty rather
+/// than triggering a degenerate re-seed.
+pub(crate) fn kmeans_lloyd(mat: &DMatrix<f64>, initial_centroids: Vec<Vec<f64>>) -> Vec<usize> {
+  let (n, dim) = (mat.nrows(), mat.ncols());
+  let k = initial_centroids.len();
+  let mut centroids = initial_centroids;
+  let mut assignments = vec![0usize; n];
+  let mut prev = vec![usize::MAX; n];
+
+  for _iter in 0..100 {
+    // Assign each row to its nearest centroid (squared Euclidean).
+    for j in 0..n {
+      let mut best = 0usize;
+      let mut best_d = f64::INFINITY;
+      for (c_idx, c) in centroids.iter().enumerate() {
+        let sq: f64 = c
+          .iter()
+          .enumerate()
+          .map(|(x, &cx)| {
+            let diff = mat[(j, x)] - cx;
+            diff * diff
+          })
+          .sum();
+        if sq < best_d {
+          best_d = sq;
+          best = c_idx;
+        }
+      }
+      assignments[j] = best;
+    }
+    if assignments == prev {
+      break;
+    }
+    prev = assignments.clone();
+
+    // Recompute centroids as cluster means.
+    let mut new_centroids = vec![vec![0.0f64; dim]; k];
+    let mut counts = vec![0u32; k];
+    for (j, &a) in assignments.iter().enumerate() {
+      for x in 0..dim {
+        new_centroids[a][x] += mat[(j, x)];
+      }
+      counts[a] += 1;
+    }
+    for (c_idx, count) in counts.iter().enumerate() {
+      if *count > 0 {
+        let inv = 1.0 / *count as f64;
+        for v in new_centroids[c_idx].iter_mut() {
+          *v *= inv;
+        }
+      } else {
+        // Empty cluster: keep previous centroid.
+        new_centroids[c_idx] = centroids[c_idx].clone();
+      }
+    }
+    centroids = new_centroids;
+  }
+  assignments
+}
+
 /// Extract row `i` of matrix `m` as `Vec<f64>`. Helper for K-means seeding /
 /// Lloyd iteration (centroids are 1-D vectors over the row dimension).
-#[allow(dead_code)] // used in tests; wired into cluster() in Task 21
 fn row(m: &DMatrix<f64>, i: usize) -> Vec<f64> {
   m.row(i).iter().copied().collect()
 }
@@ -610,5 +718,139 @@ mod tests {
       "L_sym off-diagonal where A>0 must be negative; got {}",
       l[(0, 1)]
     );
+  }
+}
+
+#[cfg(test)]
+mod lloyd_tests {
+  use super::*;
+
+  #[test]
+  fn lloyd_separates_two_clusters() {
+    // 6 rows in 2D, two well-separated groups of 3.
+    let mat = DMatrix::<f64>::from_row_slice(
+      6,
+      2,
+      &[0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 5.0, 5.0, 5.1, 5.0, 5.0, 5.1],
+    );
+    let centroids = kmeans_pp_seed(&mat, 2, 0);
+    let labels = kmeans_lloyd(&mat, centroids);
+    assert_eq!(labels[0], labels[1]);
+    assert_eq!(labels[1], labels[2]);
+    assert_eq!(labels[3], labels[4]);
+    assert_eq!(labels[4], labels[5]);
+    assert_ne!(labels[0], labels[3]);
+  }
+
+  #[test]
+  fn lloyd_converges_on_clean_input() {
+    // 4 rows: two pairs of identical points. Should converge in 1 step.
+    let mat = DMatrix::<f64>::from_row_slice(4, 2, &[0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0]);
+    let centroids = vec![vec![0.0, 0.0], vec![5.0, 5.0]];
+    let labels = kmeans_lloyd(&mat, centroids);
+    assert_eq!(labels[0], labels[1]);
+    assert_eq!(labels[2], labels[3]);
+    assert_ne!(labels[0], labels[2]);
+  }
+}
+
+#[cfg(test)]
+mod end_to_end_tests {
+  use super::*;
+  use crate::{
+    cluster::OfflineClusterOptions,
+    embed::{EMBEDDING_DIM, Embedding},
+  };
+
+  fn perturbed(i: usize, scale: f32) -> Embedding {
+    let mut v = [0.0f32; EMBEDDING_DIM];
+    v[i] = 1.0;
+    v[(i + 1) % EMBEDDING_DIM] = scale;
+    Embedding::normalize_from(v).unwrap()
+  }
+
+  #[test]
+  fn spectral_separates_two_groups() {
+    // 6 embeddings: 3 near unit(0), 3 near unit(10). Default options
+    // (Spectral method, threshold 0.5, no target).
+    let mut e = Vec::new();
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed(0, s));
+    }
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed(10, s));
+    }
+    let labels = cluster(&e, &OfflineClusterOptions::default()).unwrap();
+    assert_eq!(labels[0], labels[1]);
+    assert_eq!(labels[1], labels[2]);
+    assert_eq!(labels[3], labels[4]);
+    assert_eq!(labels[4], labels[5]);
+    assert_ne!(labels[0], labels[3]);
+  }
+
+  #[test]
+  fn spectral_target_speakers_forces_k() {
+    // 6 mostly-orthogonal embeddings; target = 2 forces 2 clusters.
+    // Use non-zero leakage between adjacent dims so the affinity graph
+    // is connected (truly-orthogonal would trip AllDissimilar; see the
+    // docstring on `perturbed`).
+    let mut e = Vec::new();
+    for i in 0..6 {
+      e.push(perturbed(i, 0.1));
+    }
+    let labels = cluster(
+      &e,
+      &OfflineClusterOptions::default().with_target_speakers(2),
+    )
+    .unwrap();
+    let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
+    assert_eq!(unique.len(), 2);
+  }
+
+  #[test]
+  fn spectral_seed_determinism() {
+    // Same input + same opts → same labels. Default seed = 0.
+    let mut e = Vec::new();
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed(0, s));
+    }
+    for s in [0.0, 0.05, -0.05] {
+      e.push(perturbed(10, s));
+    }
+    let r1 = cluster(&e, &OfflineClusterOptions::default()).unwrap();
+    let r2 = cluster(&e, &OfflineClusterOptions::default()).unwrap();
+    assert_eq!(r1, r2, "spectral cluster output must be deterministic");
+  }
+
+  #[test]
+  fn eigengap_caps_at_max_auto_speakers() {
+    // MAX_AUTO_SPEAKERS + 5 mostly-orthogonal embeddings. The eigengap
+    // heuristic should NOT exceed MAX_AUTO_SPEAKERS = 15.
+    //
+    // Use a small offset between dimensions so each pair has tiny
+    // similarity > 0 (pure orthogonal would AllDissimilar).
+    let mut e = Vec::new();
+    for i in 0..(MAX_AUTO_SPEAKERS as usize + 5) {
+      let mut v = [0.0f32; EMBEDDING_DIM];
+      v[i] = 0.95;
+      v[(i + 1) % EMBEDDING_DIM] = 0.31;
+      e.push(Embedding::normalize_from(v).unwrap());
+    }
+    let r = cluster(&e, &OfflineClusterOptions::default());
+    match r {
+      Ok(labels) => {
+        let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
+        assert!(
+          unique.len() <= MAX_AUTO_SPEAKERS as usize,
+          "got {} clusters, cap is {}",
+          unique.len(),
+          MAX_AUTO_SPEAKERS
+        );
+      }
+      Err(Error::AllDissimilar) => {
+        // Acceptable — the synthetic structure may have isolated nodes.
+      }
+      Err(e) => panic!("unexpected error: {e}"),
+    }
   }
 }
