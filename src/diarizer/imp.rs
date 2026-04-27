@@ -8,9 +8,11 @@ use crate::{
   cluster::{Clusterer, SpeakerCentroid},
   diarizer::{
     builder::{DiarizerBuilder, DiarizerOptions},
+    error::Error,
     span::{CollectedEmbedding, DiarizedSpan},
   },
-  segment::Segmenter,
+  embed::EmbedModel,
+  segment::{Action, SegmentModel, Segmenter, WINDOW_SAMPLES},
 };
 
 /// Top-level streaming diarizer.
@@ -136,5 +138,131 @@ impl Diarizer {
   }
 }
 
-#[allow(dead_code)]
-fn _diarized_span_unused_warning_suppression(_: DiarizedSpan) {}
+impl Diarizer {
+  /// Push samples into the audio buffer and the segmenter; advance the
+  /// total-samples counter. **Trim is deferred** until after the pump
+  /// completes (§5.7) so activities emitted mid-pump can still slice
+  /// their audio range from the buffer.
+  pub(crate) fn push_audio(&mut self, samples: &[f32]) {
+    self.audio_buffer.extend(samples.iter().copied());
+    self.segmenter.push_samples(samples);
+    self.total_samples_pushed += samples.len() as u64;
+  }
+
+  /// Trim audio buffer to retain the last `WINDOW_SAMPLES` samples
+  /// (§5.7 / §11.5). Idempotent.
+  pub(crate) fn trim_audio(&mut self) {
+    let win = WINDOW_SAMPLES as u64;
+    if self.total_samples_pushed > win {
+      let target_base = self.total_samples_pushed - win;
+      let drop_n = target_base.saturating_sub(self.audio_base) as usize;
+      let drop_n = drop_n.min(self.audio_buffer.len());
+      for _ in 0..drop_n {
+        self.audio_buffer.pop_front();
+      }
+      self.audio_base += drop_n as u64;
+    }
+  }
+
+  /// Slice the audio buffer for an absolute-sample range `[s0, s1)`.
+  ///
+  /// Returns [`Error::Internal`] with [`InternalError::AudioBufferUnderflow`]
+  /// or [`InternalError::AudioBufferOverrun`] if the range falls outside
+  /// the buffer's retained window. Defense-in-depth: should be unreachable
+  /// per the §5.7 segment-contract trim discipline.
+  ///
+  /// [`InternalError::AudioBufferUnderflow`]: crate::diarizer::InternalError::AudioBufferUnderflow
+  /// [`InternalError::AudioBufferOverrun`]: crate::diarizer::InternalError::AudioBufferOverrun
+  #[allow(dead_code)] // Consumer (Phase-9 embed extraction) lands in a later task.
+  pub(crate) fn slice_audio(&self, s0: u64, s1: u64) -> Result<Vec<f32>, Error> {
+    use crate::diarizer::error::InternalError;
+    if s0 < self.audio_base {
+      return Err(Error::Internal(InternalError::AudioBufferUnderflow {
+        activity_start: s0,
+        audio_base: self.audio_base,
+      }));
+    }
+    let end = self.audio_base + self.audio_buffer.len() as u64;
+    if s1 > end {
+      return Err(Error::Internal(InternalError::AudioBufferOverrun {
+        activity_end: s1,
+        audio_end: end,
+      }));
+    }
+    let lo = (s0 - self.audio_base) as usize;
+    let hi = (s1 - self.audio_base) as usize;
+    Ok(self.audio_buffer.range(lo..hi).copied().collect())
+  }
+}
+
+impl Diarizer {
+  /// Process a chunk of samples. Pushes into the audio buffer + segmenter,
+  /// pumps inference and per-window activities, and emits any closed
+  /// [`DiarizedSpan`]s via `emit`.
+  ///
+  /// **Phase 8 skeleton:** the segmenter is fully pumped (segment-model
+  /// inference runs; per-window activities are observed). Embed, cluster,
+  /// and reconstruct are NO-OPs awaiting Phases 9-11; no `DiarizedSpan`s
+  /// are produced yet.
+  pub fn process_samples<F>(
+    &mut self,
+    seg_model: &mut SegmentModel,
+    embed_model: &mut EmbedModel,
+    samples: &[f32],
+    mut emit: F,
+  ) -> Result<(), Error>
+  where
+    F: FnMut(DiarizedSpan),
+  {
+    self.push_audio(samples);
+    self.drain(seg_model, embed_model, &mut emit)?;
+    self.trim_audio();
+    Ok(())
+  }
+
+  /// Finalize the stream. Flushes any tail-anchor inference plus
+  /// (in Phase 11) any open per-cluster runs.
+  pub fn finish_stream<F>(
+    &mut self,
+    seg_model: &mut SegmentModel,
+    embed_model: &mut EmbedModel,
+    mut emit: F,
+  ) -> Result<(), Error>
+  where
+    F: FnMut(DiarizedSpan),
+  {
+    self.segmenter.finish();
+    self.drain(seg_model, embed_model, &mut emit)?;
+    // Phase 11 will add: self.reconstruct.flush_open_runs(&mut emit);
+    Ok(())
+  }
+
+  fn drain<F>(
+    &mut self,
+    seg_model: &mut SegmentModel,
+    _embed_model: &mut EmbedModel,
+    _emit: &mut F,
+  ) -> Result<(), Error>
+  where
+    F: FnMut(DiarizedSpan),
+  {
+    while let Some(action) = self.segmenter.poll() {
+      match action {
+        Action::NeedsInference { id, samples } => {
+          let scores = seg_model.infer(&samples)?;
+          self.segmenter.push_inference(id, &scores)?;
+        }
+        Action::SpeakerScores { .. } => {
+          // Phase 11: buffer per WindowId for the reconstruct state machine.
+        }
+        Action::Activity(_) => {
+          // Phase 11: cluster + reconstruct.
+        }
+        Action::VoiceSpan(_) => {
+          // Diarizer doesn't surface VoiceSpan currently.
+        }
+      }
+    }
+    Ok(())
+  }
+}
