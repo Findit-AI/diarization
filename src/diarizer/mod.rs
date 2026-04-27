@@ -18,6 +18,9 @@ mod overlap;
 #[cfg(feature = "ort")]
 mod reconstruct;
 
+#[cfg(all(test, feature = "ort"))]
+mod tests;
+
 pub use builder::{DiarizerBuilder, DiarizerOptions};
 pub use error::{Error, InternalError};
 pub use span::{CollectedEmbedding, DiarizedSpan};
