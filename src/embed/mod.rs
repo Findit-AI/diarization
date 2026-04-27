@@ -8,10 +8,12 @@
 //!   `EmbedModel::embed_features_batch` (added in phase 5)
 
 mod error;
+mod fbank;
 mod options;
 mod types;
 
 pub use error::Error;
+pub use fbank::compute_fbank;
 pub use options::{
   EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, HOP_SAMPLES, MIN_CLIP_SAMPLES,
   NORM_EPSILON,

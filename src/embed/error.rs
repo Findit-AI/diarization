@@ -40,6 +40,15 @@ pub enum Error {
   #[error("input contains a zero-norm or degenerate embedding")]
   DegenerateEmbedding,
 
+  /// `kaldi-native-fbank` initialization failed with this message.
+  /// `FbankComputer::new` returns `Result<Self, String>`; we wrap
+  /// the message verbatim. This is effectively unreachable with our
+  /// fixed configuration but kept as a fallible escape hatch in case
+  /// a future kaldi-native-fbank version starts validating fields we
+  /// currently rely on as no-ops.
+  #[error("fbank computer initialization failed: {0}")]
+  Fbank(String),
+
   /// ONNX inference output had an unexpected shape.
   #[error("inference scores length {got}, expected {expected}")]
   InferenceShapeMismatch { expected: usize, got: usize },
@@ -92,5 +101,13 @@ mod tests {
     let s = format!("{e}");
     assert!(s.contains("1000"));
     assert!(s.contains("999"));
+  }
+
+  #[test]
+  fn fbank_message() {
+    let e = Error::Fbank("bad mel config".to_string());
+    let s = format!("{e}");
+    assert!(s.contains("fbank computer initialization failed"));
+    assert!(s.contains("bad mel config"));
   }
 }
