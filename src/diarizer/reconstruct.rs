@@ -786,3 +786,226 @@ mod tests {
     assert!(s.emitted_speaker_ids.is_empty());
   }
 }
+
+impl ReconstructState {
+  /// End-of-stream flush. Sets `finalization_boundary = u64::MAX`,
+  /// drains [`emit_finalized_frames`](Self::emit_finalized_frames),
+  /// then closes any per-cluster runs that are STILL open (clusters
+  /// that were active up to the very last finalized frame and never
+  /// got a "fell out of top" signal because there's no next frame).
+  ///
+  /// Called from [`Diarizer::finish_stream`](crate::diarizer::Diarizer::finish_stream).
+  /// All emissions go through `emit`.
+  #[allow(dead_code)] // wired into pump in Task 43
+  pub(crate) fn flush_open_runs<F: FnMut(DiarizedSpan)>(&mut self, mut emit: F) {
+    self.finalization_boundary = u64::MAX;
+    self.emit_finalized_frames(u32::MAX, &mut emit);
+
+    // After draining frames, close any still-open runs. These are runs
+    // whose `last_active_frame` is the last frame ever observed; the
+    // per-frame loop above didn't close them because there's no next
+    // frame to provide a "this cluster fell out of top" signal.
+    let to_emit: Vec<u64> = self
+      .open_runs
+      .iter()
+      .filter(|(_, run)| run.start_frame.is_some())
+      .map(|(c, _)| *c)
+      .collect();
+
+    for cluster_id in to_emit {
+      let run = self
+        .open_runs
+        .get_mut(&cluster_id)
+        .expect("cluster is in open_runs by construction");
+      let start = run.start_frame.take().expect("run was open");
+      let end = run
+        .last_active_frame
+        .expect("open run must have last_active_frame")
+        + 1;
+      let s0 = frame_to_sample_u64(start) as i64;
+      let s1 = frame_to_sample_u64(end) as i64;
+      let range = TimeRange::new(s0, s1, SAMPLE_RATE_TB);
+
+      let is_new_speaker = !self.emitted_speaker_ids.contains(&cluster_id);
+      if is_new_speaker {
+        self.emitted_speaker_ids.insert(cluster_id);
+      }
+      let activity_count = run.contributing_activities.len() as u32;
+      let avg_activation = (run.activation_sum_normalized / run.frame_count.max(1) as f64) as f32;
+      let clean_fraction = if activity_count == 0 {
+        0.0
+      } else {
+        run.clean_mask_count as f32 / activity_count as f32
+      };
+
+      emit(DiarizedSpan {
+        range,
+        speaker_id: cluster_id,
+        is_new_speaker,
+        average_activation: avg_activation,
+        activity_count,
+        clean_mask_fraction: clean_fraction,
+      });
+
+      // Reset for any future runs on this cluster (after a `clear()`
+      // or further window integration).
+      run.last_active_frame = None;
+      run.activation_sum_normalized = 0.0;
+      run.frame_count = 0;
+      run.contributing_activities.clear();
+      run.clean_mask_count = 0;
+    }
+  }
+
+  /// Evict per-window-id metadata that's no longer referenced. Spec §11.13.
+  ///
+  /// A window's entries (`slot_to_cluster`, `activity_clean_flags`,
+  /// `window_starts`) can be dropped once:
+  /// (a) all of its frames have finalized
+  ///     (`base_frame >= window_start_frame + FRAMES_PER_WINDOW`), AND
+  /// (b) no currently-open per-cluster run still references any
+  ///     `(window_id, slot)` pair from this window in
+  ///     `contributing_activities`.
+  ///
+  /// Bounds memory on long sessions; correctness-relevant for runs
+  /// spanning many finalized windows.
+  #[allow(dead_code)] // wired into pump in Task 43
+  pub(crate) fn evict_finalized_window_metadata(&mut self) {
+    let evictable: Vec<WindowId> = self
+      .window_starts
+      .iter()
+      .filter(|(window_id, start)| {
+        let last_frame_excl = frame_index_of(**start) + FRAMES_PER_WINDOW as u64;
+        if self.base_frame < last_frame_excl {
+          return false;
+        }
+        // (b): no open run still references this window.
+        self.open_runs.values().all(|run| {
+          run
+            .contributing_activities
+            .iter()
+            .all(|(wid, _)| wid != *window_id)
+        })
+      })
+      .map(|(w, _)| *w)
+      .collect();
+
+    for w in evictable {
+      self.slot_to_cluster.retain(|(wid, _), _| *wid != w);
+      self.activity_clean_flags.retain(|(wid, _), _| *wid != w);
+      self.window_starts.remove(&w);
+    }
+  }
+}
+
+#[cfg(test)]
+mod flush_eviction_tests {
+  use super::*;
+  use crate::segment::options::SAMPLE_RATE_TB;
+  use mediatime::TimeRange;
+
+  fn make_window_id(start: i64, generation: u64) -> WindowId {
+    WindowId::new(
+      TimeRange::new(start, start + WINDOW_SAMPLES as i64, SAMPLE_RATE_TB),
+      generation,
+    )
+  }
+
+  #[test]
+  fn flush_emits_open_run_at_end_of_stream() {
+    // Slot 0 active until the last unwarmed frame of the window — the
+    // emit_finalized_frames loop will close it because the count drops
+    // to 0 in the right warm-up region. So this specific case actually
+    // tests the SECOND code path (the still-open run remains because
+    // it was active right up to the last frame).
+    //
+    // To exercise the still-open path: keep slot 0 active for the
+    // ENTIRE non-warm-up region (frames 59..530). The loop reaches the
+    // last frame (530) with count > 0 → cluster 7 still in active_set
+    // → run not closed. flush_open_runs must close it.
+    let mut s = ReconstructState::new();
+    let id = make_window_id(0, 0);
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    let warm_left = SPEAKER_COUNT_WARM_UP_FRAMES_LEFT as usize;
+    let warm_right = SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT as usize;
+    for p in probs[0]
+      .iter_mut()
+      .take(FRAMES_PER_WINDOW - warm_right)
+      .skip(warm_left)
+    {
+      *p = 0.9;
+    }
+    s.slot_to_cluster.insert((id, 0), 7);
+    s.activity_clean_flags.insert((id, 0), true);
+    s.integrate_window(id, 0, &probs, 0.5);
+
+    let mut emitted = Vec::new();
+    s.flush_open_runs(|span| emitted.push(span));
+
+    assert!(
+      emitted.iter().any(|sp| sp.speaker_id() == 7),
+      "expected cluster 7 to be flushed; got {emitted:?}"
+    );
+  }
+
+  #[test]
+  fn evict_drops_metadata_for_finalized_unused_windows() {
+    let mut s = ReconstructState::new();
+    let id_a = make_window_id(0, 0);
+    let id_b = make_window_id(WINDOW_SAMPLES as i64, 1);
+
+    s.window_starts.insert(id_a, 0);
+    s.window_starts.insert(id_b, WINDOW_SAMPLES as u64);
+    s.slot_to_cluster.insert((id_a, 0), 7);
+    s.slot_to_cluster.insert((id_b, 0), 8);
+
+    // Pretend we've finalized past id_a's last frame.
+    s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
+
+    s.evict_finalized_window_metadata();
+
+    assert!(
+      !s.window_starts.contains_key(&id_a),
+      "id_a's window_start should be evicted"
+    );
+    assert!(
+      s.window_starts.contains_key(&id_b),
+      "id_b is still active (last frame > base_frame)"
+    );
+    assert!(
+      !s.slot_to_cluster.contains_key(&(id_a, 0)),
+      "id_a's slot mapping should be evicted"
+    );
+    assert!(
+      s.slot_to_cluster.contains_key(&(id_b, 0)),
+      "id_b's slot mapping must be retained"
+    );
+  }
+
+  #[test]
+  fn evict_keeps_metadata_when_open_run_references_it() {
+    // id_a is finalized but cluster 7's open run still references
+    // (id_a, 0) → must be kept.
+    let mut s = ReconstructState::new();
+    let id_a = make_window_id(0, 0);
+    s.window_starts.insert(id_a, 0);
+    s.slot_to_cluster.insert((id_a, 0), 7);
+    s.base_frame = frame_index_of(0) + FRAMES_PER_WINDOW as u64 + 10;
+
+    let run = s.open_runs.entry(7).or_default();
+    run.start_frame = Some(0);
+    run.last_active_frame = Some(50);
+    run.contributing_activities.insert((id_a, 0));
+
+    s.evict_finalized_window_metadata();
+
+    assert!(
+      s.window_starts.contains_key(&id_a),
+      "open run still references id_a → must keep window_start"
+    );
+    assert!(
+      s.slot_to_cluster.contains_key(&(id_a, 0)),
+      "must keep slot mapping while open_run references it"
+    );
+  }
+}
