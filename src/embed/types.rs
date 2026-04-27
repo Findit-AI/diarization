@@ -33,15 +33,31 @@ impl Embedding {
   }
 
   /// L2-normalize a raw 256-d inference output and wrap it.
-  /// Returns `None` if `||raw||₂ < NORM_EPSILON` (degenerate input).
-  /// Use after `EmbedModel::embed_features_batch` + custom aggregation.
+  ///
+  /// Returns `None` if the result would not satisfy the `Embedding`
+  /// invariant `||embedding|| > NORM_EPSILON`. This covers two cases:
+  /// - **Non-finite input**: any `raw[i]` that's NaN or infinity makes
+  ///   the L2 norm non-finite, division would propagate the corruption,
+  ///   and the returned `Embedding` would silently violate the invariant.
+  /// - **Degenerate norm**: `||raw||_2 < NORM_EPSILON`, division would
+  ///   amplify floating-point noise to no useful direction.
+  ///
+  /// Use after [`EmbedModel::embed_features_batch`](crate::embed::EmbedModel::embed_features_batch)
+  /// plus custom aggregation. The high-level `EmbedModel::embed{,_weighted,_masked}`
+  /// methods surface `None` here as
+  /// [`Error::DegenerateEmbedding`](crate::embed::Error::DegenerateEmbedding);
+  /// callers who need to distinguish NaN/inf from zero-norm should
+  /// validate `raw` is_finite themselves before calling.
   pub fn normalize_from(raw: [f32; EMBEDDING_DIM]) -> Option<Self> {
     // Compute ||raw||₂ in f64 for precision, then divide each
     // component in f32. Matches Python's typical behavior where
     // the L2 norm is computed in float32.
     let sq: f64 = raw.iter().map(|&x| (x as f64) * (x as f64)).sum();
     let n = sq.sqrt() as f32;
-    if n < NORM_EPSILON {
+    // !n.is_finite() catches NaN/inf inputs — the squared sum + sqrt
+    // chain propagates non-finite into n. The `n < NORM_EPSILON` clause
+    // rejects degenerate (zero-or-near-zero norm) inputs. Codex review.
+    if !n.is_finite() || n < NORM_EPSILON {
       return None;
     }
     let mut out = [0.0f32; EMBEDDING_DIM];
@@ -188,6 +204,39 @@ mod tests {
     let mut tiny = [0.0; EMBEDDING_DIM];
     tiny[0] = 1e-13; // < NORM_EPSILON
     assert!(Embedding::normalize_from(tiny).is_none());
+  }
+
+  #[test]
+  fn normalize_from_nan_returns_none() {
+    // Codex review HIGH regression: NaN raw input previously produced
+    // Some(Embedding) containing NaNs because `n = NaN` and `NaN < eps`
+    // is false. is_finite() check catches this.
+    let mut v = [0.5f32; EMBEDDING_DIM];
+    v[0] = f32::NAN;
+    assert!(Embedding::normalize_from(v).is_none());
+  }
+
+  #[test]
+  fn normalize_from_positive_infinity_returns_none() {
+    let mut v = [0.5f32; EMBEDDING_DIM];
+    v[0] = f32::INFINITY;
+    assert!(Embedding::normalize_from(v).is_none());
+  }
+
+  #[test]
+  fn normalize_from_negative_infinity_returns_none() {
+    let mut v = [0.5f32; EMBEDDING_DIM];
+    v[0] = f32::NEG_INFINITY;
+    assert!(Embedding::normalize_from(v).is_none());
+  }
+
+  #[test]
+  fn normalize_from_mixed_inf_returns_none() {
+    // Mixed +inf and -inf produce NaN sum; should reject.
+    let mut v = [0.0f32; EMBEDDING_DIM];
+    v[0] = f32::INFINITY;
+    v[1] = f32::NEG_INFINITY;
+    assert!(Embedding::normalize_from(v).is_none());
   }
 
   #[test]
