@@ -65,3 +65,16 @@ recommend gating the dependency such that the `dia::plda` module is
 never reached. (At the time of writing, no other `dia` module
 depends on `dia::plda`; that changes once the Phase-2/3 VBx +
 constrained Hungarian work lands.)
+
+## Cargo features
+
+| Feature | Default | What it enables |
+|---------|---------|-----------------|
+| `ort` | yes | The ONNX-runtime-backed `SegmentModel` and `EmbedModel` types. |
+| `plda-fixtures` | **no** | Public constructors for `dia::plda::RawEmbedding` (`from_raw_array`) and `dia::plda::PostXvecEmbedding` (`from_pyannote_capture`). Enabling this is the explicit signal that the caller is parity-test code or offline tooling — production builds without the feature cannot construct PLDA boundary inputs at all, eliminating a class of silent distribution-drift bugs. The Phase-1 parity test (`tests/parity_plda.rs`) declares `required-features = ["plda-fixtures"]` and is automatically skipped when the feature is not enabled. |
+
+To run the PLDA parity test:
+
+```bash
+cargo test --features plda-fixtures --test parity_plda
+```

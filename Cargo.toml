@@ -19,6 +19,18 @@ readme = "README.md"
 [features]
 default = ["ort"]
 ort = ["dep:ort"]
+# `plda-fixtures` exposes the public constructors of
+# `dia::plda::RawEmbedding` and `dia::plda::PostXvecEmbedding`
+# (`from_raw_array`, `from_pyannote_capture`). Off by default —
+# enabling this feature is the explicit signal that the caller is
+# parity-test code or offline tooling, NOT production. Production
+# integration (Phase 5+) will route raw embeddings through
+# `EmbedModel`'s typed raw-output path instead. Codex review HIGH:
+# distribution-invariant constructors must not be reachable from
+# production code, since both `RawEmbedding::from_raw_array(any_arr)`
+# and `PostXvecEmbedding::from_pyannote_capture(any_norm_sqrt_128)`
+# admit wrong-distribution inputs that would silently corrupt VBx.
+plda-fixtures = []
 # `std` is now unconditional. The crate uses std/alloc throughout
 # (`Vec`, `HashMap`, `kaldi-native-fbank` C bindings, `nalgebra`'s
 # default `std` feature, etc.); the previous `#![no_std]` toggle was
@@ -53,6 +65,16 @@ npyz = { version = "0.9", features = ["npz"] }
 path = "benches/segment.rs"
 name = "segment"
 harness = false
+
+# Parity tests for `dia::plda` need to construct `RawEmbedding` and
+# `PostXvecEmbedding` from `.npz` fixtures. Those constructors are
+# gated behind `plda-fixtures`; this declaration makes
+# `cargo test --features plda-fixtures` (or the equivalent) the only
+# build that compiles + runs the parity test, and `cargo test`
+# without the feature simply skips it.
+[[test]]
+name = "parity_plda"
+required-features = ["plda-fixtures"]
 
 [profile.bench]
 opt-level = 3
