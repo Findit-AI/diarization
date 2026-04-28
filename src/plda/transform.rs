@@ -40,6 +40,33 @@ use crate::{
 /// speaker. This produces silent fabricated speaker evidence from
 /// a dead embedder. Codex review HIGH (round 7).
 ///
+/// # Calibration limitation and Phase-5 integration intent (Codex review MEDIUM round 9)
+///
+/// The threshold is derived from a single 2-speaker conversational
+/// fixture. Domain-shifted, very short, very quiet, or future-runtime
+/// embeddings could in theory produce smaller raw norms and trigger
+/// a false [`Error::DegenerateInput`] reject — pyannote itself has
+/// no equivalent guard, so this is a deliberate divergence.
+///
+/// The trade-off was accepted because the alternative (silent
+/// fabricated speaker evidence from a dead embedder) is the
+/// no-observability failure mode rounds 4 and 7 closed, and the
+/// guard returns [`Result`] rather than panicking — the caller owns
+/// the health-check policy. Phase-5 integration (see
+/// `src/lib.rs:62-72`) is the correct layer to:
+///
+/// 1. Re-validate against multi-corpus captures (varied audio
+///    domains, very-short utterances, low-energy speech).
+/// 2. Add telemetry for `DegenerateInput` events so production can
+///    observe rather than silently lose diarization.
+/// 3. Decide the right fallback for a low-norm embedding (skip the
+///    chunk, use a degraded score, surface to the caller, …).
+/// 4. Surface a configuration knob if real production data shows
+///    false positives.
+///
+/// Until then the threshold is a `pub(crate)` constant the
+/// integration layer can read or override at compile time.
+///
 /// If the embedder model is ever changed, this constant must be
 /// re-validated against fresh captured raw norms — see
 /// `tests/parity/python/capture_intermediates.py`.
@@ -231,6 +258,21 @@ impl PostXvecEmbedding {
 /// would whiten that into a fabricated speaker-evidence vector
 /// indistinguishable from a real embedding. Calibrating to the
 /// data closes that window. Codex review HIGH (round 6).
+///
+/// # Calibration limitation and Phase-5 integration intent (Codex review MEDIUM round 9)
+///
+/// Same caveat as [`RAW_EMBEDDING_MIN_NORM`]: the `0.1` threshold
+/// is derived from a single 2-speaker conversational fixture.
+/// Pyannote does not have an equivalent guard, so this is a
+/// deliberate divergence — the trade-off was made because rounds 5
+/// and 6 documented multiple `mean1`-collapse attacks where the
+/// L2-normalize amplifies pure quantization or attacker-controlled
+/// jitter into a finite `sqrt(128)`-normed PLDA output. Phase-5
+/// integration owns the production health-check policy:
+/// telemetry, multi-corpus validation, fallback, and (if needed)
+/// per-deployment threshold tuning. The guard returns
+/// [`Result`] rather than panicking so the integration layer can
+/// observe + skip rather than abort.
 ///
 /// If the model weights or the embedder are ever changed, this
 /// constant must be re-validated against fresh captured data —
