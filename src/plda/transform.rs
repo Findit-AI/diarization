@@ -447,7 +447,10 @@ fn checked_l2_normalize_in_place(v: &mut DVector<f64>) -> Result<(), Error> {
 /// effective noise floor is `‖mean1.astype(f32) - mean1‖` (the
 /// quantization noise of mean1 itself), ~3.5e-8 for the committed
 /// weights — far above the shared `NORM_EPSILON = 1e-12`.
-fn checked_l2_normalize_in_place_with_min(v: &mut DVector<f64>, min_norm: f64) -> Result<(), Error> {
+fn checked_l2_normalize_in_place_with_min(
+  v: &mut DVector<f64>,
+  min_norm: f64,
+) -> Result<(), Error> {
   let n = v.norm();
   if !n.is_finite() {
     return Err(Error::NonFiniteInput);
