@@ -35,6 +35,9 @@ mod error;
 mod loader;
 mod transform;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::Error;
 pub use transform::PldaTransform;
 
