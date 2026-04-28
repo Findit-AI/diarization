@@ -4,9 +4,12 @@
 //! and asserts that the Rust transforms reproduce the captured pyannote
 //! outputs within float-cast tolerance.
 //!
-//! Skipped (with `eprintln` warning) if the captured fixtures are not
-//! present — they live in the repo, but a fresh checkout would have to
-//! run Phase-0 capture to regenerate them.
+//! **Hard-fails** when fixtures are absent. The fixtures are committed
+//! to the repo and shipped via `cargo publish`; a missing fixture is a
+//! packaging or sparse-checkout error, never an opt-out. Codex review
+//! MEDIUM (round 8): an earlier silent `eprintln` skip let the
+//! high-risk algorithm port silently stop being parity-checked when
+//! `cargo test` reported all green.
 //!
 //! Lives **inside** the crate (under `#[cfg(test)]`) rather than as an
 //! integration test in `tests/`. The reason is that
@@ -35,13 +38,29 @@ fn fixture(rel: &str) -> PathBuf {
   repo_root().join(rel)
 }
 
-fn fixtures_present() -> bool {
-  [
+/// Hard-fail if the Phase-0 fixtures are absent. The fixtures are
+/// checked into the repo (KB-sized) and shipped via `cargo publish`,
+/// so a missing fixture is a packaging or sparse-checkout error,
+/// never a normal-flow case.
+fn require_fixtures() {
+  let required = [
     "tests/parity/fixtures/01_dialogue/raw_embeddings.npz",
     "tests/parity/fixtures/01_dialogue/plda_embeddings.npz",
-  ]
-  .iter()
-  .all(|p| repo_root().join(p).exists())
+  ];
+  let missing: Vec<&str> = required
+    .iter()
+    .copied()
+    .filter(|p| !repo_root().join(p).exists())
+    .collect();
+  assert!(
+    missing.is_empty(),
+    "PLDA parity fixtures missing: {missing:?}. \
+     These ship with the crate via `cargo publish`; a missing \
+     fixture is a packaging error, not an opt-out. Re-run \
+     `tests/parity/python/capture_intermediates.py` against the \
+     Phase-0 clip to regenerate, or restore the files from a \
+     full checkout."
+  );
 }
 
 /// Open an `.npz` archive and pull out one named array. Returns the
@@ -63,10 +82,7 @@ where
 
 #[test]
 fn xvec_transform_matches_pyannote_on_train_embeddings() {
-  if !fixtures_present() {
-    eprintln!("[parity_plda] skip: Phase-0 fixtures not present");
-    return;
-  }
+  require_fixtures();
 
   let plda = PldaTransform::new().expect("PldaTransform::new");
 
@@ -152,10 +168,7 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
 
 #[test]
 fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
-  if !fixtures_present() {
-    eprintln!("[parity_plda] skip: Phase-0 fixtures not present");
-    return;
-  }
+  require_fixtures();
 
   let plda = PldaTransform::new().expect("PldaTransform::new");
 
@@ -233,14 +246,16 @@ fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
 }
 
 #[test]
-fn phi_is_descending_with_correct_length() {
-  if !fixtures_present() {
-    eprintln!("[parity_plda] skip: Phase-0 fixtures not present");
-    return;
-  }
+fn phi_matches_pyannote_descending_eigenvalues() {
+  require_fixtures();
   let plda = PldaTransform::new().expect("PldaTransform::new");
   let phi = plda.phi();
   assert_eq!(phi.len(), PLDA_DIMENSION);
+
+  // Structural: descending order. (Sign-of-eigenvalue is positive
+  // by virtue of B and W both being positive-definite, so we don't
+  // need a separate >0 check — the numerical comparison below
+  // would catch any sign flip.)
   for w in phi.windows(2) {
     assert!(
       w[0] >= w[1],
@@ -249,4 +264,34 @@ fn phi_is_descending_with_correct_length() {
       w[1]
     );
   }
+
+  // Numerical: byte-equal-ish to pyannote's `pipeline._plda.phi`,
+  // captured into `plda_embeddings.npz` via
+  // `tests/parity/python/capture_intermediates.py`. VBx consumes
+  // phi independently of the projected feature matrix, so a
+  // regression that returned raw `psi` or mis-scaled eigenvalues
+  // would slip through xvec/plda projection parity (the previous
+  // structural-only test) but break VBx posterior updates.
+  // Codex review MEDIUM (round 8a).
+  let plda_emb_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
+  let (phi_expected_flat, phi_expected_shape) = read_npz_array::<f64>(&plda_emb_path, "phi");
+  assert_eq!(phi_expected_shape, vec![PLDA_DIMENSION as u64]);
+  let mut max_abs_err = 0.0f64;
+  for (i, (got, want)) in phi.iter().zip(phi_expected_flat.iter()).enumerate() {
+    let err = (got - want).abs();
+    if err > max_abs_err {
+      max_abs_err = err;
+    }
+    assert!(
+      err < 1.0e-9,
+      "phi[{i}] = {got} disagrees with pyannote {want} by {err:.3e}"
+    );
+  }
+  eprintln!("[parity_plda] phi max_abs_err = {max_abs_err:.3e}");
+
+  // Tolerance rationale: phi is a single eigh of two
+  // 128×128 positive-definite matrices, computed identically in
+  // scipy.linalg.eigh and nalgebra's Cholesky-reduced ordinary
+  // eigh. The expected residual is float-cast roundoff (~1e-13);
+  // 1e-9 is comfortably above that.
 }

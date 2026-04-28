@@ -300,6 +300,14 @@ def main() -> None:
         post_plda=buf.post_plda,
         train_chunk_idx=buf.train_chunk_idx,
         train_speaker_idx=buf.train_speaker_idx,
+        # `phi` is the PLDA eigenvalue diagonal that VBx consumes
+        # independently of the projected feature matrix. Captured
+        # here so the Rust port's `phi()` can be parity-checked
+        # numerically; structural (descending + length) checks
+        # alone would let a regression returning raw `psi` or
+        # mis-scaled eigenvalues silently break VBx posterior
+        # updates downstream. Codex review MEDIUM (round 8).
+        phi=pipeline._plda.phi,
     )
     np.save(out_dir / "ahc_init_labels.npy", buf.ahc_clusters)
     np.savez_compressed(
