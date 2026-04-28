@@ -180,48 +180,103 @@ fn raw_embedding_accepts_normal_magnitude_input() {
   let _ok = RawEmbedding::from_raw_array(arr).expect("normal-magnitude input must pass");
 }
 
-// ── Centered-norm degeneracy: collapse-to-mean attack (Codex review MEDIUM round 5) ─
+// ── Centered-norm degeneracy: collapse-to-mean attack family ─────
 //
 // The from_raw_array boundary catches all-zero / near-zero inputs.
-// A more sophisticated attack — input == mean1.astype(f32) —
-// passes that gate (the input has the same norm as mean1 itself,
-// well above any reasonable epsilon). Inside xvec_transform the
-// centering step `x = (input as f64) - mean1` then produces a vector
-// whose norm is exactly the f32-roundtrip noise of mean1
-// (~3.5e-8 for the committed weights). The previous shared-epsilon
-// (NORM_EPSILON = 1e-12) guard was 4 orders of magnitude below that
-// noise floor, so the attack would have produced a finite
-// `sqrt(128)`-normed PLDA stage-1 output that VBx treats as a
-// legitimate speaker. The xvec_centered_min_norm threshold
-// (computed at construction = 1000x mean1's f32-roundtrip noise)
-// rejects this class.
+// More sophisticated variants of the same threat target the inner
+// centered-norm guard:
+//
+// (a) input = mean1.astype(f32) — passes the boundary (raw norm =
+//     ‖mean1‖ ≈ 1.42), centered norm is mean1's f32 roundtrip noise
+//     (~3.5e-8 for the committed weights). Caught.
+//
+// (b) input = mean1.astype(f32) + jitter where ‖jitter‖ is small but
+//     non-trivial. An earlier f32-noise-calibrated threshold (mean1
+//     roundtrip noise × 1000 ≈ 3.5e-5) admitted any jitter above that
+//     floor, letting the L2-normalize amplify the attacker-chosen
+//     jitter direction into a fabricated speaker-evidence vector.
+//     The current threshold XVEC_CENTERED_MIN_NORM = 0.1 (data-
+//     calibrated against real centered-norm minimum of 1.36) closes
+//     the window. Codex review HIGH (round 6).
 
-/// Regression for the collapse-to-mean attack. Input is
-/// `mean1.astype(f32)` — the exact value an attacker would feed to
-/// produce a centered f64 vector of pure quantization noise.
+/// Regression for the (a) collapse-to-mean attack. Input is
+/// `mean1.astype(f32)` exactly; centered f64 vector is pure
+/// quantization noise.
 #[test]
 fn xvec_transform_rejects_input_equal_to_mean1_as_f32() {
   use super::loader::load_xvec;
 
   let plda = PldaTransform::new().expect("load PLDA");
 
-  // Round mean1 to f32 (the exact value an attacker would feed).
   let mean1 = load_xvec().mean1;
   let mut arr = [0.0f32; EMBEDDING_DIMENSION];
   for (slot, value) in arr.iter_mut().zip(mean1.iter()) {
     *slot = *value as f32;
   }
 
-  // The boundary check accepts this — it has roughly mean1's norm
-  // (~1.42), nowhere near zero.
   let raw = RawEmbedding::from_raw_array(arr).expect("input has nontrivial raw norm");
-
-  // The centered-norm guard must reject inside xvec_transform. The
-  // centered f64 vector here is pure quantization noise of mean1.
   let result = plda.xvec_transform(&raw);
   assert!(
     matches!(result, Err(Error::DegenerateInput)),
-    "mean1.astype(f32) must be rejected as collapse-to-mean attack, got {result:?}"
+    "mean1.astype(f32) must be rejected, got {result:?}"
+  );
+}
+
+/// Regression for the (b) `mean1 + jitter` attack. Input is
+/// `mean1.astype(f32)` plus a constant offset, sized so its
+/// centered f64 norm sits at `1e-3` — well above the previous
+/// noise-floor-based threshold (3.5e-5) and well below the new
+/// data-calibrated threshold (0.1) and the smallest real centered
+/// norm (1.36). With the previous threshold this would have passed
+/// and the L2-normalize would have amplified the constant-direction
+/// jitter into a unit-norm vector, which the rest of the pipeline
+/// would then whiten into a finite `sqrt(128)`-normed PLDA output.
+#[test]
+fn xvec_transform_rejects_mean1_plus_small_jitter() {
+  use super::loader::load_xvec;
+
+  let plda = PldaTransform::new().expect("load PLDA");
+
+  // Build mean1 as f32 + a constant per-element offset whose
+  // resulting centered f64 norm is `1e-3`. A constant offset of
+  // magnitude `c` across `D` elements gives centered norm
+  // `c * sqrt(D)`, so `c = 1e-3 / sqrt(256) ≈ 6.25e-5`.
+  let target_centered_norm = 1.0e-3_f64;
+  let offset = (target_centered_norm / (EMBEDDING_DIMENSION as f64).sqrt()) as f32;
+
+  let mean1 = load_xvec().mean1;
+  let mut arr = [0.0f32; EMBEDDING_DIMENSION];
+  for (slot, value) in arr.iter_mut().zip(mean1.iter()) {
+    *slot = (*value as f32) + offset;
+  }
+
+  // Boundary accepts (raw norm ≈ ‖mean1‖, well above NORM_EPSILON).
+  let raw = RawEmbedding::from_raw_array(arr).expect("input has nontrivial raw norm");
+
+  // Sanity: the actual centered f64 norm here is in the danger band
+  // `(prev_threshold, new_threshold) = (3.5e-5, 0.1)`.
+  let centered_norm: f64 = arr
+    .iter()
+    .zip(mean1.iter())
+    .map(|(v, m)| {
+      let d = f64::from(*v) - *m;
+      d * d
+    })
+    .sum::<f64>()
+    .sqrt();
+  assert!(
+    (1.0e-4..1.0e-2).contains(&centered_norm),
+    "test setup invariant: centered_norm = {centered_norm:.3e} must \
+     sit in the previous-threshold-bypass window for the test to be meaningful"
+  );
+
+  let result = plda.xvec_transform(&raw);
+  assert!(
+    matches!(result, Err(Error::DegenerateInput)),
+    "mean1 + small jitter (centered norm {centered_norm:.3e}) must be \
+     rejected — attacker controls the jitter direction, the \
+     L2-normalize would amplify it into fabricated speaker evidence; \
+     got {result:?}"
   );
 }
 

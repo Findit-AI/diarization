@@ -175,6 +175,35 @@ impl PostXvecEmbedding {
   }
 }
 
+/// Minimum allowed `‖input - mean1‖` after the first centering step.
+///
+/// Calibrated against the captured Phase-0 distribution rather than
+/// f32 quantization noise: across the 654 raw WeSpeaker embeddings
+/// in `tests/parity/fixtures/01_dialogue/raw_embeddings.npz`, the
+/// observed centered-norm range is `[1.36, 7.08]` with median 2.45.
+/// `0.1` sits ~14× below the empirical minimum (so a far-out-of-
+/// distribution real input still passes) and ~2.86 million× above
+/// the f32-roundtrip noise floor of `mean1` (~3.49e-8 for the
+/// committed weights), so any centered norm in the
+/// `[noise_floor, 0.1)` band is rejected.
+///
+/// # Why a constant rather than the previous noise-floor × 1000
+///
+/// The earlier threshold was `‖mean1 - mean1.astype(f32)‖ × 1000`
+/// ≈ 3.5e-5. That left a ~38000× attack window between threshold
+/// and real signal: an embedder collapsed to `mean1.astype(f32) +
+/// jitter` with `‖jitter‖` anywhere in `(3.5e-5, 1.36)` would pass
+/// the guard, the L2-normalize would amplify the attacker-chosen
+/// jitter direction to unit norm, and the rest of the pipeline
+/// would whiten that into a fabricated speaker-evidence vector
+/// indistinguishable from a real embedding. Calibrating to the
+/// data closes that window. Codex review HIGH (round 6).
+///
+/// If the model weights or the embedder are ever changed, this
+/// constant must be re-validated against fresh captured data —
+/// see `tests/parity/python/capture_intermediates.py`.
+pub(crate) const XVEC_CENTERED_MIN_NORM: f64 = 0.1;
+
 /// Probabilistic Linear Discriminant Analysis transform. Two stages:
 ///
 /// 1. [`xvec_transform`](Self::xvec_transform): center → L2-norm → LDA →
@@ -193,17 +222,6 @@ pub struct PldaTransform {
   lda: DMatrix<f64>,
   sqrt_in_dim: f64,  // sqrt(EMBEDDING_DIMENSION)
   sqrt_out_dim: f64, // sqrt(PLDA_DIMENSION)
-
-  // Threshold for the centered-input degeneracy check after the first
-  // step `x = (input as f64) - mean1`. Computed at construction from
-  // the f32-roundtrip noise of `mean1` itself, so it adapts if the
-  // weights are ever refreshed. A constant `NORM_EPSILON = 1e-12`
-  // would be 4 orders of magnitude *below* this noise floor for the
-  // committed `mean1`, letting an adversarial input that is
-  // `mean1.astype(f32)` slip through and amplify pure quantization
-  // noise into a finite `sqrt(128)`-normed PLDA output. Codex review
-  // MEDIUM (round 5).
-  xvec_centered_min_norm: f64,
 
   // plda_tf factors (filled in by P1 Task 4 — generalized eigh).
   #[allow(dead_code)]
@@ -266,31 +284,12 @@ impl PldaTransform {
     let plda_eigenvectors_desc = eigenvectors_desc;
     let phi = eigenvalues_desc;
 
-    // Compute the f32-roundtrip noise floor of mean1 once. Any input
-    // equal to `mean1.astype(f32)` (the canonical degraded-embedder
-    // collapse-to-mean attack) has centered f64 norm exactly equal
-    // to this floor. Threshold = 1000x the floor — 3 orders of
-    // magnitude above quantization noise, still 3+ orders of
-    // magnitude below the smallest observed real centered norm
-    // (~1.36 for the Phase-0 fixture's 654 raw embeddings). Codex
-    // review MEDIUM (round 5).
-    let mean1_roundtrip_noise = mean1
-      .iter()
-      .map(|v| {
-        let delta = f64::from(*v as f32) - *v;
-        delta * delta
-      })
-      .sum::<f64>()
-      .sqrt();
-    let xvec_centered_min_norm = mean1_roundtrip_noise * 1.0e3;
-
     Ok(Self {
       mean1,
       mean2,
       lda,
       sqrt_in_dim: (EMBEDDING_DIMENSION as f64).sqrt(),
       sqrt_out_dim: (PLDA_DIMENSION as f64).sqrt(),
-      xvec_centered_min_norm,
       plda_mu: mu,
       plda_eigenvectors_desc,
       phi,
@@ -321,13 +320,13 @@ impl PldaTransform {
   ///   construction-time invariant; this guards against arithmetic
   ///   overflows in the LDA projection).
   /// - [`Error::DegenerateInput`] if `‖input - mean1‖` is below the
-  ///   construction-time `xvec_centered_min_norm` threshold (1000x
-  ///   the f32-roundtrip noise of `mean1`), or if the second-stage
-  ///   intermediate becomes degenerate. The first check rejects the
-  ///   `mean1.astype(f32)` collapse-to-mean attack, which a fixed
-  ///   `NORM_EPSILON = 1e-12` would have admitted (centered noise
-  ///   floor for the committed weights is ~3.5e-8). Codex review
-  ///   MEDIUM (round 5).
+  ///   data-calibrated [`XVEC_CENTERED_MIN_NORM`] threshold (`0.1`
+  ///   — see that constant's docs for the calibration), or if the
+  ///   second-stage intermediate becomes degenerate. The first check
+  ///   rejects both the `mean1.astype(f32)` collapse-to-mean attack
+  ///   and the more sophisticated `mean1 + small_jitter` variants
+  ///   that an earlier f32-quantization-noise-based threshold would
+  ///   have admitted. Codex review HIGH (round 6).
   pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<PostXvecEmbedding, Error> {
     // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
     // so we don't re-validate here. Intermediate-vector checks happen
@@ -339,16 +338,19 @@ impl PldaTransform {
     x -= &self.mean1;
 
     // 2. L2-normalize, then scale by sqrt(D_in). Use the
-    //    construction-time `xvec_centered_min_norm` threshold here
-    //    rather than the shared `NORM_EPSILON`: an input of
-    //    `mean1.astype(f32)` produces a centered f64 vector whose
-    //    norm is exactly the f32-roundtrip noise of mean1 (~3.5e-8
-    //    for the committed weights), 4 orders of magnitude above
-    //    `NORM_EPSILON = 1e-12`, so a fixed-epsilon guard would have
-    //    silently amplified pure quantization noise into a finite
-    //    `sqrt(128)`-normed PLDA stage-1 output that downstream VBx
-    //    treats as legitimate speaker evidence.
-    checked_l2_normalize_in_place_with_min(&mut x, self.xvec_centered_min_norm)?;
+    //    data-calibrated `XVEC_CENTERED_MIN_NORM` threshold here
+    //    rather than the shared `NORM_EPSILON`. The threat model is
+    //    a degraded or adversarial embedder returning `mean1 +
+    //    jitter` for a small `jitter`: the centered f64 norm is
+    //    `‖jitter‖`, the L2-normalize amplifies the (attacker-chosen)
+    //    direction of `jitter` to unit norm, and the rest of the
+    //    pipeline whitens that into a `sqrt(128)`-normed PLDA
+    //    stage-1 vector indistinguishable from a real embedding.
+    //    The threshold at `0.1` is calibrated against the captured
+    //    real-input distribution (smallest observed centered norm
+    //    1.36 across 654 raw embeddings); any below-threshold
+    //    centered norm cannot be a real WeSpeaker output.
+    checked_l2_normalize_in_place_with_min(&mut x, XVEC_CENTERED_MIN_NORM)?;
     x *= self.sqrt_in_dim;
 
     // 3. lda.T @ x  →  (PLDA_DIMENSION,)-shaped vector.
