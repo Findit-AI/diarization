@@ -148,7 +148,10 @@ fn post_xvec_capture_rejects_nan() {
   let mut arr = [0.0f64; PLDA_DIMENSION];
   arr[3] = f64::NAN;
   let result = PostXvecEmbedding::from_pyannote_capture(arr);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -156,7 +159,10 @@ fn post_xvec_capture_rejects_inf() {
   let mut arr = [0.0f64; PLDA_DIMENSION];
   arr[100] = f64::INFINITY;
   let result = PostXvecEmbedding::from_pyannote_capture(arr);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 /// L2-normalized 128-d vector (norm = 1.0) is the most likely
@@ -193,8 +199,7 @@ fn post_xvec_capture_accepts_correctly_scaled_vector() {
   // each element = 1.0; sum of squares = 128; norm = sqrt(128) ✓
   assert!((per_elem - 1.0).abs() < 1e-12);
   let arr = [per_elem; PLDA_DIMENSION];
-  let post =
-    PostXvecEmbedding::from_pyannote_capture(arr).expect("right norm");
+  let post = PostXvecEmbedding::from_pyannote_capture(arr).expect("right norm");
   assert_eq!(post.as_array().len(), PLDA_DIMENSION);
 }
 
