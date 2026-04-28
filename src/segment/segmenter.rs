@@ -435,11 +435,17 @@ impl Segmenter {
   /// Smallest absolute frame index that no future or pending window can
   /// still contribute to.
   ///
-  /// - **Pre-finish:** `min(next_window_start_frame, min over pending of
-  ///   start_frame)`. Without the second term, an out-of-order
-  ///   `push_inference` (windows 0/1/2 pending; scores for 2 arrive first)
-  ///   would advance the boundary past frames whose other contributing
-  ///   windows haven't reported yet, corrupting their running mean.
+  /// - **Pre-finish:** `min(next_window_start_frame, earliest_pending,
+  ///   tail_safe_frame)`.
+  ///   - Without `earliest_pending`, an out-of-order `push_inference`
+  ///     (windows 0/1/2 pending; scores for 2 arrive first) would
+  ///     advance the boundary past frames whose other contributing
+  ///     windows haven't reported yet.
+  ///   - Without `tail_safe_frame`, the not-yet-emitted tail-anchor
+  ///     window (scheduled by [`Self::finish`] at
+  ///     `max(0, total_samples_pushed - WINDOW_SAMPLES)`) could land
+  ///     on frames that have already been finalized — its
+  ///     contribution would be silently dropped. Codex review HIGH.
   /// - **Post-finish + pending empty:** `total_frames` (entire stream
   ///   finalized).
   fn next_finalization_boundary(&self) -> u64 {
@@ -456,7 +462,26 @@ impl Segmenter {
       .map(frame_index_of)
       .min()
       .unwrap_or(u64::MAX);
-    next_window_start_frame.min(earliest_pending_frame)
+    // Tail-safe cap: any tail anchor that finish() may schedule starts
+    // no earlier than `total_samples_pushed - WINDOW_SAMPLES`. If we
+    // were already finalized past that point, its frames would be
+    // skipped by reconstruction (it has a defensive guard against
+    // frames < base_frame). Pre-finish, we don't know whether finish
+    // will be called soon, so we always include this term — it costs
+    // at most one window of extra buffering. Codex review HIGH.
+    let tail_safe_frame = if self.finished {
+      // After finish, the tail (if any) has already been scheduled
+      // and is in `pending`; the earliest_pending term covers it.
+      u64::MAX
+    } else {
+      let tail_safe_start = self
+        .total_samples_pushed
+        .saturating_sub(WINDOW_SAMPLES as u64);
+      frame_index_of(tail_safe_start)
+    };
+    next_window_start_frame
+      .min(earliest_pending_frame)
+      .min(tail_safe_frame)
   }
 
   /// Receive one `[start_frame, end_frame)` span from the streaming
@@ -597,6 +622,11 @@ impl Segmenter {
   /// After [`finish`](Self::finish) is called, returns `u64::MAX` (no
   /// future regular windows; any tail anchor is already scheduled).
   ///
+  /// **Do not use this for finalization** in a downstream
+  /// reconstruction pump — it ignores the not-yet-emitted tail anchor.
+  /// Use [`Self::tail_safe_finalization_boundary_samples`] instead.
+  /// Codex review HIGH.
+  ///
   /// `pub(crate)` because the only consumer today is
   /// [`Diarizer`](crate::diarizer)'s reconstruction state machine
   /// (spec §5.9 frame-finalization boundary). Expose as `pub` if a
@@ -607,6 +637,51 @@ impl Segmenter {
       return u64::MAX;
     }
     self.next_window_idx as u64 * self.opts.step_samples() as u64
+  }
+
+  /// Smallest absolute SAMPLE position past which downstream
+  /// reconstruction can safely finalize frames — i.e. no future or
+  /// already-pending window can still contribute past this point. Used
+  /// by [`Diarizer::drain`](crate::diarizer::Diarizer) to advance its
+  /// frame finalization boundary.
+  ///
+  /// Pre-finish: `min(next regular window start, earliest pending
+  /// window start, total_samples_pushed - WINDOW_SAMPLES)`. The third
+  /// term is the load-bearing one fixed by Codex review HIGH:
+  /// `finish()` schedules a tail anchor at `total_samples_pushed -
+  /// WINDOW_SAMPLES` (clamped to 0), and frames before that are
+  /// touched by the tail's contribution. Without it, a stream like
+  /// `230_000` samples (regular grid covers 0..160k and 40k..200k →
+  /// drain finalizes to 80_000; tail later anchored at 70_000) lost
+  /// the tail's contribution silently because reconstruction had
+  /// already advanced past frame_index_of(70_000).
+  ///
+  /// Post-finish + all pending consumed: `u64::MAX` (everything
+  /// finalizes).
+  pub(crate) fn tail_safe_finalization_boundary_samples(&self) -> u64 {
+    if self.finished && self.pending.is_empty() {
+      return u64::MAX;
+    }
+    let step = self.opts.step_samples() as u64;
+    let next_window_start = if self.finished {
+      // No more regular windows after finish; tail (if any) is in pending.
+      u64::MAX
+    } else {
+      self.next_window_idx as u64 * step
+    };
+    let earliest_pending_start = self.pending.values().copied().min().unwrap_or(u64::MAX);
+    // Tail-safe cap: only relevant pre-finish (after finish, the tail
+    // is in `pending` and `earliest_pending_start` covers it).
+    let tail_safe_start = if self.finished {
+      u64::MAX
+    } else {
+      self
+        .total_samples_pushed
+        .saturating_sub(WINDOW_SAMPLES as u64)
+    };
+    next_window_start
+      .min(earliest_pending_start)
+      .min(tail_safe_start)
   }
 }
 
@@ -1065,6 +1140,78 @@ mod tests {
     s.push_samples(&[0.001; 16_000]);
     s.finish();
     assert_eq!(s.peek_next_window_start(), u64::MAX);
+  }
+
+  /// Codex review HIGH regression: with the default step of 40_000
+  /// and WINDOW_SAMPLES=160_000, a 230_000-sample stream:
+  ///   - schedules regular windows at 0 (covers 0..160k) and 40k
+  ///     (covers 40k..200k); a window at 80k would need 240k samples
+  ///     so it is NOT scheduled pre-finish.
+  ///   - `peek_next_window_start` returns 80_000 (next regular grid
+  ///     position).
+  ///   - But `finish()` will schedule a tail anchor at 70_000
+  ///     (= total - WINDOW_SAMPLES). Frames in 70k..80k can still be
+  ///     touched by that tail, so finalization MUST stay below 70k.
+  ///
+  /// `tail_safe_finalization_boundary_samples` enforces the min over
+  /// next-regular, earliest-pending, and `total - WINDOW_SAMPLES`.
+  #[test]
+  fn tail_safe_finalization_boundary_clamps_below_future_tail() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.001f32; 230_000]);
+    // Drain both regular windows' NeedsInference + push valid scores.
+    let scores = vec![1.0f32 / POWERSET_CLASSES as f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    let ids: Vec<WindowId> = (0..2)
+      .map(|_| match s.poll().unwrap() {
+        Action::NeedsInference { id, .. } => id,
+        other => panic!("expected NeedsInference, got {other:?}"),
+      })
+      .collect();
+    for id in &ids {
+      s.push_inference(*id, &scores).unwrap();
+    }
+    // Drain remaining actions.
+    while s.poll().is_some() {}
+
+    // peek_next_window_start says next regular start = 80_000 ...
+    assert_eq!(s.peek_next_window_start(), 80_000);
+    // ... but the tail-safe boundary clamps below 70_000 to leave room
+    // for the future tail.
+    let tail_safe = s.tail_safe_finalization_boundary_samples();
+    assert!(
+      tail_safe <= 70_000,
+      "tail_safe_finalization_boundary_samples must be <= 70_000 \
+       (= total - WINDOW_SAMPLES); got {tail_safe}"
+    );
+  }
+
+  /// After finish + all pending consumed, the tail-safe boundary
+  /// returns u64::MAX so the diarizer can finalize everything.
+  #[test]
+  fn tail_safe_finalization_boundary_after_finish_and_drain() {
+    let mut s = Segmenter::new(opts());
+    s.push_samples(&vec![0.001f32; 160_000]);
+    let id = match s.poll().unwrap() {
+      Action::NeedsInference { id, .. } => id,
+      _ => unreachable!(),
+    };
+    let scores = vec![1.0f32 / POWERSET_CLASSES as f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];
+    s.push_inference(id, &scores).unwrap();
+    while s.poll().is_some() {}
+    s.finish();
+    // finish() schedules the tail; consume it.
+    while let Some(action) = s.poll() {
+      if let Action::NeedsInference { id, .. } = action {
+        s.push_inference(id, &scores).unwrap();
+      }
+    }
+    while s.poll().is_some() {}
+    assert!(s.pending.is_empty(), "all pending should be consumed");
+    assert_eq!(
+      s.tail_safe_finalization_boundary_samples(),
+      u64::MAX,
+      "post-finish + pending empty must allow full finalization"
+    );
   }
 
   #[test]

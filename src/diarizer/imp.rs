@@ -591,8 +591,12 @@ impl Diarizer {
       );
     }
 
-    // Advance finalization boundary based on segmenter state.
-    let next = self.segmenter.peek_next_window_start();
+    // Advance finalization boundary based on segmenter state. Use the
+    // TAIL-SAFE boundary, not `peek_next_window_start`: the latter
+    // ignores the not-yet-scheduled tail-anchor window, which can
+    // cause reconstruction to finalize past frames the tail will
+    // later contribute to. Codex review HIGH.
+    let next = self.segmenter.tail_safe_finalization_boundary_samples();
     self.reconstruct.advance_finalization_boundary(next);
 
     // Emit any finalized DiarizedSpans.
