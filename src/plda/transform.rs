@@ -33,84 +33,71 @@ use crate::{
 /// `normalized_vs_raw_input_produce_materially_different_output` in
 /// `src/plda/tests.rs`.
 ///
-/// # Codex review HIGH
+/// # Construction
 ///
-/// Phase 1 originally exposed `xvec_transform(&[f32; 256])` directly.
-/// That allowed `plda.project(embedding.as_array())` to compile and
-/// silently produce wrong-distribution PLDA features. This wrapper
-/// makes the contract type-safe — `xvec_transform`'s signature now
-/// requires `&RawEmbedding`, which can only be constructed from a
-/// raw array via [`Self::from_raw_array`].
+/// Construction is `#[cfg(test)] pub(crate)` — production builds
+/// cannot construct a `RawEmbedding` at all. The only production
+/// path from a raw WeSpeaker vector to PLDA features will be via
+/// `EmbedModel::embed_raw` once Phase 5 lands; that path will own
+/// its own typed entry inside `dia::plda` so the boundary stays
+/// sealed. (Codex review MEDIUM: a public `plda-fixtures` Cargo
+/// feature was previously used as the gate, but additive features
+/// are globally unified, so any downstream crate enabling it would
+/// have re-exposed the constructor for the entire build.)
+///
+/// # Type-safety contract
+///
+/// `xvec_transform`'s signature requires `&RawEmbedding`, so passing
+/// the L2-normalized [`dia::embed::Embedding`](crate::embed::Embedding)
+/// vector is a compile error rather than a silent distribution drift:
+///
+/// ```compile_fail
+/// use dia::embed::Embedding;
+/// use dia::plda::PldaTransform;
+/// let plda = PldaTransform::new().unwrap();
+/// let emb = Embedding::normalize_from([0.5; 256]).unwrap();
+/// // The type system rejects this — `xvec_transform` requires
+/// // `&RawEmbedding`, not `&[f32; 256]`.
+/// let _ = plda.xvec_transform(emb.as_array());
+/// ```
 #[derive(Debug, Clone)]
 pub struct RawEmbedding([f32; EMBEDDING_DIMENSION]);
 
 impl RawEmbedding {
   /// Wrap a raw, **unnormalized** WeSpeaker embedding vector.
+  /// `#[cfg(test)] pub(crate)` — see [`RawEmbedding`]'s type-level
+  /// docs for the visibility rationale.
   ///
-  /// Validates the array is finite (rejects NaN / `±inf`).
-  ///
-  /// **This constructor is gated behind the `plda-fixtures` feature**
-  /// (also available under `cfg(test)`). Production builds without
-  /// the feature cannot reach this function at all — the only entry
-  /// for "I have a raw WeSpeaker vector, project it" is via
-  /// `dia::embed::EmbedModel::embed_raw` once Phase 5 lands. The
-  /// gate exists because the finite check alone is *necessary but
-  /// not sufficient* — a deliberate caller could still wrap a
-  /// normalized `Embedding::as_array()` and reach
-  /// `xvec_transform`. Codex review HIGH.
-  ///
-  /// **Do NOT pass `dia::embed::Embedding::as_array()` here.** That
-  /// vector has been L2-normalized — wrong distribution for PLDA —
-  /// and the type system rejects the direct path (the doctest below
-  /// is a `compile_fail` example proving it).
+  /// Validates the array is finite **and** has non-trivial L2 norm.
+  /// Both checks matter: `xvec_transform` centers `input - mean1`
+  /// before its inner norm guard fires, so a degraded ONNX output of
+  /// all zeros would pass the inner guard (centered norm = `‖mean1‖`)
+  /// and silently produce a finite `sqrt(128)`-normed PLDA stage-1
+  /// vector that downstream VBx would treat as legitimate speaker
+  /// evidence. Rejecting at the **uncentered** input here catches
+  /// that class. Codex review HIGH.
   ///
   /// # Errors
   ///
   /// - [`Error::NonFiniteInput`] if any element is NaN, `+inf`, or
   ///   `-inf`.
-  ///
-  /// # Examples
-  ///
-  /// Construction from a raw array (requires `plda-fixtures`):
-  ///
-  /// ```
-  /// # #[cfg(feature = "plda-fixtures")] {
-  /// use dia::plda::RawEmbedding;
-  /// let raw: [f32; 256] = [0.5; 256];
-  /// let _ = RawEmbedding::from_raw_array(raw).expect("finite");
-  /// # }
-  /// ```
-  ///
-  /// `dia::embed::Embedding::as_array()` is the wrong-distribution
-  /// type and the compiler rejects it:
-  ///
-  /// ```compile_fail
-  /// use dia::embed::Embedding;
-  /// use dia::plda::PldaTransform;
-  /// let plda = PldaTransform::new().unwrap();
-  /// let emb = Embedding::normalize_from([0.5; 256]).unwrap();
-  /// // The type system rejects this — `xvec_transform` requires
-  /// // `&RawEmbedding`, not `&[f32; 256]`.
-  /// let _ = plda.xvec_transform(emb.as_array());
-  /// ```
-  #[cfg(any(feature = "plda-fixtures", test))]
-  #[cfg_attr(docsrs, doc(cfg(feature = "plda-fixtures")))]
-  pub fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
+  /// - [`Error::DegenerateInput`] if `‖arr‖ < NORM_EPSILON` — the
+  ///   input is effectively zero and any downstream PLDA output
+  ///   would be fabricated speaker evidence rather than a real
+  ///   embedding signal.
+  #[cfg(test)]
+  pub(crate) fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
       return Err(Error::NonFiniteInput);
     }
+    // Reject degenerate input *before* `xvec_transform` centers it.
+    // The norm is computed in f64 because squaring 256 small f32
+    // values can lose precision near the threshold.
+    let norm_sq: f64 = arr.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+    if norm_sq.sqrt() < NORM_EPSILON as f64 {
+      return Err(Error::DegenerateInput);
+    }
     Ok(Self(arr))
-  }
-
-  /// Borrow the underlying raw vector. Provided for parity tests and
-  /// internal use; production callers should not need this. Also
-  /// gated behind `plda-fixtures` so external consumers cannot
-  /// extract a raw vector and re-wrap it as a different boundary
-  /// type.
-  #[cfg(any(feature = "plda-fixtures", test))]
-  #[cfg_attr(docsrs, doc(cfg(feature = "plda-fixtures")))]
-  pub fn as_array(&self) -> &[f32; EMBEDDING_DIMENSION] {
-    &self.0
   }
 }
 
@@ -125,21 +112,30 @@ impl RawEmbedding {
 /// (e.g. an L2-normalized 128-d vector with norm 1.0, a stale
 /// pyannote capture from a different revision, or hand-constructed
 /// input). Without this gate, `plda_transform` would whiten any
-/// finite input and return `Ok` — VBx then clusters wrong-distribution
+/// finite input and return — VBx then clusters wrong-distribution
 /// features without any error signal.
 ///
-/// The legitimate ways to obtain a `PostXvecEmbedding` are:
-/// - Call [`PldaTransform::xvec_transform`] (the runtime path).
-/// - Call [`Self::from_pyannote_capture`] with a captured
-///   `post_xvec` value (parity tests / offline tooling); the
-///   constructor validates the norm matches `sqrt(D_out)`.
+/// The only production path to a `PostXvecEmbedding` is calling
+/// [`PldaTransform::xvec_transform`] (which constructs internally
+/// via the `pub(super)` `from_xvec_output`). Parity tests use a
+/// `#[cfg(test)] pub(crate)` constructor that loads from a captured
+/// pyannote run and validates the norm; that constructor cannot be
+/// reached from production builds or downstream crates. Codex
+/// review HIGH.
 ///
-/// # Codex review HIGH
+/// # Type-safety contract
 ///
-/// Phase 1 originally exposed `plda_transform(&[f64; 128])` directly.
-/// That allowed callers to feed wrong-distribution data and silently
-/// produce garbage whitened features. This wrapper makes the contract
-/// type-safe.
+/// `plda_transform`'s signature requires `&PostXvecEmbedding`, so
+/// passing a raw `[f64; 128]` is a compile error rather than a
+/// silent distribution drift:
+///
+/// ```compile_fail
+/// use dia::plda::PldaTransform;
+/// let plda = PldaTransform::new().unwrap();
+/// let arr = [0.0_f64; 128];
+/// // Doesn't compile — `plda_transform` requires `&PostXvecEmbedding`.
+/// let _ = plda.plda_transform(&arr);
+/// ```
 #[derive(Debug, Clone)]
 pub struct PostXvecEmbedding([f64; PLDA_DIMENSION]);
 
@@ -150,18 +146,15 @@ impl PostXvecEmbedding {
     Self(arr)
   }
 
-  /// External constructor for parity tests and offline tooling that
-  /// load a `post_xvec` value from a captured pyannote run. Validates
-  /// finite + norm within `1e-3` of `sqrt(PLDA_DIMENSION)`.
+  /// Internal constructor for parity tests that load a `post_xvec`
+  /// value from a captured pyannote run. `#[cfg(test)] pub(crate)`
+  /// — see [`PostXvecEmbedding`]'s type-level docs for why this is
+  /// not reachable from production builds.
   ///
-  /// **Gated behind the `plda-fixtures` feature** (also available
-  /// under `cfg(test)`). The norm check alone is necessary but not
-  /// sufficient — a synthetic 128-d vector scaled to `sqrt(128)`
-  /// would still pass it. Production callers must reach
-  /// `plda_transform` only via the value returned by
-  /// [`PldaTransform::xvec_transform`], whose internal
-  /// `from_xvec_output` constructor is the only un-gated entry.
-  /// Codex review HIGH.
+  /// Validates finite + norm within `1e-3` of `sqrt(PLDA_DIMENSION)`.
+  /// The norm check is necessary but not sufficient — a synthetic
+  /// 128-d vector scaled to `sqrt(128)` would still pass it — which
+  /// is precisely why this constructor must remain test-only.
   ///
   /// # Errors
   ///
@@ -169,34 +162,8 @@ impl PostXvecEmbedding {
   /// - [`Error::WrongPostXvecNorm`] if the norm is outside the
   ///   expected `sqrt(D_out) ± 1e-3` band — the input is not a
   ///   post-`xvec_tf` vector.
-  ///
-  /// # Examples
-  ///
-  /// Captured pyannote post_xvec (norm ≈ sqrt(128)) is accepted
-  /// (requires `plda-fixtures`):
-  ///
-  /// ```
-  /// # #[cfg(feature = "plda-fixtures")] {
-  /// use dia::plda::PostXvecEmbedding;
-  /// let mut arr = [0.0_f64; 128];
-  /// // Construct a vector with the right norm.
-  /// arr[0] = (128.0_f64).sqrt();
-  /// let _ = PostXvecEmbedding::from_pyannote_capture(arr).expect("right norm");
-  /// # }
-  /// ```
-  ///
-  /// Raw `[f64; 128]` cannot be passed to `plda_transform` directly:
-  ///
-  /// ```compile_fail
-  /// use dia::plda::PldaTransform;
-  /// let plda = PldaTransform::new().unwrap();
-  /// let arr = [0.0_f64; 128];
-  /// // Doesn't compile — `plda_transform` requires `&PostXvecEmbedding`.
-  /// let _ = plda.plda_transform(&arr);
-  /// ```
-  #[cfg(any(feature = "plda-fixtures", test))]
-  #[cfg_attr(docsrs, doc(cfg(feature = "plda-fixtures")))]
-  pub fn from_pyannote_capture(arr: [f64; PLDA_DIMENSION]) -> Result<Self, Error> {
+  #[cfg(test)]
+  pub(crate) fn from_pyannote_capture(arr: [f64; PLDA_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
       return Err(Error::NonFiniteInput);
     }
@@ -213,11 +180,11 @@ impl PostXvecEmbedding {
     Ok(Self(arr))
   }
 
-  /// Borrow the underlying f64 vector. Gated behind `plda-fixtures`
-  /// so external consumers cannot extract a vector and re-wrap it.
-  #[cfg(any(feature = "plda-fixtures", test))]
-  #[cfg_attr(docsrs, doc(cfg(feature = "plda-fixtures")))]
-  pub fn as_array(&self) -> &[f64; PLDA_DIMENSION] {
+  /// Borrow the underlying f64 vector. Gated alongside
+  /// [`Self::from_pyannote_capture`] so the same visibility rules
+  /// apply.
+  #[cfg(test)]
+  pub(crate) fn as_array(&self) -> &[f64; PLDA_DIMENSION] {
     &self.0
   }
 }

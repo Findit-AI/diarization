@@ -76,8 +76,11 @@ fn new_is_deterministic() {
   for (x, y) in phi_a.iter().zip(phi_b.iter()) {
     assert_eq!(x, y, "phi differs between two PldaTransform::new() calls");
   }
-  // Same projection input → same output, byte-identical.
-  let input = raw([0.0f32; EMBEDDING_DIMENSION]);
+  // Same projection input → same output, byte-identical. The
+  // input must have non-trivial norm (the boundary check now
+  // rejects all-zero raw vectors as a degraded-embedder failure
+  // mode), so use a constant 0.5 here rather than zeros.
+  let input = raw([0.5f32; EMBEDDING_DIMENSION]);
   let pa = a.project(&input).expect("non-degenerate");
   let pb = b.project(&input).expect("non-degenerate");
   assert_eq!(pa, pb);
@@ -126,16 +129,65 @@ fn raw_embedding_rejects_neg_inf() {
   );
 }
 
-// NOTE on `Error::DegenerateInput` from `xvec_transform`: that error
-// only fires when the centered f64 vector `(input as f64) - mean1`
-// has L2 norm below `NORM_EPSILON = 1e-12`. Because `mean1` is stored
-// in f64 with non-f32-representable values, a `[f32; 256]` input
-// rounded from `mean1` introduces ~1e-7 noise per element after
-// promotion, which gives a centered norm around 1.6e-7 — above
-// NORM_EPSILON. Triggering DegenerateInput from real f32 input is
-// effectively impossible given pyannote's mean1 values, so the
-// helper-level test for that path lives in `transform.rs` instead
-// (see `tests::checked_l2_normalize_rejects_near_zero`).
+// ── Degenerate-input rejection (Codex review HIGH) ────────────────
+//
+// The previous revision only checked finiteness at the `RawEmbedding`
+// boundary, which let an all-zero or near-zero raw ONNX output reach
+// `xvec_transform`. There the centering step `x - mean1` produced a
+// vector with norm `‖mean1‖` (well above `NORM_EPSILON`), so the
+// inner L2-norm guard never fired and the all-zero "embedding" was
+// transformed into a finite `sqrt(128)`-normed PLDA stage-1 output
+// that downstream VBx would treat as legitimate speaker evidence.
+//
+// `from_raw_array` now rejects below-threshold raw norms directly,
+// so the centering step never runs on degenerate input.
+
+/// All-zero raw input is the canonical degraded-embedder failure mode
+/// (e.g. an ONNX inference that returned zeros without raising). It
+/// must be rejected at the boundary, not silently transformed into
+/// fabricated speaker evidence downstream.
+#[test]
+fn raw_embedding_rejects_zero_vector() {
+  let arr = [0.0f32; EMBEDDING_DIMENSION];
+  let result = RawEmbedding::from_raw_array(arr);
+  assert!(
+    matches!(result, Err(Error::DegenerateInput)),
+    "all-zero raw input must be rejected, got {result:?}"
+  );
+}
+
+/// Near-zero raw input — every element well below `NORM_EPSILON.sqrt()`
+/// so `‖arr‖ < NORM_EPSILON`. Rejected for the same reason as the
+/// all-zero case.
+#[test]
+fn raw_embedding_rejects_near_zero_vector() {
+  // Per-element 1e-15 — sum of squares = 256 * 1e-30 = 2.56e-28,
+  // norm = 1.6e-14, comfortably below NORM_EPSILON = 1e-12.
+  let arr = [1.0e-15f32; EMBEDDING_DIMENSION];
+  let result = RawEmbedding::from_raw_array(arr);
+  assert!(
+    matches!(result, Err(Error::DegenerateInput)),
+    "near-zero raw input must be rejected, got {result:?}"
+  );
+}
+
+/// Sanity: a normal raw input passes the gate. WeSpeaker outputs are
+/// O(units)-magnitude; this test guards against an over-tight
+/// threshold that would silently kill real signal.
+#[test]
+fn raw_embedding_accepts_normal_magnitude_input() {
+  let arr = [0.5f32; EMBEDDING_DIMENSION];
+  let _ok = RawEmbedding::from_raw_array(arr).expect("normal-magnitude input must pass");
+}
+
+// NOTE on `Error::DegenerateInput` from `xvec_transform`'s inner
+// guard: even after the boundary check above, the inner check stays
+// as defense-in-depth (e.g. against a malformed LDA matrix that
+// produces a near-zero stage-2 intermediate). It can no longer fire
+// on the centered raw input though, because `from_raw_array` rejects
+// the only inputs that could trigger it. The helper-level test for
+// that path lives in `transform.rs` (see
+// `tests::checked_l2_normalize_rejects_near_zero`).
 
 // ── PostXvecEmbedding boundary (Codex review HIGH stage 2) ─────────
 //

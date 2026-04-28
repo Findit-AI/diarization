@@ -7,14 +7,25 @@
 //! Skipped (with `eprintln` warning) if the captured fixtures are not
 //! present — they live in the repo, but a fresh checkout would have to
 //! run Phase-0 capture to regenerate them.
+//!
+//! Lives **inside** the crate (under `#[cfg(test)]`) rather than as an
+//! integration test in `tests/`. The reason is that
+//! [`RawEmbedding::from_raw_array`] and
+//! [`PostXvecEmbedding::from_pyannote_capture`] are
+//! `#[cfg(test)] pub(crate)` — neither downstream crates nor a
+//! separate integration-test crate can construct them, by design
+//! (Codex review MEDIUM). Integration tests live in `tests/` only
+//! when they exercise the *external* public API; this test is a
+//! parity check against the algorithm's internals.
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
-use dia::plda::{
-  EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform, PostXvecEmbedding, RawEmbedding,
-};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
+
+use crate::plda::{
+  EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform, PostXvecEmbedding, RawEmbedding,
+};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

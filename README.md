@@ -71,10 +71,14 @@ constrained Hungarian work lands.)
 | Feature | Default | What it enables |
 |---------|---------|-----------------|
 | `ort` | yes | The ONNX-runtime-backed `SegmentModel` and `EmbedModel` types. |
-| `plda-fixtures` | **no** | Public constructors for `dia::plda::RawEmbedding` (`from_raw_array`) and `dia::plda::PostXvecEmbedding` (`from_pyannote_capture`). Enabling this is the explicit signal that the caller is parity-test code or offline tooling — production builds without the feature cannot construct PLDA boundary inputs at all, eliminating a class of silent distribution-drift bugs. The Phase-1 parity test (`tests/parity_plda.rs`) declares `required-features = ["plda-fixtures"]` and is automatically skipped when the feature is not enabled. |
 
-To run the PLDA parity test:
+The PLDA parity test runs as part of the regular test suite — no
+feature flag required:
 
 ```bash
-cargo test --features plda-fixtures --test parity_plda
+cargo test plda::parity_tests
 ```
+
+It auto-skips when `tests/parity/fixtures/01_dialogue/*.npz` is absent
+(checked-in for this repo, but a fresh checkout from a model-only
+mirror would have to regenerate them via the Phase-0 capture script).

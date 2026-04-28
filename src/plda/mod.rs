@@ -19,11 +19,11 @@
 //! ## Pinning
 //!
 //! The implementation tracks pyannote.audio 4.0.4 byte-for-byte via the
-//! parity tests in `tests/parity_plda.rs`, which validate against the
-//! Phase-0 captured artifacts under
+//! parity tests in `src/plda/parity_tests.rs` (a `#[cfg(test)]` module),
+//! which validate against the Phase-0 captured artifacts under
 //! `tests/parity/fixtures/01_dialogue/plda_embeddings.npz`. Bumping
 //! pyannote requires re-running the Phase-0 capture and re-validating
-//! these tests.
+//! these tests. Run with `cargo test plda::parity_tests`.
 //!
 //! ## Standalone — no `Diarizer` integration yet
 //!
@@ -37,6 +37,9 @@ mod transform;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parity_tests;
 
 pub use error::Error;
 pub use transform::{PldaTransform, PostXvecEmbedding, RawEmbedding};
