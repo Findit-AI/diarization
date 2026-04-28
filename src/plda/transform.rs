@@ -341,23 +341,35 @@ mod helper_tests {
   fn checked_l2_normalize_rejects_near_zero() {
     let mut v = DVector::<f64>::from_iterator(4, [1e-15, 1e-15, 1e-15, 1e-15]);
     let n = v.norm();
-    assert!(n < NORM_EPSILON as f64, "test input norm {n} must be < epsilon");
+    assert!(
+      n < NORM_EPSILON as f64,
+      "test input norm {n} must be < epsilon"
+    );
     let result = checked_l2_normalize_in_place(&mut v);
-    assert!(matches!(result, Err(Error::DegenerateInput)), "got {result:?}");
+    assert!(
+      matches!(result, Err(Error::DegenerateInput)),
+      "got {result:?}"
+    );
   }
 
   #[test]
   fn checked_l2_normalize_rejects_nan() {
     let mut v = DVector::<f64>::from_iterator(3, [1.0, f64::NAN, 1.0]);
     let result = checked_l2_normalize_in_place(&mut v);
-    assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+    assert!(
+      matches!(result, Err(Error::NonFiniteInput)),
+      "got {result:?}"
+    );
   }
 
   #[test]
   fn checked_l2_normalize_rejects_inf() {
     let mut v = DVector::<f64>::from_iterator(3, [1.0, f64::INFINITY, 1.0]);
     let result = checked_l2_normalize_in_place(&mut v);
-    assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+    assert!(
+      matches!(result, Err(Error::NonFiniteInput)),
+      "got {result:?}"
+    );
   }
 
   #[test]

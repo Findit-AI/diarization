@@ -88,7 +88,10 @@ fn xvec_transform_rejects_nan_input() {
   let mut input = [0.5f32; EMBEDDING_DIMENSION];
   input[42] = f32::NAN;
   let result = plda.xvec_transform(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 /// `+inf` and `-inf` must also be rejected — they survive the L2-norm
@@ -100,7 +103,10 @@ fn xvec_transform_rejects_pos_inf_input() {
   let mut input = [0.5f32; EMBEDDING_DIMENSION];
   input[7] = f32::INFINITY;
   let result = plda.xvec_transform(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -109,7 +115,10 @@ fn xvec_transform_rejects_neg_inf_input() {
   let mut input = [0.5f32; EMBEDDING_DIMENSION];
   input[42] = f32::NEG_INFINITY;
   let result = plda.xvec_transform(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 // NOTE on `Error::DegenerateInput` from `xvec_transform`: that error
@@ -132,7 +141,10 @@ fn plda_transform_rejects_nan_input() {
   let mut input = [0.0f64; PLDA_DIMENSION];
   input[3] = f64::NAN;
   let result = plda.plda_transform(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -141,7 +153,10 @@ fn plda_transform_rejects_inf_input() {
   let mut input = [0.0f64; PLDA_DIMENSION];
   input[100] = f64::INFINITY;
   let result = plda.plda_transform(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 /// `project()` propagates the underlying error from `xvec_transform`
@@ -152,5 +167,8 @@ fn project_propagates_xvec_error() {
   let mut input = [0.0f32; EMBEDDING_DIMENSION];
   input[5] = f32::NAN;
   let result = plda.project(&input);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
