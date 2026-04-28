@@ -59,12 +59,14 @@ provenance, including the upstream snapshot revision and the
 `models/plda/*.bin` layout, lives in
 [`models/plda/SOURCE.md`](models/plda/SOURCE.md).
 
-If you want to opt out of the CC-BY-4.0 obligation: do not call
-anything in `dia::plda`, do not link in code that does, and we
-recommend gating the dependency such that the `dia::plda` module is
-never reached. (At the time of writing, no other `dia` module
-depends on `dia::plda`; that changes once the Phase-2/3 VBx +
-constrained Hungarian work lands.)
+Note: in v0.1.0 the `dia::plda` module is crate-private (no
+public-API caller can construct a `RawEmbedding`, by design — see
+`src/lib.rs:62-72`), but `include_bytes!` still embeds the
+weights into every linked binary, so the attribution requirement
+above applies regardless of which `dia` modules you actually
+call. The module flips back to `pub` once the Phase-2/3 VBx +
+constrained Hungarian work lands with a typed entry from
+`EmbedModel`.
 
 ## Cargo features
 

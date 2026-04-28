@@ -48,18 +48,12 @@ use crate::{
 /// # Type-safety contract
 ///
 /// `xvec_transform`'s signature requires `&RawEmbedding`, so passing
-/// the L2-normalized [`dia::embed::Embedding`](crate::embed::Embedding)
-/// vector is a compile error rather than a silent distribution drift:
-///
-/// ```compile_fail
-/// use dia::embed::Embedding;
-/// use dia::plda::PldaTransform;
-/// let plda = PldaTransform::new().unwrap();
-/// let emb = Embedding::normalize_from([0.5; 256]).unwrap();
-/// // The type system rejects this — `xvec_transform` requires
-/// // `&RawEmbedding`, not `&[f32; 256]`.
-/// let _ = plda.xvec_transform(emb.as_array());
-/// ```
+/// the L2-normalized `Embedding` vector is a compile error rather
+/// than a silent distribution drift. The
+/// `normalized_vs_raw_input_produce_materially_different_output`
+/// test in `src/plda/tests.rs` is observable evidence the API
+/// distinction matters: feeding the same vector raw vs L2-normalized
+/// produces materially different `xvec_transform` outputs.
 #[derive(Debug, Clone)]
 pub struct RawEmbedding([f32; EMBEDDING_DIMENSION]);
 
@@ -127,15 +121,7 @@ impl RawEmbedding {
 ///
 /// `plda_transform`'s signature requires `&PostXvecEmbedding`, so
 /// passing a raw `[f64; 128]` is a compile error rather than a
-/// silent distribution drift:
-///
-/// ```compile_fail
-/// use dia::plda::PldaTransform;
-/// let plda = PldaTransform::new().unwrap();
-/// let arr = [0.0_f64; 128];
-/// // Doesn't compile — `plda_transform` requires `&PostXvecEmbedding`.
-/// let _ = plda.plda_transform(&arr);
-/// ```
+/// silent distribution drift.
 #[derive(Debug, Clone)]
 pub struct PostXvecEmbedding([f64; PLDA_DIMENSION]);
 
@@ -199,7 +185,7 @@ impl PostXvecEmbedding {
 ///
 /// Mirrors `pyannote.audio.utils.vbx.vbx_setup` + `xvec_tf` + `plda_tf`
 /// (`utils/vbx.py:181-218` in pyannote.audio 4.0.4). Validated
-/// against the Phase-0 captured artifacts via `tests/parity_plda.rs`.
+/// against the Phase-0 captured artifacts via `src/plda/parity_tests.rs`.
 pub struct PldaTransform {
   // xvec_tf factors
   mean1: DVector<f64>,
@@ -207,6 +193,17 @@ pub struct PldaTransform {
   lda: DMatrix<f64>,
   sqrt_in_dim: f64,  // sqrt(EMBEDDING_DIMENSION)
   sqrt_out_dim: f64, // sqrt(PLDA_DIMENSION)
+
+  // Threshold for the centered-input degeneracy check after the first
+  // step `x = (input as f64) - mean1`. Computed at construction from
+  // the f32-roundtrip noise of `mean1` itself, so it adapts if the
+  // weights are ever refreshed. A constant `NORM_EPSILON = 1e-12`
+  // would be 4 orders of magnitude *below* this noise floor for the
+  // committed `mean1`, letting an adversarial input that is
+  // `mean1.astype(f32)` slip through and amplify pure quantization
+  // noise into a finite `sqrt(128)`-normed PLDA output. Codex review
+  // MEDIUM (round 5).
+  xvec_centered_min_norm: f64,
 
   // plda_tf factors (filled in by P1 Task 4 — generalized eigh).
   #[allow(dead_code)]
@@ -269,12 +266,31 @@ impl PldaTransform {
     let plda_eigenvectors_desc = eigenvectors_desc;
     let phi = eigenvalues_desc;
 
+    // Compute the f32-roundtrip noise floor of mean1 once. Any input
+    // equal to `mean1.astype(f32)` (the canonical degraded-embedder
+    // collapse-to-mean attack) has centered f64 norm exactly equal
+    // to this floor. Threshold = 1000x the floor — 3 orders of
+    // magnitude above quantization noise, still 3+ orders of
+    // magnitude below the smallest observed real centered norm
+    // (~1.36 for the Phase-0 fixture's 654 raw embeddings). Codex
+    // review MEDIUM (round 5).
+    let mean1_roundtrip_noise = mean1
+      .iter()
+      .map(|v| {
+        let delta = f64::from(*v as f32) - *v;
+        delta * delta
+      })
+      .sum::<f64>()
+      .sqrt();
+    let xvec_centered_min_norm = mean1_roundtrip_noise * 1.0e3;
+
     Ok(Self {
       mean1,
       mean2,
       lda,
       sqrt_in_dim: (EMBEDDING_DIMENSION as f64).sqrt(),
       sqrt_out_dim: (PLDA_DIMENSION as f64).sqrt(),
+      xvec_centered_min_norm,
       plda_mu: mu,
       plda_eigenvectors_desc,
       phi,
@@ -304,9 +320,14 @@ impl PldaTransform {
   ///   intermediate vector (the input is finite by `RawEmbedding`'s
   ///   construction-time invariant; this guards against arithmetic
   ///   overflows in the LDA projection).
-  /// - [`Error::DegenerateInput`] if `‖input - mean1‖ < NORM_EPSILON`
-  ///   (the input is essentially equal to `mean1` and L2-normalizing
-  ///   the centered vector would amplify noise to dominate signal).
+  /// - [`Error::DegenerateInput`] if `‖input - mean1‖` is below the
+  ///   construction-time `xvec_centered_min_norm` threshold (1000x
+  ///   the f32-roundtrip noise of `mean1`), or if the second-stage
+  ///   intermediate becomes degenerate. The first check rejects the
+  ///   `mean1.astype(f32)` collapse-to-mean attack, which a fixed
+  ///   `NORM_EPSILON = 1e-12` would have admitted (centered noise
+  ///   floor for the committed weights is ~3.5e-8). Codex review
+  ///   MEDIUM (round 5).
   pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<PostXvecEmbedding, Error> {
     // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
     // so we don't re-validate here. Intermediate-vector checks happen
@@ -317,10 +338,17 @@ impl PldaTransform {
       DVector::<f64>::from_iterator(EMBEDDING_DIMENSION, input.0.iter().map(|v| *v as f64));
     x -= &self.mean1;
 
-    // 2. L2-normalize, then scale by sqrt(D_in). Validate the norm
-    //    before dividing — pyannote's lambda would silently produce
-    //    NaN here for zero-norm input.
-    checked_l2_normalize_in_place(&mut x)?;
+    // 2. L2-normalize, then scale by sqrt(D_in). Use the
+    //    construction-time `xvec_centered_min_norm` threshold here
+    //    rather than the shared `NORM_EPSILON`: an input of
+    //    `mean1.astype(f32)` produces a centered f64 vector whose
+    //    norm is exactly the f32-roundtrip noise of mean1 (~3.5e-8
+    //    for the committed weights), 4 orders of magnitude above
+    //    `NORM_EPSILON = 1e-12`, so a fixed-epsilon guard would have
+    //    silently amplified pure quantization noise into a finite
+    //    `sqrt(128)`-normed PLDA stage-1 output that downstream VBx
+    //    treats as legitimate speaker evidence.
+    checked_l2_normalize_in_place_with_min(&mut x, self.xvec_centered_min_norm)?;
     x *= self.sqrt_in_dim;
 
     // 3. lda.T @ x  →  (PLDA_DIMENSION,)-shaped vector.
@@ -407,12 +435,24 @@ impl PldaTransform {
 /// NaN/Inf that survived earlier checks; defense-in-depth) and
 /// [`Error::DegenerateInput`] if the norm is below
 /// `NORM_EPSILON` (dividing would amplify noise to dominate signal).
+///
+/// Used for the stage-2 (post-LDA) intermediate where the noise
+/// floor is f64 quantization, well below `NORM_EPSILON`.
 fn checked_l2_normalize_in_place(v: &mut DVector<f64>) -> Result<(), Error> {
+  checked_l2_normalize_in_place_with_min(v, NORM_EPSILON as f64)
+}
+
+/// `checked_l2_normalize_in_place` with a caller-supplied minimum
+/// norm. Used by `xvec_transform`'s first centering, where the
+/// effective noise floor is `‖mean1.astype(f32) - mean1‖` (the
+/// quantization noise of mean1 itself), ~3.5e-8 for the committed
+/// weights — far above the shared `NORM_EPSILON = 1e-12`.
+fn checked_l2_normalize_in_place_with_min(v: &mut DVector<f64>, min_norm: f64) -> Result<(), Error> {
   let n = v.norm();
   if !n.is_finite() {
     return Err(Error::NonFiniteInput);
   }
-  if n < NORM_EPSILON as f64 {
+  if n < min_norm {
     return Err(Error::DegenerateInput);
   }
   *v /= n;

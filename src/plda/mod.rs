@@ -30,6 +30,15 @@
 //! Phase 1 ships PLDA as a pure data-transformation module. The actual
 //! wiring into the streaming/offline clusterer happens after the
 //! remaining phases (VBx, constrained Hungarian, centroid AHC) land.
+//!
+//! Until that integration lands the module is `pub(crate)` (see
+//! `src/lib.rs:62-72`), and every item below is dead from the rest of
+//! the crate's perspective — Codex review HIGH (round 5). The
+//! `#![allow(dead_code, unused_imports)]` below silences that noise
+//! without weakening the production-callability gate; it comes off
+//! the moment Phase 2/5 wires `PldaTransform` into the clusterer.
+
+#![allow(dead_code, unused_imports)]
 
 mod error;
 mod loader;

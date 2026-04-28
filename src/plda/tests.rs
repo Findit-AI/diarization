@@ -180,14 +180,50 @@ fn raw_embedding_accepts_normal_magnitude_input() {
   let _ok = RawEmbedding::from_raw_array(arr).expect("normal-magnitude input must pass");
 }
 
-// NOTE on `Error::DegenerateInput` from `xvec_transform`'s inner
-// guard: even after the boundary check above, the inner check stays
-// as defense-in-depth (e.g. against a malformed LDA matrix that
-// produces a near-zero stage-2 intermediate). It can no longer fire
-// on the centered raw input though, because `from_raw_array` rejects
-// the only inputs that could trigger it. The helper-level test for
-// that path lives in `transform.rs` (see
-// `tests::checked_l2_normalize_rejects_near_zero`).
+// ── Centered-norm degeneracy: collapse-to-mean attack (Codex review MEDIUM round 5) ─
+//
+// The from_raw_array boundary catches all-zero / near-zero inputs.
+// A more sophisticated attack — input == mean1.astype(f32) —
+// passes that gate (the input has the same norm as mean1 itself,
+// well above any reasonable epsilon). Inside xvec_transform the
+// centering step `x = (input as f64) - mean1` then produces a vector
+// whose norm is exactly the f32-roundtrip noise of mean1
+// (~3.5e-8 for the committed weights). The previous shared-epsilon
+// (NORM_EPSILON = 1e-12) guard was 4 orders of magnitude below that
+// noise floor, so the attack would have produced a finite
+// `sqrt(128)`-normed PLDA stage-1 output that VBx treats as a
+// legitimate speaker. The xvec_centered_min_norm threshold
+// (computed at construction = 1000x mean1's f32-roundtrip noise)
+// rejects this class.
+
+/// Regression for the collapse-to-mean attack. Input is
+/// `mean1.astype(f32)` — the exact value an attacker would feed to
+/// produce a centered f64 vector of pure quantization noise.
+#[test]
+fn xvec_transform_rejects_input_equal_to_mean1_as_f32() {
+  use super::loader::load_xvec;
+
+  let plda = PldaTransform::new().expect("load PLDA");
+
+  // Round mean1 to f32 (the exact value an attacker would feed).
+  let mean1 = load_xvec().mean1;
+  let mut arr = [0.0f32; EMBEDDING_DIMENSION];
+  for (slot, value) in arr.iter_mut().zip(mean1.iter()) {
+    *slot = *value as f32;
+  }
+
+  // The boundary check accepts this — it has roughly mean1's norm
+  // (~1.42), nowhere near zero.
+  let raw = RawEmbedding::from_raw_array(arr).expect("input has nontrivial raw norm");
+
+  // The centered-norm guard must reject inside xvec_transform. The
+  // centered f64 vector here is pure quantization noise of mean1.
+  let result = plda.xvec_transform(&raw);
+  assert!(
+    matches!(result, Err(Error::DegenerateInput)),
+    "mean1.astype(f32) must be rejected as collapse-to-mean attack, got {result:?}"
+  );
+}
 
 // ── PostXvecEmbedding boundary (Codex review HIGH stage 2) ─────────
 //
