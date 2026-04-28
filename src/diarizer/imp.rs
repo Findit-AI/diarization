@@ -368,10 +368,7 @@ impl Diarizer {
       return Err(Error::Finished);
     }
     let result = self.process_samples_inner(seg_model, embed_model, samples, &mut emit);
-    if result.is_err()
-      && self.pending_seg_inference.is_none()
-      && self.pending_embed.is_none()
-    {
+    if result.is_err() && self.pending_seg_inference.is_none() && self.pending_embed.is_none() {
       // No retryable stash of either kind → not recoverable → poison
       // so the caller can't continue past partial-state corruption.
       // Codex review HIGH.
@@ -456,10 +453,7 @@ impl Diarizer {
     // leaves `finished` still false. Codex review HIGH.
     self.finishing = true;
     let result = self.finish_stream_inner(seg_model, embed_model, &mut emit);
-    if result.is_err()
-      && self.pending_seg_inference.is_none()
-      && self.pending_embed.is_none()
-    {
+    if result.is_err() && self.pending_seg_inference.is_none() && self.pending_embed.is_none() {
       self.poisoned = true;
     }
     if result.is_ok() {

@@ -14,10 +14,10 @@ use thiserror::Error;
 /// drift such that `W` loses rank, this fires.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// The within-class covariance matrix `W = inv(tr.T @ tr)` is not
-    /// symmetric positive-definite. Either the embedded `tr.bin` is
-    /// corrupted, or pyannote's PLDA weights have changed in a way
-    /// that breaks the generalized-eigh preconditions.
-    #[error("PLDA: W matrix not positive-definite (corrupted weights or upstream drift)")]
-    WNotPositiveDefinite,
+  /// The within-class covariance matrix `W = inv(tr.T @ tr)` is not
+  /// symmetric positive-definite. Either the embedded `tr.bin` is
+  /// corrupted, or pyannote's PLDA weights have changed in a way
+  /// that breaks the generalized-eigh preconditions.
+  #[error("PLDA: W matrix not positive-definite (corrupted weights or upstream drift)")]
+  WNotPositiveDefinite,
 }
