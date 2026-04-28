@@ -1,0 +1,14 @@
+{
+  "pyannote_audio_version": "4.0.4",
+  "numpy_version": "2.4.4",
+  "clip_path": "/Users/user/Develop/findit-studio/dia/tests/parity/fixtures/01_dialogue/clip_16k.wav",
+  "clip_sha256": "68bcbdba5a6a857649ca8dcea86e286073f75359135a69755404103c2a697658",
+  "artifacts": {
+    "raw_embeddings.npz": "dd02e7d8ecc0c09c72090ce574d9bf6491a5d748b131968ceec0d1c9cea5aea9",
+    "plda_embeddings.npz": "c5ec8dd2cb04ad595b4b20c98150334e5dd898c16219cc206ff69c1bfb867dc4",
+    "ahc_init_labels.npy": "356c7d8d6ec34458a0167d566a8a9b28ffd1f02034694cad2a124bde1860ae2b",
+    "vbx_state.npz": "8db9c06943f46503938a58ac9e1343b04037d6d3a2e9e47a1f3cc55fa71a6c56",
+    "clustering.npz": "9aa9c4970d1209ba5c1dddc987ce3b858131c42669de75ceb02b81b49ca29e7b",
+    "reference.rttm": "dd5d91ac56397e32ee99cdc0eb6a1dd76d0ad966d883ade296d8d16303ead667"
+  }
+}
