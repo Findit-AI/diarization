@@ -445,11 +445,27 @@ impl Diarizer {
     // with no way to retry. Now the stash retains it across drain()
     // calls; on retry success the stash clears and push_inference
     // commits. Codex review HIGH.
+    //
+    // Two retryable failure modes share the stash (Codex review HIGH):
+    //   1. `seg_model.infer` returns Err  → transient backend failure.
+    //   2. `seg_model.infer` returns Ok(scores) but the scores contain
+    //      NaN / +inf / -inf → `push_inference` returns
+    //      `segment::Error::NonFiniteScores` and intentionally LEAVES
+    //      `id` in `Segmenter::pending` so the caller can retry.
+    // In both cases we must re-stash `(id, samples)` so the next
+    // `process_samples` / `finish_stream` retries the inference, and
+    // we must propagate Err WITHOUT poisoning (the parent decides:
+    // when stash is `Some`, no poison).
     if let Some((id, samples)) = self.pending_seg_inference.take() {
       match seg_model.infer(&samples) {
-        Ok(scores) => {
-          self.segmenter.push_inference(id, &scores)?;
-        }
+        Ok(scores) => match self.segmenter.push_inference(id, &scores) {
+          Ok(()) => {}
+          Err(e @ crate::segment::Error::NonFiniteScores { .. }) => {
+            self.pending_seg_inference = Some((id, samples));
+            return Err(e.into());
+          }
+          Err(e) => return Err(e.into()),
+        },
         Err(e) => {
           self.pending_seg_inference = Some((id, samples));
           return Err(e.into());
@@ -462,10 +478,19 @@ impl Diarizer {
         Action::NeedsInference { id, samples } => {
           // Stash before the call so a transient ort error doesn't
           // lose the in-flight window. Codex review HIGH.
+          //
+          // Same two-retryable-paths handling as the stash retry
+          // above: NonFiniteScores from push_inference must restore
+          // the stash, not poison.
           match seg_model.infer(&samples) {
-            Ok(scores) => {
-              self.segmenter.push_inference(id, &scores)?;
-            }
+            Ok(scores) => match self.segmenter.push_inference(id, &scores) {
+              Ok(()) => {}
+              Err(e @ crate::segment::Error::NonFiniteScores { .. }) => {
+                self.pending_seg_inference = Some((id, samples));
+                return Err(e.into());
+              }
+              Err(e) => return Err(e.into()),
+            },
             Err(e) => {
               self.pending_seg_inference = Some((id, samples));
               return Err(e.into());

@@ -207,4 +207,52 @@ mod tests {
     let n = validate_offline_input(&[unit(0), unit(1)], Some(2)).unwrap();
     assert_eq!(n, 2);
   }
+
+  /// Codex review MEDIUM: documents that `similarity_threshold` is
+  /// IGNORED by `OfflineMethod::Spectral` for `N >= 3`. Two extreme
+  /// thresholds must produce the same outcome (Ok labels OR Err);
+  /// any drift would mean the docs lie. If a future revision wires
+  /// the threshold into spectral (affinity pruning, K selection),
+  /// this test should be updated rather than deleted.
+  #[test]
+  fn spectral_ignores_similarity_threshold_for_n_ge_3() {
+    // Build 5 inputs with non-trivial affinity (mixing two basis
+    // vectors per embedding) so spectral has a connected graph and
+    // produces Ok labels. Pure orthogonal unit vectors would trip
+    // the AllDissimilar guard for both runs and silently make this
+    // test trivially pass.
+    fn mix(a: usize, b: usize, w: f32) -> Embedding {
+      let mut v = [0.0f32; EMBEDDING_DIM];
+      v[a] = w;
+      v[b] = (1.0 - w * w).sqrt();
+      Embedding::normalize_from(v).unwrap()
+    }
+    let inputs = vec![
+      mix(0, 1, 0.95),
+      mix(0, 1, 0.93),
+      mix(2, 3, 0.95),
+      mix(2, 3, 0.91),
+      mix(0, 2, 0.6),
+    ];
+
+    let opts_strict = OfflineClusterOptions::default()
+      .with_method(OfflineMethod::Spectral)
+      .with_similarity_threshold(0.99)
+      .with_seed(42);
+    let opts_loose = OfflineClusterOptions::default()
+      .with_method(OfflineMethod::Spectral)
+      .with_similarity_threshold(0.01)
+      .with_seed(42);
+
+    let labels_strict = cluster_offline(&inputs, &opts_strict).expect("strict ok");
+    let labels_loose = cluster_offline(&inputs, &opts_loose).expect("loose ok");
+
+    assert_eq!(
+      labels_strict, labels_loose,
+      "OfflineMethod::Spectral must produce identical labels regardless of \
+       similarity_threshold for N >= 3 — the threshold is currently a no-op \
+       for this method (see OfflineMethod docs). If this assertion fails, \
+       the threshold has been wired into spectral and the docs need updating."
+    );
+  }
 }
