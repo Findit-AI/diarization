@@ -1159,10 +1159,17 @@ impl ReconstructState {
   ///
   /// Called from [`Diarizer::finish_stream`](crate::diarizer::Diarizer::finish_stream).
   /// All emissions go through `emit`.
+  ///
+  /// `max_speakers` MUST be the same per-frame cap that the steady-state
+  /// drain passes to [`emit_finalized_frames`](Self::emit_finalized_frames)
+  /// — i.e. `cluster_options().max_speakers().unwrap_or(u32::MAX)` —
+  /// otherwise the final tail of the stream gets reconstructed under
+  /// different cap semantics than the rest. Pass `u32::MAX` to disable
+  /// the cap. Codex review MEDIUM.
   #[allow(dead_code)] // wired into pump in Task 43
-  pub(crate) fn flush_open_runs<F: FnMut(DiarizedSpan)>(&mut self, mut emit: F) {
+  pub(crate) fn flush_open_runs<F: FnMut(DiarizedSpan)>(&mut self, max_speakers: u32, mut emit: F) {
     self.finalization_boundary = u64::MAX;
-    self.emit_finalized_frames(u32::MAX, &mut emit);
+    self.emit_finalized_frames(max_speakers, &mut emit);
 
     // After draining frames, close any still-open runs. These are runs
     // whose `last_active_frame` is the last frame ever observed; the
@@ -1386,11 +1393,83 @@ mod flush_eviction_tests {
     s.integrate_window(id, 0, &probs, 0.5);
 
     let mut emitted = Vec::new();
-    s.flush_open_runs(|span| emitted.push(span));
+    s.flush_open_runs(u32::MAX, |span| emitted.push(span));
 
     assert!(
       emitted.iter().any(|sp| sp.speaker_id() == 7),
       "expected cluster 7 to be flushed; got {emitted:?}"
+    );
+  }
+
+  /// Codex review MEDIUM regression: `flush_open_runs` must respect the
+  /// configured per-frame speaker cap. When two clusters are active in
+  /// the final window, a cap of 1 must let only the higher-activation
+  /// cluster make it into the active set — exactly what
+  /// `emit_finalized_frames` does on the steady-state drain path. With
+  /// the previous hardcoded `u32::MAX`, both spans would have been
+  /// emitted, violating the cap on the tail of the stream.
+  #[test]
+  fn flush_open_runs_respects_max_speakers_cap() {
+    let mut state_capped = ReconstructState::new();
+    let mut state_uncapped = ReconstructState::new();
+    let id = make_window_id(0, 0);
+    let warm_left = SPEAKER_COUNT_WARM_UP_FRAMES_LEFT as usize;
+    let warm_right = SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT as usize;
+
+    // Two slots active across the entire warm-up-trimmed region. Slot 1
+    // gets a higher probability so its top-K rank is unambiguous.
+    let mut probs = [[0.0f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize];
+    let active = warm_left..(FRAMES_PER_WINDOW - warm_right);
+    for cell in probs[0][active.clone()].iter_mut() {
+      *cell = 0.6;
+    }
+    for cell in probs[1][active].iter_mut() {
+      *cell = 0.95;
+    }
+
+    for s in [&mut state_capped, &mut state_uncapped] {
+      push_activity(
+        s,
+        id,
+        0,
+        warm_left as u32,
+        (FRAMES_PER_WINDOW - warm_right) as u32,
+        7, // lower-activation cluster
+        true,
+      );
+      push_activity(
+        s,
+        id,
+        1,
+        warm_left as u32,
+        (FRAMES_PER_WINDOW - warm_right) as u32,
+        9, // higher-activation cluster
+        true,
+      );
+      s.integrate_window(id, 0, &probs, 0.5);
+    }
+
+    let mut emitted_capped = Vec::new();
+    state_capped.flush_open_runs(1, |span| emitted_capped.push(span));
+
+    let mut emitted_uncapped = Vec::new();
+    state_uncapped.flush_open_runs(u32::MAX, |span| emitted_uncapped.push(span));
+
+    let speakers_capped: Vec<u64> = emitted_capped.iter().map(|sp| sp.speaker_id()).collect();
+    let speakers_uncapped: Vec<u64> = emitted_uncapped.iter().map(|sp| sp.speaker_id()).collect();
+
+    assert_eq!(
+      speakers_capped.len(),
+      1,
+      "cap=1 must emit exactly one speaker on the tail; got {speakers_capped:?}"
+    );
+    assert_eq!(
+      speakers_capped[0], 9,
+      "cap=1 must keep the higher-activation cluster (9), not 7; got {speakers_capped:?}"
+    );
+    assert!(
+      speakers_uncapped.contains(&7) && speakers_uncapped.contains(&9),
+      "uncapped flush must emit both clusters; got {speakers_uncapped:?}"
     );
   }
 

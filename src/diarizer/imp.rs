@@ -273,6 +273,15 @@ impl Diarizer {
   /// segmentation-inference path (stashed in
   /// [`pending_seg_inference`](Self::pending_seg_inference)) does NOT
   /// poison: callers can address the transient condition and retry.
+  ///
+  /// **Retry contract** (Codex review HIGH): if a previous call left a
+  /// stashed segmentation inference (`Err` from `SegmentModel::infer`),
+  /// the next `process_samples` call retries the stash BEFORE accepting
+  /// any new audio. On a second retry failure, the new `samples` are
+  /// NOT pushed — the caller can therefore safely re-pass the same
+  /// chunk without double-counting it. Without this gate, a naïve
+  /// retry would have appended the same chunk twice (shifting all
+  /// downstream timestamps) before the stash was replayed.
   pub fn process_samples<F>(
     &mut self,
     seg_model: &mut SegmentModel,
@@ -312,6 +321,24 @@ impl Diarizer {
   where
     F: FnMut(DiarizedSpan),
   {
+    // Transactional retry boundary (Codex review HIGH): if a previous
+    // `process_samples` left a stashed segmentation inference, drain
+    // MUST clear the stash before we accept any new audio.
+    //
+    // Without this, a caller who naively retries the same chunk would
+    // double-append it: `push_audio(chunk)` runs, segmentation fails,
+    // the caller calls `process_samples(chunk)` again, and the second
+    // call appends the same chunk a SECOND time before drain replays
+    // the stash — shifting timestamps and producing duplicate windows.
+    //
+    // After this gate returns Ok, `pending_seg_inference` is None
+    // (drain only returns Ok when the stash retry succeeded, since the
+    // retry is the first thing it does and propagates errors with `?`).
+    // If the stash retry fails again, we propagate the error WITHOUT
+    // pushing the new samples; the caller can retry safely.
+    if self.pending_seg_inference.is_some() {
+      self.drain(seg_model, embed_model, emit)?;
+    }
     self.push_audio(samples);
     self.drain(seg_model, embed_model, emit)?;
     self.trim_audio();
@@ -369,8 +396,16 @@ impl Diarizer {
     self.drain(seg_model, embed_model, emit)?;
     // segment is finished → peek_next_window_start = u64::MAX → all
     // remaining frames finalize. flush_open_runs sets the boundary
-    // explicitly and drains, plus closes any final open runs.
-    self.reconstruct.flush_open_runs(emit);
+    // explicitly and drains, plus closes any final open runs. Pass the
+    // SAME per-frame speaker cap the steady-state drain uses, so the
+    // final tail respects `cluster_options().max_speakers()` instead of
+    // bypassing it. Codex review MEDIUM.
+    let max_spk = self
+      .opts
+      .cluster_options()
+      .max_speakers()
+      .unwrap_or(u32::MAX);
+    self.reconstruct.flush_open_runs(max_spk, emit);
     self.trim_audio();
     Ok(())
   }

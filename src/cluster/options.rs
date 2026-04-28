@@ -2,11 +2,20 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Cosine-similarity threshold below which a new embedding is assigned to the
-/// closest existing speaker and above which a new speaker slot is opened.
+/// Cosine-similarity threshold an incoming embedding must meet (or exceed)
+/// against the best existing centroid to be assigned to that speaker;
+/// embeddings whose best similarity falls *below* the threshold open a
+/// new speaker slot (subject to `max_speakers` / `overflow_strategy`).
 ///
-/// Range: `[0.0, 1.0]`. Values closer to 1.0 are more conservative
-/// (fewer new speakers); values closer to 0.0 are more permissive.
+/// Range: `[0.0, 1.0]`. Higher thresholds are stricter — fewer
+/// embeddings clear the bar to be merged with an existing centroid, so
+/// MORE new speakers get opened (and the clusterer fragments more).
+/// Lower thresholds are more lenient — most embeddings merge with the
+/// nearest existing centroid, so FEWER new speakers get opened (and
+/// distinct speakers may collapse together).
+///
+/// The implementation in [`crate::cluster::Clusterer::submit`] uses
+/// `best_sim >= threshold ⇒ assign to existing`, otherwise open new.
 pub const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Default α for the Exponential Moving Average centroid update rule.
