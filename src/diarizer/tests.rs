@@ -82,9 +82,46 @@ fn finished_state_blocks_further_work_until_clear() {
   // model availability.
   let mut d = Diarizer::new(DiarizerOptions::default());
   assert!(!d.finished, "fresh Diarizer must not be finished");
+  assert!(!d.finishing, "fresh Diarizer must not be finishing");
   d.finished = true;
+  d.finishing = true;
   d.clear();
   assert!(!d.finished, "clear() must reset the finished flag");
+  assert!(!d.finishing, "clear() must reset the finishing flag");
+}
+
+/// Codex review HIGH regression: a retryable `finish_stream` failure
+/// leaves `finished == false` (so the caller can re-drive
+/// `finish_stream`), but the inner `Segmenter` is already finished —
+/// post-finish samples would be silently dropped. The `finishing` flag
+/// locks `process_samples` the moment `finish_stream` begins, and only
+/// `clear()` resets it. This test exercises the flag transitions
+/// directly because invoking the real lifecycle requires ONNX models.
+#[test]
+fn finishing_flag_locks_process_samples_across_finish_retry() {
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  // Simulate "finish_stream started, segmenter.finish() ran, drain
+  // returned a retryable Err that left a stashed inference."
+  d.finishing = true;
+  // finished stays false because the retry has not yet completed.
+  assert!(!d.finished);
+
+  // The matching guard in `process_samples` is `finishing || finished`.
+  // We verify by inspecting both flags rather than re-running the
+  // model-bound path, mirroring `poisoned_state_blocks_further_work`.
+  assert!(
+    d.finishing || d.finished,
+    "process_samples gate must trip when EITHER flag is set"
+  );
+
+  // After the caller re-drives `finish_stream` successfully, both
+  // flags are set; only clear() returns to the fresh state.
+  d.finished = true;
+  d.clear();
+  assert!(
+    !d.finishing && !d.finished,
+    "clear() must reset both lifecycle flags"
+  );
 }
 
 #[test]

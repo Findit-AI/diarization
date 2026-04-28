@@ -69,6 +69,29 @@ pub struct Diarizer {
   ///
   /// [`Segmenter`]: crate::segment::Segmenter
   pub(crate) finished: bool,
+  /// Set as soon as [`finish_stream`](Self::finish_stream) starts (i.e.
+  /// before [`Segmenter::finish`] is called). Stays `true` if
+  /// `finish_stream` returns a retryable error (stashed segmentation
+  /// inference). Cleared only by [`clear`](Self::clear) and by a clean
+  /// `finish_stream` (which also sets `finished = true`).
+  ///
+  /// Without this flag, the following sequence corrupts state
+  /// (Codex review HIGH):
+  ///   1. `finish_stream` calls `segmenter.finish()`.
+  ///   2. `drain` returns `Err` with stashed `pending_seg_inference`;
+  ///      `finished` stays `false`.
+  ///   3. Caller, seeing a "transient" error, calls `process_samples`
+  ///      with new audio. The `finished == false` gate lets it through.
+  ///   4. `push_audio` grows `audio_buffer` and bumps
+  ///      `total_samples_pushed`, but `Segmenter::push_samples` silently
+  ///      drops post-finish samples — the public counter advances while
+  ///      segmentation does not.
+  ///
+  /// `process_samples` checks `finishing OR finished` to lock the audio
+  /// buffer the moment the stream begins finishing. `finish_stream`
+  /// itself only checks `finished` so a retryable failure path can be
+  /// re-driven.
+  pub(crate) finishing: bool,
 }
 
 impl Diarizer {
@@ -88,6 +111,7 @@ impl Diarizer {
       pending_seg_inference: None,
       poisoned: false,
       finished: false,
+      finishing: false,
     }
   }
 
@@ -130,6 +154,7 @@ impl Diarizer {
     self.pending_seg_inference = None;
     self.poisoned = false;
     self.finished = false;
+    self.finishing = false;
   }
 
   /// Borrow the per-activity context collected during streaming.
@@ -295,11 +320,16 @@ impl Diarizer {
     if self.poisoned {
       return Err(Error::Poisoned);
     }
-    if self.finished {
-      // Audio buffer is locked after finish_stream. Without this gate,
-      // push_audio would still append samples and increment
-      // total_samples_pushed but the inner Segmenter silently drops
-      // them — counter advances, segmentation does not.
+    if self.finishing || self.finished {
+      // Audio buffer is locked the moment finish_stream begins (sets
+      // `finishing`). Without this gate, push_audio would still append
+      // samples and increment total_samples_pushed but the inner
+      // Segmenter silently drops them — counter advances, segmentation
+      // does not. Covers both:
+      //   • clean finish (`finished` true) — terminal state until clear()
+      //   • retryable finish failure (`finishing` true, `finished` false)
+      //     — segmenter is already finished but `flush_open_runs` hasn't
+      //     run yet; new audio must wait until clear().
       return Err(Error::Finished);
     }
     let result = self.process_samples_inner(seg_model, embed_model, samples, &mut emit);
@@ -367,8 +397,20 @@ impl Diarizer {
       // Already finished — flushing twice would re-emit `flush_open_runs`
       // against an empty state and is meaningless. Make it loud so the
       // caller catches lifecycle bugs instead of getting a silent no-op.
+      //
+      // NOTE: only `finished` (not `finishing`) gates `finish_stream`.
+      // A retryable failure leaves `finishing = true, finished = false`,
+      // and the caller must be able to re-drive `finish_stream` to
+      // replay the stashed inference and run `flush_open_runs`. Codex
+      // review HIGH.
       return Err(Error::Finished);
     }
+    // Latch `finishing` BEFORE the inner work touches the segmenter.
+    // Once `Segmenter::finish` runs, post-finish samples are silently
+    // dropped; setting `finishing` here ensures `process_samples` is
+    // refused even if the inner call returns a retryable error and
+    // leaves `finished` still false. Codex review HIGH.
+    self.finishing = true;
     let result = self.finish_stream_inner(seg_model, embed_model, &mut emit);
     if result.is_err() && self.pending_seg_inference.is_none() {
       self.poisoned = true;
@@ -377,7 +419,8 @@ impl Diarizer {
       // Latch the terminal state only on a clean finish. On error we
       // either poisoned (handled above) or stashed a retryable
       // inference; in the latter case the caller must be allowed to
-      // call finish_stream again.
+      // call finish_stream again. `finishing` stays true across that
+      // retry — only `clear()` resets it.
       self.finished = true;
     }
     result

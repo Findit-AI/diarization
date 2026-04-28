@@ -2,6 +2,23 @@
 
 use crate::{cluster::ClusterOptions, segment::SegmentOptions};
 
+/// Range check for [`DiarizerOptions::binarize_threshold`] setters.
+/// Centralized so the builder, the consuming `with_*`, and the
+/// in-place `set_*` validate identically. Codex review MEDIUM.
+///
+/// `raw_probs > binarize_threshold` is the binarization check; with
+/// NaN every comparison is false (silent span loss) and with values
+/// outside `[0.0, 1.0]` either every comparison is false (>1) or
+/// every comparison is true (<0), turning a misconfiguration into
+/// silent reconstruction errors instead of a loud validation panic.
+#[inline]
+fn validate_binarize_threshold(t: f32) {
+  assert!(
+    t.is_finite() && (0.0..=1.0).contains(&t),
+    "binarize_threshold must be finite in [0.0, 1.0]; got {t}"
+  );
+}
+
 /// Configuration for [`crate::diarizer::Diarizer`].
 ///
 /// All fields have sensible defaults. The two embedded option types
@@ -94,7 +111,11 @@ impl DiarizerOptions {
   }
 
   /// Set the onset threshold for binarizing per-frame raw probabilities.
+  ///
+  /// # Panics
+  /// Panics if `t` is NaN/±inf or outside `[0.0, 1.0]`. Codex review MEDIUM.
   pub fn with_binarize_threshold(mut self, t: f32) -> Self {
+    validate_binarize_threshold(t);
     self.binarize_threshold = t;
     self
   }
@@ -126,7 +147,11 @@ impl DiarizerOptions {
   }
 
   /// Set the onset threshold in place.
+  ///
+  /// # Panics
+  /// Panics if `t` is NaN/±inf or outside `[0.0, 1.0]`. Codex review MEDIUM.
   pub fn set_binarize_threshold(&mut self, t: f32) -> &mut Self {
+    validate_binarize_threshold(t);
     self.binarize_threshold = t;
     self
   }
@@ -178,7 +203,11 @@ impl DiarizerBuilder {
   }
 
   /// Set the onset threshold for binarizing per-frame raw probabilities.
+  ///
+  /// # Panics
+  /// Panics if `t` is NaN/±inf or outside `[0.0, 1.0]`. Codex review MEDIUM.
   pub fn with_binarize_threshold(mut self, t: f32) -> Self {
+    validate_binarize_threshold(t);
     self.opts.binarize_threshold = t;
     self
   }
@@ -225,5 +254,66 @@ mod tests {
     o.set_binarize_threshold(0.4).set_collect_embeddings(false);
     assert!((o.binarize_threshold() - 0.4).abs() < 1e-7);
     assert!(!o.collect_embeddings());
+  }
+
+  // Codex review MEDIUM: binarize_threshold setters reject NaN / ±inf
+  // / out-of-range values so a caller cannot install a configuration
+  // that silently breaks `raw_probs > binarize_threshold` in §5.8 /
+  // §5.10 (NaN compares false everywhere — empty masks, zero-speaker
+  // counts; >1.0 same effect; <0.0 every probability "active").
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_nan_panics() {
+    let _ = DiarizerOptions::default().with_binarize_threshold(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_pos_inf_panics() {
+    let _ = DiarizerOptions::default().with_binarize_threshold(f32::INFINITY);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_neg_inf_panics() {
+    let _ = DiarizerOptions::default().with_binarize_threshold(f32::NEG_INFINITY);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_below_zero_panics() {
+    let _ = DiarizerOptions::default().with_binarize_threshold(-0.01);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_above_one_panics() {
+    let _ = DiarizerOptions::default().with_binarize_threshold(1.01);
+  }
+
+  /// Boundary values are accepted: 0.0 means "every positive prob is
+  /// active" (degenerate but defined); 1.0 means "nothing is active
+  /// unless prob > 1.0" (also degenerate but defined). Both are valid
+  /// configurations even if rarely useful.
+  #[test]
+  fn binarize_threshold_boundaries_ok() {
+    let o0 = DiarizerOptions::default().with_binarize_threshold(0.0);
+    assert!((o0.binarize_threshold() - 0.0).abs() < 1e-7);
+    let o1 = DiarizerOptions::default().with_binarize_threshold(1.0);
+    assert!((o1.binarize_threshold() - 1.0).abs() < 1e-7);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_set_in_place_validates() {
+    let mut o = DiarizerOptions::default();
+    o.set_binarize_threshold(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "binarize_threshold must be finite in [0.0, 1.0]")]
+  fn binarize_threshold_via_builder_validates() {
+    let _ = DiarizerBuilder::new().with_binarize_threshold(f32::NAN);
   }
 }
