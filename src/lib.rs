@@ -60,4 +60,5 @@
 pub mod cluster;
 pub mod diarizer;
 pub mod embed;
+pub mod plda;
 pub mod segment;

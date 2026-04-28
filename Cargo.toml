@@ -32,11 +32,16 @@ nalgebra = "0.34"
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
 
+
 [dev-dependencies]
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
 tempfile = "3"
+# `dia::plda` parity tests load Phase-0 captured `.npz` artifacts.
+# Production code embeds the PLDA weights via `include_bytes!` and
+# does not depend on npyz.
+npyz = { version = "0.9", features = ["npz"] }
 
 [[bench]]
 path = "benches/segment.rs"
