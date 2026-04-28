@@ -77,7 +77,7 @@ clustering pass:
 |----------|-------------|-------|
 | `train_embeddings`, `train_chunk_idx`, `train_speaker_idx` | 584 | post-`filter_embeddings` (drops low-quality slots) |
 | `ahc_clusters` | 602 | AHC initialization labels |
-| `post_xvec`, `post_plda` | 608 (we invoke `_xvec_tf` + `_plda_tf` separately) | PLDA stages: 256 → 128 (L2-normed) → 128 (whitened) |
+| `post_xvec`, `post_plda` | 608 (we invoke `_xvec_tf` + `_plda_tf` separately) | PLDA stages: 256 → 128 (`sqrt(D_out)`-scaled L2-normed; D_out=128 → norm≈11.31) → 128 (whitened, not normed) |
 | `qinit` | replicated from `utils/vbx.py:142-144` | smoothed one-hot of AHC init |
 | `q_final`, `sp_final`, `elbo_trajectory` | invoke `VBx(..., return_model=True)` directly so we keep `Li` | final posteriors + ELBO curve per iteration |
 | `soft_clusters` | 651 | input to constrained Hungarian |

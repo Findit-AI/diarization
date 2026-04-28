@@ -557,9 +557,9 @@ print('ahc_init_labels.npy:', np.load(d/'ahc_init_labels.npy').shape)
 
 Expected: every npz has the keys listed above with finite values; ahc_init_labels is a 1-D int array.
 
-- [ ] **Step 4: Sanity-check L2 norms**
+- [ ] **Step 4: Sanity-check `post_xvec` scaling**
 
-`post_xvec` is L2-normalized by `xvec_tf`'s outer `l2_norm` call (`utils/vbx.py:212`); `post_plda` is the whitened space and generally is NOT L2-normed.
+`xvec_tf` (`utils/vbx.py:211-213`) is `sqrt(lda.shape[1]) * l2_norm(...)` — the inner unit vector is scaled by `sqrt(D_out)` where `D_out = 128` (LDA output dim). So `post_xvec` rows have norm `sqrt(128) ≈ 11.31`, not 1.0. `post_plda` is whitened and generally has larger, non-unit norms.
 
 ```bash
 uv run python -c "
@@ -567,9 +567,9 @@ import numpy as np
 d = np.load('../fixtures/01_dialogue/plda_embeddings.npz')
 post_xvec = d['post_xvec']
 norms = np.linalg.norm(post_xvec, axis=1)
-print('post_xvec L2 norms — mean:', norms.mean(), 'max-dev-from-1:', max(abs(norms-1)))
-assert max(abs(norms - 1.0)) < 1e-3, 'post_xvec not L2-normed'
-print('OK')
+expected = np.sqrt(post_xvec.shape[1])
+assert max(abs(norms - expected)) < 1e-3, f'expected norm {expected}, got {norms.mean()}'
+print(f'post_xvec norms ≈ sqrt({post_xvec.shape[1]}) = {expected:.4f} ✓')
 "
 ```
 
