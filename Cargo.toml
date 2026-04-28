@@ -3,7 +3,13 @@ name = "dia"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MIT OR Apache-2.0"
+# `dia` source is MIT OR Apache-2.0 (caller's choice).
+# `models/plda/*.bin` are embedded into the compiled artifact via
+# `include_bytes!` (see `src/plda/loader.rs`); those weights are
+# CC-BY-4.0 with attribution required (see `NOTICE` and
+# `models/plda/SOURCE.md`). Downstream redistributors of any binary
+# linking `dia` MUST reproduce the CC-BY-4.0 attribution.
+license = "(MIT OR Apache-2.0) AND CC-BY-4.0"
 repository = "https://github.com/al8n/dia"
 homepage = "https://github.com/al8n/dia"
 documentation = "https://docs.rs/dia"
@@ -13,6 +19,18 @@ readme = "README.md"
 [features]
 default = ["ort"]
 ort = ["dep:ort"]
+# An earlier revision exposed `dia::plda::RawEmbedding::from_raw_array`
+# and `dia::plda::PostXvecEmbedding::from_pyannote_capture` behind a
+# public `plda-fixtures` feature, intending it to act as the gate that
+# kept distribution-invariant constructors out of production code.
+# Cargo features are unified across the dep graph though, so any crate
+# in the build (including parity tooling and offline scripts) enabling
+# `plda-fixtures` would have re-exposed those constructors for the
+# entire compile, collapsing the type-level guard. Codex review
+# MEDIUM. The constructors are now `#[cfg(test)] pub(crate)` and the
+# parity test lives inside the crate as a `#[cfg(test)]` module so it
+# can still construct via the internal API. Production integration
+# (Phase 5+) will own a single typed entry from `EmbedModel`.
 # `std` is now unconditional. The crate uses std/alloc throughout
 # (`Vec`, `HashMap`, `kaldi-native-fbank` C bindings, `nalgebra`'s
 # default `std` feature, etc.); the previous `#![no_std]` toggle was
@@ -32,11 +50,16 @@ nalgebra = "0.34"
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
 
+
 [dev-dependencies]
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
 tempfile = "3"
+# `dia::plda` parity tests load Phase-0 captured `.npz` artifacts.
+# Production code embeds the PLDA weights via `include_bytes!` and
+# does not depend on npyz.
+npyz = { version = "0.9", features = ["npz"] }
 
 [[bench]]
 path = "benches/segment.rs"

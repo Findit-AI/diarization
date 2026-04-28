@@ -60,4 +60,13 @@
 pub mod cluster;
 pub mod diarizer;
 pub mod embed;
+// `plda` is intentionally crate-private in v0.1.0. Phase 1 ships
+// the math (xvec_tf + plda_tf, parity-validated against pyannote)
+// but `RawEmbedding`'s only constructor is `#[cfg(test)]` because
+// any public constructor would have to admit arbitrary `[f32; 256]`
+// — and admitting an L2-normalized vector there silently corrupts
+// downstream VBx (Codex review HIGH, rounds 2–5). The Phase-5
+// integration will own a single typed entry from `EmbedModel`'s
+// raw-output path; that's when `plda` flips back to `pub`.
+pub(crate) mod plda;
 pub mod segment;

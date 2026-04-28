@@ -1,0 +1,38 @@
+dia
+Copyright the dia authors
+
+This product is dual-licensed under MIT OR Apache-2.0 (caller's choice).
+See LICENSE-MIT and LICENSE-APACHE for those terms.
+
+────────────────────────────────────────────────────────────────────────
+
+This product also incorporates third-party data redistributed under the
+Creative Commons Attribution 4.0 International Public License (CC-BY-4.0).
+The CC-BY-4.0 attribution requirement applies to any binary or other
+distribution that links the `dia` crate; downstream redistributors MUST
+reproduce this attribution.
+
+PLDA (Probabilistic Linear Discriminant Analysis) weights for speaker
+diarization, embedded in the dia binary via `include_bytes!`:
+
+  models/plda/xvec_transform.npz   (134 KB; mean1, mean2, lda)
+  models/plda/plda.npz             (134 KB; mu, tr, psi)
+  models/plda/{mean1,mean2,lda,mu,tr,psi}.bin
+                                    (raw f64 extractions of the above,
+                                     compiled into the binary)
+
+Source:
+  HuggingFace pyannote/speaker-diarization-community-1
+  https://huggingface.co/pyannote/speaker-diarization-community-1
+  Snapshot revision: 3533c8cf8e369892e6b79ff1bf80f7b0286a54ee
+
+License: CC-BY-4.0
+  https://creativecommons.org/licenses/by/4.0/
+
+Attribution (per upstream `plda/README.md` in the snapshot):
+  PLDA model trained by BUT Speech@FIT (https://speech.fit.vut.cz/).
+  Integration of VBx in pyannote.audio by Jiangyu Han and Petr Pálka.
+
+For the full provenance — including the original .npz layout, the
+internal array keys, and the refresh procedure — see
+`models/plda/SOURCE.md` in this repository.

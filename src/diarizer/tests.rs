@@ -157,10 +157,7 @@ fn clear_resets_pending_embed() {
     "fresh Diarizer must not have stashed embed"
   );
   d.clear();
-  assert!(
-    d.pending_embed.is_none(),
-    "clear() must drop pending_embed"
-  );
+  assert!(d.pending_embed.is_none(), "clear() must drop pending_embed");
 }
 
 #[test]
