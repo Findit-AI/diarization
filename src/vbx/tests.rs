@@ -40,3 +40,43 @@ fn logsumexp_rows_all_neg_inf_returns_neg_inf() {
   let lse = logsumexp_rows(&m);
   assert!(lse[0].is_infinite() && lse[0] < 0.0, "got {}", lse[0]);
 }
+
+use crate::vbx::{vbx_iterate, Error};
+use nalgebra::DVector;
+
+#[test]
+fn vbx_rejects_phi_with_non_positive_entry() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let mut phi = DVector::<f64>::from_element(4, 1.0);
+  phi[2] = -0.5;
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonPositivePhi(_, 2))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_shape_mismatch_x_vs_qinit() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(6, 2, 0.5); // T=6 ≠ 5
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_shape_mismatch_phi_vs_x() {
+  let x = DMatrix::<f64>::zeros(5, 4);  // D=4
+  let phi = DVector::<f64>::from_element(3, 1.0);  // D=3 ≠ 4
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_qinit_with_zero_clusters() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::zeros(5, 0);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}

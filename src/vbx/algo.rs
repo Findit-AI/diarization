@@ -50,14 +50,180 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
   out
 }
 
-/// Placeholder; filled in Task 3.
+/// Variational Bayes HMM speaker clustering (the VBx EM core).
+///
+/// Mirrors `pyannote.audio.utils.vbx.VBx` (`utils/vbx.py:27-137` in
+/// pyannote.audio 4.0.4). Inputs:
+///
+/// - `x`: `(T, D)` post-PLDA features (output of
+///   `dia::plda::PldaTransform::project()` stacked into a matrix).
+/// - `phi`: `(D,)` eigenvalue diagonal (output of
+///   `dia::plda::PldaTransform::phi()`). Must be strictly positive.
+/// - `qinit`: `(T, S)` initial responsibility matrix. Each row should
+///   sum to 1 (the algorithm doesn't enforce this — pyannote's caller
+///   pre-softmaxes a smoothed one-hot AHC initialization).
+/// - `fa`: sufficient-statistics scale (community-1 uses 0.07).
+/// - `fb`: speaker regularization (community-1 uses 0.8).
+/// - `max_iters`: hard iteration cap. Inner convergence triggers early
+///   exit when `ELBO_i - ELBO_{i-1} < 1e-4`.
+///
+/// Returns final `gamma`, `pi`, and the ELBO trajectory (one entry per
+/// iteration actually run; length ≤ `max_iters`).
+///
+/// # Errors
+///
+/// - [`Error::Shape`] on mismatched dimensions.
+/// - [`Error::NonPositivePhi`] if any `phi[d] <= 0`.
+/// - [`Error::NonFinite`] if a non-finite intermediate appears (the
+///   algorithm has no recovery; treat as a hard failure).
 pub fn vbx_iterate(
-  _x: &nalgebra::DMatrix<f64>,
-  _phi: &nalgebra::DVector<f64>,
-  _qinit: &nalgebra::DMatrix<f64>,
-  _fa: f64,
-  _fb: f64,
-  _max_iters: usize,
+  x: &DMatrix<f64>,
+  phi: &DVector<f64>,
+  qinit: &DMatrix<f64>,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
 ) -> Result<VbxOutput, Error> {
-  Err(Error::Shape("not yet implemented"))
+  let (t, d) = x.shape();
+  if phi.len() != d {
+    return Err(Error::Shape("Phi.len() must equal X.ncols()"));
+  }
+  if qinit.nrows() != t {
+    return Err(Error::Shape("qinit.nrows() must equal X.nrows()"));
+  }
+  let s = qinit.ncols();
+  if s == 0 {
+    return Err(Error::Shape("qinit must have at least one cluster column"));
+  }
+  for (i, p) in phi.iter().enumerate() {
+    if *p <= 0.0 || p.is_nan() {
+      return Err(Error::NonPositivePhi(*p, i));
+    }
+  }
+
+  // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))
+  let log_2pi = (2.0_f64 * std::f64::consts::PI).ln();
+  let mut g = DVector::<f64>::zeros(t);
+  for r in 0..t {
+    let row_sq: f64 = x.row(r).iter().map(|v| v * v).sum();
+    g[r] = -0.5 * (row_sq + d as f64 * log_2pi);
+  }
+  // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d]
+  let v_sqrt: DVector<f64> = phi.map(|p| p.sqrt());
+  let mut rho = x.clone();
+  for r in 0..t {
+    for c in 0..d {
+      rho[(r, c)] *= v_sqrt[c];
+    }
+  }
+
+  let mut gamma = qinit.clone();
+  // pi starts as the uniform 1/S vector (matches pyannote's
+  // `if type(pi) is int: pi = ones(pi)/pi` for the integer-pi path).
+  let mut pi = DVector::<f64>::from_element(s, 1.0 / s as f64);
+
+  let mut elbo_trajectory: Vec<f64> = Vec::with_capacity(max_iters);
+  let epsilon = 1e-4_f64;
+  let eps_log = 1e-8_f64;
+  let fa_over_fb = fa / fb;
+
+  for ii in 0..max_iters {
+    // gamma_sum[s] = column-sum of gamma over T rows (Eq. 17 input).
+    let gamma_sum = DVector::<f64>::from_vec(
+      (0..s).map(|j| gamma.column(j).sum()).collect(),
+    );
+
+    // invL[s,d] = 1 / (1 + Fa/Fb * gamma_sum[s] * Phi[d])  (Eq. 17)
+    let mut inv_l = DMatrix::<f64>::zeros(s, d);
+    for sj in 0..s {
+      for dk in 0..d {
+        let denom = 1.0 + fa_over_fb * gamma_sum[sj] * phi[dk];
+        inv_l[(sj, dk)] = 1.0 / denom;
+      }
+    }
+
+    // alpha[s,d] = Fa/Fb * invL[s,d] * (gamma.T @ rho)[s,d]  (Eq. 16)
+    let prod = gamma.transpose() * &rho; // (S, D)
+    let mut alpha = DMatrix::<f64>::zeros(s, d);
+    for sj in 0..s {
+      for dk in 0..d {
+        alpha[(sj, dk)] = fa_over_fb * inv_l[(sj, dk)] * prod[(sj, dk)];
+      }
+    }
+
+    // log_p_[t,s] = Fa * (rho @ alpha.T - 0.5*(invL+alpha**2)@Phi + G) (Eq. 23)
+    let rho_alpha_t = &rho * alpha.transpose(); // (T, S)
+    // (invL + alpha**2) @ Phi : (S, D) · (D,) → (S,)
+    let mut sa_phi = DVector::<f64>::zeros(s);
+    for sj in 0..s {
+      let mut acc = 0.0;
+      for dk in 0..d {
+        let inv = inv_l[(sj, dk)];
+        let a2 = alpha[(sj, dk)] * alpha[(sj, dk)];
+        acc += (inv + a2) * phi[dk];
+      }
+      sa_phi[sj] = acc;
+    }
+    let mut log_p = DMatrix::<f64>::zeros(t, s);
+    for tt in 0..t {
+      for sj in 0..s {
+        log_p[(tt, sj)] = fa * (rho_alpha_t[(tt, sj)] - 0.5 * sa_phi[sj] + g[tt]);
+      }
+    }
+
+    // log_pi[s] = log(pi[s] + eps_log)
+    let log_pi: DVector<f64> = pi.map(|p| (p + eps_log).ln());
+    // log_p_x[t] = logsumexp_t(log_p[t,:] + log_pi[:])
+    let mut log_p_plus_pi = log_p.clone();
+    for tt in 0..t {
+      for sj in 0..s {
+        log_p_plus_pi[(tt, sj)] += log_pi[sj];
+      }
+    }
+    let log_p_x = logsumexp_rows(&log_p_plus_pi);
+    // gamma[t,s] = exp(log_p_[t,s] + log_pi[s] - log_p_x[t])
+    let mut new_gamma = DMatrix::<f64>::zeros(t, s);
+    for tt in 0..t {
+      for sj in 0..s {
+        new_gamma[(tt, sj)] = (log_p[(tt, sj)] + log_pi[sj] - log_p_x[tt]).exp();
+      }
+    }
+    gamma = new_gamma;
+    // pi = gamma.sum(0); pi /= pi.sum()
+    let mut new_pi = DVector::<f64>::zeros(s);
+    for sj in 0..s {
+      new_pi[sj] = gamma.column(sj).sum();
+    }
+    let pi_sum = new_pi.sum();
+    if !pi_sum.is_finite() || pi_sum <= 0.0 {
+      return Err(Error::NonFinite("pi sum"));
+    }
+    pi = new_pi / pi_sum;
+
+    // ELBO = sum(log_p_x) + Fb * 0.5 * sum_{s,d}(log(invL) - invL - alpha**2 + 1)  (Eq. 25)
+    let log_p_x_total: f64 = log_p_x.iter().sum();
+    let mut bracket = 0.0;
+    for sj in 0..s {
+      for dk in 0..d {
+        let inv = inv_l[(sj, dk)];
+        let a2 = alpha[(sj, dk)] * alpha[(sj, dk)];
+        bracket += inv.ln() - inv - a2 + 1.0;
+      }
+    }
+    let elbo = log_p_x_total + fb * 0.5 * bracket;
+    if !elbo.is_finite() {
+      return Err(Error::NonFinite("ELBO"));
+    }
+    elbo_trajectory.push(elbo);
+
+    if ii > 0 {
+      let prev = elbo_trajectory[elbo_trajectory.len() - 2];
+      if elbo - prev < epsilon {
+        // pyannote prints a warning if ELBO decreased; we just stop.
+        break;
+      }
+    }
+  }
+
+  Ok(VbxOutput { gamma, pi, elbo_trajectory })
 }
