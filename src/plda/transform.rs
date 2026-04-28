@@ -15,6 +15,36 @@ use crate::{
   },
 };
 
+/// Minimum allowed L2 norm for a raw WeSpeaker embedding at the
+/// [`RawEmbedding`] boundary.
+///
+/// Calibrated against the captured Phase-0 distribution: across the
+/// 654 raw WeSpeaker embeddings in
+/// `tests/parity/fixtures/01_dialogue/raw_embeddings.npz` the
+/// observed range is `[0.536, 6.97]` with median 2.07. `0.01` sits
+/// ~50× below the empirical minimum (so a far-out-of-distribution
+/// real input still passes) and ~6 billion× above the canonical
+/// near-zero attack `[1e-13; 256]` (norm `1.6e-12`), so any input
+/// with norm in the `[1e-12, 0.01)` band is rejected.
+///
+/// # Why a data-calibrated floor instead of `NORM_EPSILON`
+///
+/// The earlier check rejected only `‖arr‖ < NORM_EPSILON = 1e-12`.
+/// A degraded embedder returning tiny non-zero values (e.g.
+/// `[1e-13; 256]`, norm 1.6e-12) passed that gate. Then in
+/// `xvec_transform` the centering step `x - mean1 ≈ -mean1`
+/// produces a centered f64 norm of `‖mean1‖ ≈ 1.42`, well above
+/// [`XVEC_CENTERED_MIN_NORM`], so the L2-normalize amplifies a
+/// fixed `-mean1`-direction into a finite `sqrt(128)`-normed PLDA
+/// stage-1 output that VBx treats as a legitimate (constant)
+/// speaker. This produces silent fabricated speaker evidence from
+/// a dead embedder. Codex review HIGH (round 7).
+///
+/// If the embedder model is ever changed, this constant must be
+/// re-validated against fresh captured raw norms — see
+/// `tests/parity/python/capture_intermediates.py`.
+pub(crate) const RAW_EMBEDDING_MIN_NORM: f64 = 0.01;
+
 /// Raw, **unnormalized** WeSpeaker output destined for the PLDA
 /// transform. Wrapping the `[f32; 256]` in a distinct type prevents
 /// the most likely API misuse: feeding
@@ -75,10 +105,13 @@ impl RawEmbedding {
   ///
   /// - [`Error::NonFiniteInput`] if any element is NaN, `+inf`, or
   ///   `-inf`.
-  /// - [`Error::DegenerateInput`] if `‖arr‖ < NORM_EPSILON` — the
-  ///   input is effectively zero and any downstream PLDA output
-  ///   would be fabricated speaker evidence rather than a real
-  ///   embedding signal.
+  /// - [`Error::DegenerateInput`] if `‖arr‖ < RAW_EMBEDDING_MIN_NORM`
+  ///   (`0.01`, calibrated against the captured raw distribution —
+  ///   see [`RAW_EMBEDDING_MIN_NORM`]). Catches all-zero, near-zero
+  ///   (e.g. `[1e-13; 256]`), and other degraded-embedder outputs
+  ///   that an `NORM_EPSILON`-only floor would have passed straight
+  ///   through into `xvec_transform`'s centering step. Codex
+  ///   review HIGH (round 7).
   #[cfg(test)]
   pub(crate) fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
@@ -88,7 +121,7 @@ impl RawEmbedding {
     // The norm is computed in f64 because squaring 256 small f32
     // values can lose precision near the threshold.
     let norm_sq: f64 = arr.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
-    if norm_sq.sqrt() < NORM_EPSILON as f64 {
+    if norm_sq.sqrt() < RAW_EMBEDDING_MIN_NORM {
       return Err(Error::DegenerateInput);
     }
     Ok(Self(arr))
