@@ -25,7 +25,7 @@ pub use offline::cluster_offline;
 pub use online::Clusterer;
 pub use options::{
   ClusterOptions, DEFAULT_EMA_ALPHA, DEFAULT_SIMILARITY_THRESHOLD, Linkage, MAX_AUTO_SPEAKERS,
-  OfflineClusterOptions, OfflineMethod, OverflowStrategy, UpdateStrategy,
+  MAX_OFFLINE_INPUT, OfflineClusterOptions, OfflineMethod, OverflowStrategy, UpdateStrategy,
 };
 pub use types::{ClusterAssignment, SpeakerCentroid};
 

@@ -32,21 +32,12 @@ pub(crate) const SPEAKER_COUNT_WARM_UP_FRAMES_LEFT: u32 = 59;
 #[allow(dead_code)] // consumed by integrate_window in Task 40
 pub(crate) const SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT: u32 = 59;
 
-/// `frame_idx (u64) → sample (u64)` helper. Bit-for-bit equivalent to
-/// [`crate::segment::stitch::frame_to_sample`] but operates in `u64`
-/// throughout to avoid the `u32` truncating cast on long sessions
-/// (sessions > ~2.7 days at 16 kHz exceed `u32::MAX` samples).
-///
-/// Spec §15 #54 tracks folding back into `dia::segment` once a u64
-/// version lands there.
-#[allow(dead_code)] // consumed by emit_finalized_frames / flush_open_runs in Tasks 41-42
-pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
-  // Mirror of segment's formula:
-  //   frame_to_sample(f) = (f * WINDOW_SAMPLES + FRAMES_PER_WINDOW/2) / FRAMES_PER_WINDOW
-  let n = frame_idx * WINDOW_SAMPLES as u64;
-  let half = (FRAMES_PER_WINDOW as u64) / 2;
-  (n + half) / FRAMES_PER_WINDOW as u64
-}
+/// Re-export of the canonical [`crate::segment::stitch::frame_to_sample_u64`]
+/// helper. The function previously lived here as a parallel
+/// implementation; it now resides in `dia::segment::stitch` so the
+/// segmenter can use it for absolute-frame conversions on long
+/// streams (Codex review MEDIUM). Spec §15 #54 (resolved).
+pub(crate) use crate::segment::stitch::frame_to_sample_u64;
 
 /// `sample_idx (u64) → frame_idx (u64)`. Same formula as
 /// [`crate::segment::stitch::frame_index_of`] but kept local for

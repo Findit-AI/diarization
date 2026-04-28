@@ -188,6 +188,14 @@ impl Segmenter {
   ///
   /// This is the streaming entry point that mirrors
   /// `silero::Session::process_stream`.
+  ///
+  /// **Retry contract** (Codex review HIGH): if a previous call left a
+  /// stashed inference (a transient `model.infer` failure or
+  /// `Error::NonFiniteScores` from `push_inference`), this call
+  /// retries the stash BEFORE pushing new audio. On a stash retry
+  /// failure, the new `samples` are NOT appended — the caller can
+  /// safely re-pass the same chunk without double-counting it. Mirror
+  /// of the diarizer-level retry boundary.
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn process_samples<F>(
     &mut self,
@@ -198,17 +206,28 @@ impl Segmenter {
   where
     F: FnMut(Event),
   {
+    if self.pending_inference.is_some() {
+      self.drain(model, &mut emit)?;
+    }
     self.push_samples(samples);
     self.drain(model, &mut emit)
   }
 
   /// Equivalent to `finish` followed by draining all remaining actions
   /// (running inference for any unprocessed window).
+  ///
+  /// Retries any stashed inference before calling `finish()` so that
+  /// the segmenter is not left half-finished if the stash retry fails.
+  /// `finish()` is idempotent, so re-driving `finish_stream` after a
+  /// retryable error is safe. Codex review HIGH.
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn finish_stream<F>(&mut self, model: &mut SegmentModel, mut emit: F) -> Result<(), Error>
   where
     F: FnMut(Event),
   {
+    if self.pending_inference.is_some() {
+      self.drain(model, &mut emit)?;
+    }
     self.finish();
     self.drain(model, &mut emit)
   }
@@ -217,11 +236,57 @@ impl Segmenter {
   where
     F: FnMut(Event),
   {
+    // Retry any stashed inference from a prior failed drain BEFORE
+    // polling new actions. Without this, an `infer`/`push_inference`
+    // failure popped `Action::NeedsInference`, returned Err, and lost
+    // the in-flight `(WindowId, samples)` pair forever — `WindowId`
+    // stayed in `pending` and finalization could stall. Codex review
+    // HIGH.
+    //
+    // Two retryable failure modes share the stash, mirroring the
+    // diarizer's `pending_seg_inference` semantics:
+    //   1. `model.infer` returns Err   → transient backend failure.
+    //   2. `model.infer` returns Ok but `push_inference` rejects the
+    //      logits (e.g. `Error::NonFiniteScores`)
+    //      → segmenter intentionally leaves `id` pending so the caller
+    //         can retry with valid scores from a re-run.
+    if let Some((id, samples)) = self.pending_inference.take() {
+      match model.infer(&samples) {
+        Ok(scores) => match self.push_inference(id, &scores) {
+          Ok(()) => {}
+          Err(e @ Error::NonFiniteScores { .. }) => {
+            self.pending_inference = Some((id, samples));
+            return Err(e);
+          }
+          Err(e) => return Err(e),
+        },
+        Err(e) => {
+          self.pending_inference = Some((id, samples));
+          return Err(e);
+        }
+      }
+    }
+
     while let Some(action) = self.poll() {
       match action {
         Action::NeedsInference { id, samples } => {
-          let scores = model.infer(&samples)?;
-          self.push_inference(id, &scores)?;
+          // Stash before invoking the model so a transient failure
+          // (or non-finite logits) doesn't lose the action handle.
+          // Codex review HIGH.
+          match model.infer(&samples) {
+            Ok(scores) => match self.push_inference(id, &scores) {
+              Ok(()) => {}
+              Err(e @ Error::NonFiniteScores { .. }) => {
+                self.pending_inference = Some((id, samples));
+                return Err(e);
+              }
+              Err(e) => return Err(e),
+            },
+            Err(e) => {
+              self.pending_inference = Some((id, samples));
+              return Err(e);
+            }
+          }
         }
         Action::Activity(a) => emit(Event::Activity(a)),
         Action::VoiceSpan(r) => emit(Event::VoiceSpan(r)),

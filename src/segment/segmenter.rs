@@ -21,7 +21,7 @@ use crate::segment::{
     SegmentOptions, WINDOW_SAMPLES,
   },
   powerset::{powerset_to_speakers, softmax_row, voice_prob},
-  stitch::{VoiceStitcher, frame_index_of, frame_to_sample},
+  stitch::{VoiceStitcher, frame_index_of, frame_to_sample, frame_to_sample_u64},
   types::{Action, SpeakerActivity, WindowId},
   window::plan_starts,
 };
@@ -104,6 +104,20 @@ pub struct Segmenter {
   pub(crate) tail_emitted: bool,
   /// Total stream length latched at `finish()`.
   pub(crate) total_samples: u64,
+  /// Stashed in-flight inference for the Layer-2 streaming API. Set by
+  /// [`Segmenter::process_samples`] / [`Segmenter::finish_stream`]
+  /// (under `feature = "ort"`) when [`SegmentModel::infer`] or
+  /// [`Self::push_inference`] returns an error mid-drain. The next
+  /// drain replays the stash before polling new actions; without it,
+  /// `Action::NeedsInference` was popped + lost on every transient
+  /// failure (the `WindowId` stayed in `pending`, but no caller-
+  /// reachable handle remained to retry it). Codex review HIGH.
+  ///
+  /// Mirrors `dia::diarizer::Diarizer::pending_seg_inference` for the
+  /// Layer-2 path. `cfg`-gated because it is only consumed by the
+  /// `ort`-feature streaming helpers; the fields stay always-present
+  /// to keep `Segmenter` layout stable across feature builds.
+  pub(crate) pending_inference: Option<(WindowId, alloc::boxed::Box<[f32]>)>,
 }
 
 impl Segmenter {
@@ -136,6 +150,7 @@ impl Segmenter {
       finished: false,
       tail_emitted: false,
       total_samples: 0,
+      pending_inference: None,
     }
   }
 
@@ -406,8 +421,9 @@ impl Segmenter {
       // which can overshoot — e.g. for total_samples=250_000, total_frames
       // rounds to 921 and frame_to_sample(921) = 250_187).
       if let Some(start_frame) = self.voice_run_start.take() {
-        let s0 = frame_to_sample(start_frame.min(u32::MAX as u64) as u32) as u64;
-        let s0 = s0.min(self.total_samples);
+        // Absolute frame → sample: must be u64 end-to-end. The legacy
+        // u32 cast wrapped after ~74 h at 16 kHz. Codex review MEDIUM.
+        let s0 = frame_to_sample_u64(start_frame).min(self.total_samples);
         self.feed_merge_cursor(s0, self.total_samples);
         self.voice_hyst.reset();
       }
@@ -446,9 +462,14 @@ impl Segmenter {
   /// Receive one `[start_frame, end_frame)` span from the streaming
   /// hysteresis state machine, convert to samples, apply the merge-gap
   /// rule (§5.6.5).
+  ///
+  /// `start_frame` / `end_frame` are absolute stream-wide frame
+  /// indices; we convert with the u64 helper so timestamps stay
+  /// correct past ~74 h. The previous u32-clamp path silently wrapped
+  /// `Action::VoiceSpan` ranges. Codex review MEDIUM.
   fn feed_merge_cursor_frames(&mut self, start_frame: u64, end_frame: u64) {
-    let s0 = frame_to_sample(start_frame.min(u32::MAX as u64) as u32) as u64;
-    let s1 = frame_to_sample(end_frame.min(u32::MAX as u64) as u32) as u64;
+    let s0 = frame_to_sample_u64(start_frame);
+    let s1 = frame_to_sample_u64(end_frame);
     self.feed_merge_cursor(s0, s1);
   }
 
@@ -543,6 +564,7 @@ impl Segmenter {
     self.finished = false;
     self.tail_emitted = false;
     self.total_samples = 0;
+    self.pending_inference = None;
   }
 
   /// Number of [`Action::NeedsInference`] yielded but not yet fulfilled
@@ -929,6 +951,29 @@ mod tests {
       }
       _ => unreachable!(),
     }
+  }
+
+  /// Codex review HIGH: `clear()` must drop any stashed Layer-2
+  /// inference so a fresh session doesn't accidentally retry one from
+  /// the previous session. The Layer-2 streaming helpers
+  /// (`process_samples` / `finish_stream` under `feature = "ort"`)
+  /// populate this field on transient errors; we exercise the field
+  /// directly here because the helpers themselves require an ONNX
+  /// runtime not available in unit tests, mirroring the diarizer-level
+  /// `clear_resets_pending_seg_inference` test.
+  #[test]
+  fn clear_drops_layer2_pending_inference() {
+    let mut s = Segmenter::new(opts());
+    assert!(s.pending_inference.is_none());
+    // Inject a fake stash so we can verify `clear()` drops it. Real
+    // population comes from the `ort`-feature helpers.
+    let bogus_id = WindowId::new(TimeRange::new(0, 160_000, SAMPLE_RATE_TB), 0);
+    s.pending_inference = Some((bogus_id, vec![0.0f32; 4].into_boxed_slice()));
+    s.clear();
+    assert!(
+      s.pending_inference.is_none(),
+      "clear() must drop pending_inference"
+    );
   }
 
   #[test]

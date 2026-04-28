@@ -20,11 +20,32 @@ use crate::segment::options::{FRAMES_PER_WINDOW, WINDOW_SAMPLES};
 /// `0..=WINDOW_SAMPLES` using rounded integer arithmetic. Bit-for-bit
 /// equivalent to `round(frame_idx * 160000 / 589)` for any integer
 /// `frame_idx` (see spec §5.2.1).
+///
+/// **Use only for window-local offsets.** Absolute frame indices grow
+/// with stream length and will exceed `u32::MAX` after ~74 hours at
+/// 16 kHz; for those, use [`frame_to_sample_u64`] instead. Codex
+/// review MEDIUM.
 #[inline]
 pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
   let n = frame_idx as u64 * WINDOW_SAMPLES as u64;
   let half = (FRAMES_PER_WINDOW as u64) / 2;
   ((n + half) / FRAMES_PER_WINDOW as u64) as u32
+}
+
+/// `frame_idx (u64) → sample (u64)` — same formula as
+/// [`frame_to_sample`] but operates in `u64` end-to-end so it is safe
+/// for absolute frame positions on long streams. Use this everywhere
+/// the input frame index is an absolute (stream-wide) position; the
+/// `u32` helper above truncates after ~74 h of audio at 16 kHz and
+/// would silently wrap public timestamps.
+///
+/// Codex review MEDIUM. Spec §15 #54 — folded back from the parallel
+/// helper that previously lived in `dia::diarizer::reconstruct`.
+#[inline]
+pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
+  let n = frame_idx * WINDOW_SAMPLES as u64;
+  let half = (FRAMES_PER_WINDOW as u64) / 2;
+  (n + half) / FRAMES_PER_WINDOW as u64
 }
 
 /// Convert an absolute sample index to an absolute frame index using
@@ -146,6 +167,50 @@ mod tests {
       assert!(s >= prev);
       prev = s;
     }
+  }
+
+  /// Codex review MEDIUM regression: absolute frame indices on long
+  /// streams routinely exceed `u32::MAX`. The old u32-only helper
+  /// truncated, silently wrapping `Action::VoiceSpan` ranges past
+  /// ~74 h. The u64 helper must (a) agree with the u32 helper for
+  /// frame indices whose sample-result still fits in u32, and (b) not
+  /// wrap above it.
+  #[test]
+  fn frame_to_sample_u64_agrees_with_u32_in_safe_range() {
+    // The u32 helper internally promotes to u64 for the multiplication
+    // but casts back to u32 at the end, so it is only correct when
+    // the *output* fits in u32. WINDOW_SAMPLES / FRAMES_PER_WINDOW ≈
+    // 271.65, so frame_idx ≲ u32::MAX / 272 ≈ 15.78 M is safe.
+    let safe_max = (u32::MAX as u64 / WINDOW_SAMPLES as u64 * FRAMES_PER_WINDOW as u64) as u32;
+    for f in [0u32, 1, FRAMES_PER_WINDOW as u32, safe_max / 2, safe_max] {
+      assert_eq!(
+        frame_to_sample(f) as u64,
+        frame_to_sample_u64(f as u64),
+        "u32/u64 helpers must agree at frame_idx = {f}"
+      );
+    }
+  }
+
+  #[test]
+  fn frame_to_sample_u64_does_not_wrap_past_u32_max() {
+    // 16 kHz × 74.6 h ≈ u32::MAX samples → u32::MAX / WINDOW_SAMPLES *
+    // FRAMES_PER_WINDOW frames is in u32 range, but absolute frames
+    // beyond that must still produce monotonically increasing samples.
+    let f_below = u32::MAX as u64;
+    let f_above = f_below + 10_000;
+    let s_below = frame_to_sample_u64(f_below);
+    let s_above = frame_to_sample_u64(f_above);
+    assert!(
+      s_above > s_below,
+      "frame_to_sample_u64 must not wrap past u32 boundary: \
+       f_below={f_below} → s_below={s_below}, f_above={f_above} → s_above={s_above}"
+    );
+    // And at least one of these should be > u32::MAX (proves we left the
+    // u32 range, not just stayed inside).
+    assert!(
+      s_above > u32::MAX as u64,
+      "expected sample index to exceed u32::MAX; got {s_above}"
+    );
   }
 
   #[test]

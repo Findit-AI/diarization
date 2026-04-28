@@ -57,6 +57,21 @@ pub const DEFAULT_EMA_ALPHA: f32 = 0.2;
 /// Has no effect on the online [`Clusterer`](crate::cluster::Clusterer).
 pub const MAX_AUTO_SPEAKERS: u32 = 15;
 
+/// Hard upper bound on the number of input embeddings accepted by
+/// [`cluster_offline`](crate::cluster::cluster_offline). Reached →
+/// [`Error::InputTooLarge`](crate::cluster::Error::InputTooLarge).
+///
+/// Both supported offline methods allocate dense `N × N` matrices:
+/// spectral builds the affinity matrix and computes eigendecomposition
+/// (`O(N³)` time, `O(N²)` memory); average-/complete-/single-linkage
+/// agglomerative builds the same affinity. At `N = 5_000`,
+/// `5_000² × 4 B ≈ 100 MB` for `f32` and ~200 MB for the f64 affinity
+/// matrix used by spectral — already well into "noticeable" territory.
+/// The cap below is a defense-in-depth bound; callers reclustering
+/// long sessions should down-sample to a representative subset rather
+/// than feeding raw per-activity embeddings. Codex review MEDIUM.
+pub const MAX_OFFLINE_INPUT: usize = 5_000;
+
 // ── Online clustering options ─────────────────────────────────────────────
 
 /// How the per-speaker centroid is updated each time an embedding is assigned

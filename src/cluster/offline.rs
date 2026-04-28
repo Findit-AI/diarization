@@ -4,7 +4,7 @@
 use crate::{
   cluster::{
     Error, agglomerative,
-    options::{OfflineClusterOptions, OfflineMethod},
+    options::{MAX_OFFLINE_INPUT, OfflineClusterOptions, OfflineMethod},
     spectral,
   },
   embed::{Embedding, NORM_EPSILON},
@@ -19,6 +19,17 @@ pub(crate) fn validate_offline_input(
 ) -> Result<usize, Error> {
   if embeddings.is_empty() {
     return Err(Error::EmptyInput);
+  }
+  // Cap input size before any per-element work — both supported offline
+  // methods allocate dense N×N matrices and the eigen / linkage paths
+  // are O(N³). Without this guard, a long session's
+  // `collected_embeddings` could OOM the process or block for minutes
+  // before returning. Codex review MEDIUM.
+  if embeddings.len() > MAX_OFFLINE_INPUT {
+    return Err(Error::InputTooLarge {
+      n: embeddings.len(),
+      limit: MAX_OFFLINE_INPUT,
+    });
   }
   for e in embeddings {
     // f64 accumulator: 256 squared-f32 terms can lose ~8 bits of mantissa
@@ -199,6 +210,25 @@ mod tests {
   fn validate_returns_n_on_valid_with_target() {
     let n = validate_offline_input(&[unit(0), unit(1), unit(2)], Some(2)).unwrap();
     assert_eq!(n, 3);
+  }
+
+  #[test]
+  fn input_too_large_errors() {
+    // Codex review MEDIUM: dense offline methods must reject inputs
+    // beyond MAX_OFFLINE_INPUT before allocating an N×N matrix. We
+    // construct N+1 embeddings via repeating a known-good unit vector
+    // — they all have identical contents, but the cap fires before
+    // any per-element work runs (validation order matters).
+    let one = unit(0);
+    let inputs = vec![one; MAX_OFFLINE_INPUT + 1];
+    let r = cluster_offline(&inputs, &OfflineClusterOptions::default());
+    match r {
+      Err(Error::InputTooLarge { n, limit }) => {
+        assert_eq!(n, MAX_OFFLINE_INPUT + 1);
+        assert_eq!(limit, MAX_OFFLINE_INPUT);
+      }
+      other => panic!("expected InputTooLarge, got {other:?}"),
+    }
   }
 
   #[test]

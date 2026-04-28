@@ -48,6 +48,26 @@ pub enum Error {
   /// Eigendecomposition failed (matrix likely singular or pathological).
   #[error("eigendecomposition failed")]
   EigendecompositionFailed,
+
+  /// Offline clustering input exceeds the dense-method size cap.
+  ///
+  /// Spectral and full-pairwise agglomerative clustering allocate dense
+  /// `N × N` matrices and compute O(N³) eigendecomposition / linkage,
+  /// which can OOM or stall the process before returning. The size
+  /// limit ([`crate::cluster::MAX_OFFLINE_INPUT`]) is a defense-in-depth
+  /// guard — callers who really need to recluster huge corpora should
+  /// down-sample, batch, or use an external sparse method. Codex
+  /// review MEDIUM.
+  #[error(
+    "input size ({n}) exceeds the offline clustering cap ({limit}); \
+     dense methods would allocate an {n}×{n} matrix"
+  )]
+  InputTooLarge {
+    /// Actual number of input embeddings.
+    n: usize,
+    /// Configured cap.
+    limit: usize,
+  },
 }
 
 #[cfg(test)]
