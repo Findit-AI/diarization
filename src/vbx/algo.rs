@@ -20,7 +20,10 @@ pub struct VbxOutput {
 /// out[r] = log(sum_j exp(m[r, j] - max_j m[r, j])) + max_j m[r, j]
 /// ```
 ///
-/// Matches `scipy.special.logsumexp(m, axis=-1)` modulo float roundoff.
+/// Matches `scipy.special.logsumexp(m, axis=-1)` modulo float roundoff
+/// for finite or `-inf` rows. An all-NaN row returns `-inf` here vs
+/// `NaN` in scipy — VBx callers reject NaN inputs upstream via
+/// `Error::NonFinite`, so this divergence is unreachable in production.
 /// An all-`-inf` row produces `-inf` (the shift trick is bypassed
 /// because subtracting `-inf` from `-inf` yields `NaN`).
 pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
@@ -128,6 +131,8 @@ pub fn vbx_iterate(
   let fa_over_fb = fa / fb;
 
   for ii in 0..max_iters {
+    // ── E-step (speaker-model update) ────────────────────────────
+    // gamma_sum, invL, alpha
     // gamma_sum[s] = column-sum of gamma over T rows (Eq. 17 input).
     let gamma_sum = DVector::<f64>::from_vec(
       (0..s).map(|j| gamma.column(j).sum()).collect(),
@@ -151,6 +156,7 @@ pub fn vbx_iterate(
       }
     }
 
+    // ── log_p_ (per-(frame, speaker) log-likelihood, Eq. 23) ─────
     // log_p_[t,s] = Fa * (rho @ alpha.T - 0.5*(invL+alpha**2)@Phi + G) (Eq. 23)
     let rho_alpha_t = &rho * alpha.transpose(); // (T, S)
     // (invL + alpha**2) @ Phi : (S, D) · (D,) → (S,)
@@ -171,21 +177,25 @@ pub fn vbx_iterate(
       }
     }
 
+    // ── Responsibility update ────────────────────────────────────
+    // log_pi, log_p_x via logsumexp, new gamma, new pi
     // log_pi[s] = log(pi[s] + eps_log)
     let log_pi: DVector<f64> = pi.map(|p| (p + eps_log).ln());
-    // log_p_x[t] = logsumexp_t(log_p[t,:] + log_pi[:])
-    let mut log_p_plus_pi = log_p.clone();
+    // Fold log_pi into log_p in place — log_p is not referenced
+    // outside this block, so we save the (T, S) clone.
     for tt in 0..t {
       for sj in 0..s {
-        log_p_plus_pi[(tt, sj)] += log_pi[sj];
+        log_p[(tt, sj)] += log_pi[sj];
       }
     }
-    let log_p_x = logsumexp_rows(&log_p_plus_pi);
+    // log_p_x[t] = logsumexp_t(log_p[t,:] + log_pi[:])
+    let log_p_x = logsumexp_rows(&log_p);
     // gamma[t,s] = exp(log_p_[t,s] + log_pi[s] - log_p_x[t])
     let mut new_gamma = DMatrix::<f64>::zeros(t, s);
     for tt in 0..t {
       for sj in 0..s {
-        new_gamma[(tt, sj)] = (log_p[(tt, sj)] + log_pi[sj] - log_p_x[tt]).exp();
+        // log_p now contains log_p + log_pi.
+        new_gamma[(tt, sj)] = (log_p[(tt, sj)] - log_p_x[tt]).exp();
       }
     }
     gamma = new_gamma;
@@ -200,6 +210,7 @@ pub fn vbx_iterate(
     }
     pi = new_pi / pi_sum;
 
+    // ── ELBO (Eq. 25) ────────────────────────────────────────────
     // ELBO = sum(log_p_x) + Fb * 0.5 * sum_{s,d}(log(invL) - invL - alpha**2 + 1)  (Eq. 25)
     let log_p_x_total: f64 = log_p_x.iter().sum();
     let mut bracket = 0.0;
@@ -216,6 +227,7 @@ pub fn vbx_iterate(
     }
     elbo_trajectory.push(elbo);
 
+    // ── Convergence check ────────────────────────────────────────
     if ii > 0 {
       let prev = elbo_trajectory[elbo_trajectory.len() - 2];
       if elbo - prev < epsilon {
