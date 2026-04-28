@@ -4,7 +4,7 @@ Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
 
 [![Crates.io](https://img.shields.io/crates/v/dia.svg)](https://crates.io/crates/dia)
 [![Documentation](https://docs.rs/dia/badge.svg)](https://docs.rs/dia)
-[![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)](https://github.com/al8n/dia)
+[![License](https://img.shields.io/badge/license-(MIT_OR_Apache--2.0)_AND_CC--BY--4.0-blue.svg)](https://github.com/al8n/dia)
 
 ## Status
 
@@ -38,4 +38,30 @@ See `examples/diarize_from_wav.rs` for the full source.
 
 ## License
 
-MIT OR Apache-2.0.
+The `dia` source is dual-licensed: **MIT OR Apache-2.0** (caller's
+choice). See `LICENSE-MIT` / `LICENSE-APACHE`.
+
+### CC-BY-4.0 attribution required
+
+`dia` embeds a small set of third-party PLDA weight matrices from
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
+into every compiled binary via `include_bytes!`. Those matrices are
+licensed under **CC-BY-4.0**, and the attribution requirement
+**propagates to any downstream binary that links `dia`**.
+
+The full SPDX expression is therefore `(MIT OR Apache-2.0) AND CC-BY-4.0`.
+
+When you redistribute a binary that depends on `dia` (e.g. as part of a
+larger application), you must reproduce the attribution from
+[`NOTICE`](NOTICE) somewhere a recipient can find — for instance, in
+your application's "About" or third-party-licenses page. The full
+provenance, including the upstream snapshot revision and the
+`models/plda/*.bin` layout, lives in
+[`models/plda/SOURCE.md`](models/plda/SOURCE.md).
+
+If you want to opt out of the CC-BY-4.0 obligation: do not call
+anything in `dia::plda`, do not link in code that does, and we
+recommend gating the dependency such that the `dia::plda` module is
+never reached. (At the time of writing, no other `dia` module
+depends on `dia::plda`; that changes once the Phase-2/3 VBx +
+constrained Hungarian work lands.)

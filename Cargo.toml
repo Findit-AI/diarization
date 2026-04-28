@@ -3,7 +3,13 @@ name = "dia"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MIT OR Apache-2.0"
+# `dia` source is MIT OR Apache-2.0 (caller's choice).
+# `models/plda/*.bin` are embedded into the compiled artifact via
+# `include_bytes!` (see `src/plda/loader.rs`); those weights are
+# CC-BY-4.0 with attribution required (see `NOTICE` and
+# `models/plda/SOURCE.md`). Downstream redistributors of any binary
+# linking `dia` MUST reproduce the CC-BY-4.0 attribution.
+license = "(MIT OR Apache-2.0) AND CC-BY-4.0"
 repository = "https://github.com/al8n/dia"
 homepage = "https://github.com/al8n/dia"
 documentation = "https://docs.rs/dia"
