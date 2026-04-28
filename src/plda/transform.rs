@@ -6,10 +6,13 @@
 
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
-use crate::plda::{
-  EMBEDDING_DIMENSION, PLDA_DIMENSION,
-  error::Error,
-  loader::{PldaWeights, XvecWeights, load_plda, load_xvec},
+use crate::{
+  embed::NORM_EPSILON,
+  plda::{
+    EMBEDDING_DIMENSION, PLDA_DIMENSION,
+    error::Error,
+    loader::{PldaWeights, XvecWeights, load_plda, load_xvec},
+  },
 };
 
 /// Probabilistic Linear Discriminant Analysis transform. Two stages:
@@ -116,13 +119,33 @@ impl PldaTransform {
   /// **not** 1.0. The outer scale-by-`sqrt(D_out)` is load-bearing
   /// for the downstream PLDA whitening; downstream consumers MUST
   /// not re-normalize this output.
-  pub fn xvec_transform(&self, input: &[f32; EMBEDDING_DIMENSION]) -> [f64; PLDA_DIMENSION] {
+  ///
+  /// # Errors
+  ///
+  /// - [`Error::NonFiniteInput`] if any element of `input` is NaN
+  ///   or `±inf`, or if a non-finite value appears in an
+  ///   intermediate vector (e.g. mean2 + Inf).
+  /// - [`Error::DegenerateInput`] if `‖input - mean1‖ < NORM_EPSILON`
+  ///   (the input is essentially equal to `mean1` and L2-normalizing
+  ///   the centered vector would amplify noise to dominate signal).
+  pub fn xvec_transform(
+    &self,
+    input: &[f32; EMBEDDING_DIMENSION],
+  ) -> Result<[f64; PLDA_DIMENSION], Error> {
+    // 0. Reject non-finite input outright. Cheap pre-check; avoids
+    //    silently producing NaN garbage downstream.
+    if input.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
+
     // 1. Promote f32 input to f64 and center: x = input - mean1.
     let mut x = DVector::<f64>::from_iterator(EMBEDDING_DIMENSION, input.iter().map(|v| *v as f64));
     x -= &self.mean1;
 
-    // 2. L2-normalize, then scale by sqrt(D_in).
-    l2_normalize_in_place(&mut x);
+    // 2. L2-normalize, then scale by sqrt(D_in). Validate the norm
+    //    before dividing — pyannote's lambda would silently produce
+    //    NaN here for zero-norm input.
+    checked_l2_normalize_in_place(&mut x)?;
     x *= self.sqrt_in_dim;
 
     // 3. lda.T @ x  →  (PLDA_DIMENSION,)-shaped vector.
@@ -133,15 +156,17 @@ impl PldaTransform {
     // 4. Recenter: y -= mean2.
     y -= &self.mean2;
 
-    // 5. L2-normalize, then scale by sqrt(D_out).
-    l2_normalize_in_place(&mut y);
+    // 5. L2-normalize, then scale by sqrt(D_out). Same validation
+    //    as step 2 — guards against degenerate intermediates that
+    //    could come from a corrupted upstream LDA matrix.
+    checked_l2_normalize_in_place(&mut y)?;
     y *= self.sqrt_out_dim;
 
     let mut out = [0.0f64; PLDA_DIMENSION];
     for (slot, value) in out.iter_mut().zip(y.iter()) {
       *slot = *value;
     }
-    out
+    Ok(out)
   }
 
   /// Second PLDA stage. Mirrors `plda_tf` in
@@ -160,7 +185,22 @@ impl PldaTransform {
   /// `eigenvectors.tr_mul(centered_x)` to express the row-vector
   /// matmul in column-vector form — the resulting ordering matches
   /// pyannote's row-major numpy result.
-  pub fn plda_transform(&self, post_xvec: &[f64; PLDA_DIMENSION]) -> [f64; PLDA_DIMENSION] {
+  ///
+  /// # Errors
+  ///
+  /// - [`Error::NonFiniteInput`] if any element of `post_xvec` is
+  ///   NaN or `±inf`. There is no L2 normalization in this stage so
+  ///   no [`Error::DegenerateInput`] case — a zero-norm post_xvec
+  ///   yields a finite (centered, then projected) output, which is
+  ///   degenerate but well-defined.
+  pub fn plda_transform(
+    &self,
+    post_xvec: &[f64; PLDA_DIMENSION],
+  ) -> Result<[f64; PLDA_DIMENSION], Error> {
+    if post_xvec.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
+
     // 1. Center: x = post_xvec - plda_mu.
     let mut x = DVector::<f64>::from_iterator(PLDA_DIMENSION, post_xvec.iter().copied());
     x -= &self.plda_mu;
@@ -176,12 +216,16 @@ impl PldaTransform {
     for (slot, value) in out.iter_mut().zip(y.iter()) {
       *slot = *value;
     }
-    out
+    Ok(out)
   }
 
-  /// Convenience: chain `xvec_transform` → `plda_transform`.
-  pub fn project(&self, input: &[f32; EMBEDDING_DIMENSION]) -> [f64; PLDA_DIMENSION] {
-    let post_xvec = self.xvec_transform(input);
+  /// Convenience: chain `xvec_transform` → `plda_transform`. Returns
+  /// the same error variants as the underlying calls.
+  pub fn project(
+    &self,
+    input: &[f32; EMBEDDING_DIMENSION],
+  ) -> Result<[f64; PLDA_DIMENSION], Error> {
+    let post_xvec = self.xvec_transform(input)?;
     self.plda_transform(&post_xvec)
   }
 
@@ -192,16 +236,21 @@ impl PldaTransform {
   }
 }
 
-/// In-place L2 normalization. No-op for zero-norm input — pyannote's
-/// `l2_norm` would produce NaN there, but real WeSpeaker outputs are
-/// never exactly zero, so divergence on this edge case is intentional
-/// (it prevents NaN propagation into the parity tests if the
-/// embedding model ever degenerates).
-fn l2_normalize_in_place(v: &mut DVector<f64>) {
+/// In-place L2 normalization with explicit error reporting. Returns
+/// [`Error::NonFiniteInput`] if the norm is non-finite (input had
+/// NaN/Inf that survived earlier checks; defense-in-depth) and
+/// [`Error::DegenerateInput`] if the norm is below
+/// `NORM_EPSILON` (dividing would amplify noise to dominate signal).
+fn checked_l2_normalize_in_place(v: &mut DVector<f64>) -> Result<(), Error> {
   let n = v.norm();
-  if n > 0.0 {
-    *v /= n;
+  if !n.is_finite() {
+    return Err(Error::NonFiniteInput);
   }
+  if n < NORM_EPSILON as f64 {
+    return Err(Error::DegenerateInput);
+  }
+  *v /= n;
+  Ok(())
 }
 
 /// Solve the generalized symmetric eigenvalue problem
@@ -277,4 +326,45 @@ fn generalized_eigh_descending(
   }
 
   Ok((sorted_vals, sorted_vecs))
+}
+
+#[cfg(test)]
+mod helper_tests {
+  use super::*;
+
+  /// Direct test of the near-zero-norm guard. Constructed at the
+  /// helper level rather than the public-API level because real f32
+  /// inputs cannot produce a centered f64 norm below `NORM_EPSILON`
+  /// after the f32→f64 promotion round-trip noise (see
+  /// `src/plda/tests.rs` comment for the analysis).
+  #[test]
+  fn checked_l2_normalize_rejects_near_zero() {
+    let mut v = DVector::<f64>::from_iterator(4, [1e-15, 1e-15, 1e-15, 1e-15]);
+    let n = v.norm();
+    assert!(n < NORM_EPSILON as f64, "test input norm {n} must be < epsilon");
+    let result = checked_l2_normalize_in_place(&mut v);
+    assert!(matches!(result, Err(Error::DegenerateInput)), "got {result:?}");
+  }
+
+  #[test]
+  fn checked_l2_normalize_rejects_nan() {
+    let mut v = DVector::<f64>::from_iterator(3, [1.0, f64::NAN, 1.0]);
+    let result = checked_l2_normalize_in_place(&mut v);
+    assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  }
+
+  #[test]
+  fn checked_l2_normalize_rejects_inf() {
+    let mut v = DVector::<f64>::from_iterator(3, [1.0, f64::INFINITY, 1.0]);
+    let result = checked_l2_normalize_in_place(&mut v);
+    assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  }
+
+  #[test]
+  fn checked_l2_normalize_succeeds_on_unit_input() {
+    let mut v = DVector::<f64>::from_iterator(3, [3.0, 4.0, 0.0]);
+    checked_l2_normalize_in_place(&mut v).expect("non-degenerate, finite");
+    let n = v.norm();
+    assert!((n - 1.0).abs() < 1e-15, "norm after normalize = {n}");
+  }
 }

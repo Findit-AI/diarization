@@ -96,7 +96,9 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
     let mut input = [0.0f32; EMBEDDING_DIMENSION];
     input.copy_from_slice(&raw_flat[off..off + EMBEDDING_DIMENSION]);
 
-    let actual = plda.xvec_transform(&input);
+    let actual = plda
+      .xvec_transform(&input)
+      .expect("captured WeSpeaker outputs are finite + non-degenerate");
 
     for d in 0..PLDA_DIMENSION {
       let want = post_xvec_expected[(i, d)];
@@ -162,7 +164,9 @@ fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
     for d in 0..PLDA_DIMENSION {
       input[d] = post_xvec_in[(i, d)];
     }
-    let actual = plda.plda_transform(&input);
+    let actual = plda
+      .plda_transform(&input)
+      .expect("captured post_xvec is finite");
     for d in 0..PLDA_DIMENSION {
       rust_post_plda[(i, d)] = actual[d];
       // Sign-invariant element comparison: |abs(want) - abs(got)|.
