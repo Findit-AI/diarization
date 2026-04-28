@@ -1,6 +1,6 @@
 //! Error type for the segmentation module.
 
-#[cfg(all(feature = "std", feature = "ort"))]
+#[cfg(feature = "ort")]
 use std::path::PathBuf;
 
 use thiserror::Error;

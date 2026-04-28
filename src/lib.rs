@@ -54,12 +54,8 @@
 //! See `docs/superpowers/specs/2026-04-26-dia-embed-cluster-diarizer-design.md`
 //! for the load-bearing spec.
 
-#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
-
-#[cfg(feature = "std")]
-extern crate std;
 
 pub mod cluster;
 pub mod diarizer;

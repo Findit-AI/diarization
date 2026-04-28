@@ -11,9 +11,15 @@ description = "Sans-I/O speaker diarization for streaming audio (segmentation; e
 readme = "README.md"
 
 [features]
-default = ["std", "ort"]
-std = []
+default = ["ort"]
 ort = ["dep:ort"]
+# `std` is now unconditional. The crate uses std/alloc throughout
+# (`Vec`, `HashMap`, `kaldi-native-fbank` C bindings, `nalgebra`'s
+# default `std` feature, etc.); the previous `#![no_std]` toggle was
+# advertised but never actually compiled. Codex review HIGH —
+# `cargo check --no-default-features` failed with 47 errors before.
+# If a future Sans-I/O / `alloc`-only mode is wanted, it will need a
+# real audit of the dependency set, not just a feature flag.
 
 [dependencies]
 mediatime = "0.1"

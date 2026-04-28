@@ -12,7 +12,7 @@ use crate::{
   },
   embed::{Embedding, NORM_EPSILON},
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DMatrix;
 use rand::{
   RngExt as _, SeedableRng,
   distr::{Distribution, Uniform},
@@ -130,13 +130,33 @@ pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
 /// Normalized symmetric Laplacian `L_sym = I - D^{-1/2} A D^{-1/2}`.
 /// Caller guarantees `D_ii >= NORM_EPSILON` for all i (enforced by
 /// [`compute_degrees`]).
+///
+/// Computes the symmetric scaling `(D^{-1/2} A D^{-1/2})[i,j] =
+/// inv_sqrt[i] * A[i,j] * inv_sqrt[j]` directly via row/column
+/// scaling — `O(N²)` time and zero auxiliary allocation. The previous
+/// implementation materialized a dense `N × N` diagonal matrix and
+/// ran two `O(N³)` matmuls, which dominated runtime for the dense
+/// path. Codex review MEDIUM.
 pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> {
   let n = a.nrows();
-  // D^{-1/2} as a diagonal matrix.
-  let inv_sqrt = DVector::from_iterator(n, d.iter().map(|&di| 1.0 / di.sqrt()));
-  let inv_sqrt_diag = DMatrix::from_diagonal(&inv_sqrt);
-  // L_sym = I - D^{-1/2} A D^{-1/2}.
-  DMatrix::<f64>::identity(n, n) - &inv_sqrt_diag * a * &inv_sqrt_diag
+  let inv_sqrt: Vec<f64> = d.iter().map(|&di| 1.0 / di.sqrt()).collect();
+  // Build L_sym in place: start from a copy of A scaled by D^{-1/2}
+  // on both sides, then negate and add the identity.
+  let mut l = a.clone();
+  for i in 0..n {
+    let s_i = inv_sqrt[i];
+    for j in 0..n {
+      l[(i, j)] *= s_i * inv_sqrt[j];
+    }
+  }
+  // L_sym = I - (the above)
+  for i in 0..n {
+    for j in 0..n {
+      l[(i, j)] = -l[(i, j)];
+    }
+    l[(i, i)] += 1.0;
+  }
+  l
 }
 
 /// Eigendecompose the symmetric Laplacian `L_sym` and return the eigenvalues

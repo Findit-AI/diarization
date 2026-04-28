@@ -26,6 +26,32 @@ pub const POWERSET_CLASSES: usize = 7;
 /// Maximum simultaneous speakers per window.
 pub const MAX_SPEAKER_SLOTS: u8 = 3;
 
+// Hysteresis-threshold validation predicates (Codex review HIGH).
+//
+// Setters previously stored arbitrary `f32`. NaN turns every `p >=
+// threshold` comparison false (segmenter goes permanently silent);
+// values outside `[0,1]` similarly invert the hysteresis. We also
+// require `offset <= onset` so a started voice run can actually close
+// (the falling-edge threshold cannot be stricter than the rising-edge
+// threshold). All four setters call these in `const fn` context;
+// `assert!` works there if the condition is `const`, but `is_finite`
+// is not `const fn` until the unstable `const_float_classify`
+// feature stabilizes — so we do the equivalent check by hand:
+// `v == v` (rejects NaN) and `v.is_infinite()` via comparison.
+//
+// `f32::INFINITY > 1.0` and `f32::NEG_INFINITY < 0.0`, so the range
+// check `(0.0..=1.0).contains` would reject both — but `Range::contains`
+// also isn't `const`. We do it by hand with `>=`/`<=`.
+#[inline]
+const fn check_hysteresis_threshold(v: f32) -> bool {
+  // NaN: `!v.is_nan()` is false (here we use the `v != v` idiom phrased
+  // in a clippy-clean way; `v != v` is true iff v is NaN). ±inf: out of
+  // [0,1]. Finite & in-range: true.
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && v >= 0.0 && v <= 1.0
+}
+
 /// Tunables for the segmenter. Defaults match the upstream pyannote pipeline.
 #[derive(Debug, Clone)]
 pub struct SegmentOptions {
@@ -83,12 +109,36 @@ impl SegmentOptions {
   }
 
   /// Builder: set the onset threshold.
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
+  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
   pub const fn with_onset_threshold(mut self, v: f32) -> Self {
+    assert!(
+      check_hysteresis_threshold(v),
+      "onset_threshold must be finite in [0.0, 1.0]"
+    );
+    assert!(
+      self.offset_threshold <= v,
+      "offset_threshold must remain <= onset_threshold; lower offset first"
+    );
     self.onset_threshold = v;
     self
   }
   /// Builder: set the offset threshold.
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
+  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
   pub const fn with_offset_threshold(mut self, v: f32) -> Self {
+    assert!(
+      check_hysteresis_threshold(v),
+      "offset_threshold must be finite in [0.0, 1.0]"
+    );
+    assert!(
+      v <= self.onset_threshold,
+      "offset_threshold must be <= onset_threshold; raise onset first"
+    );
     self.offset_threshold = v;
     self
   }
@@ -120,12 +170,38 @@ impl SegmentOptions {
   }
 
   /// Mutating: set the onset threshold.
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
+  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
   pub fn set_onset_threshold(&mut self, v: f32) -> &mut Self {
+    assert!(
+      check_hysteresis_threshold(v),
+      "onset_threshold must be finite in [0.0, 1.0]; got {v}"
+    );
+    assert!(
+      self.offset_threshold <= v,
+      "offset_threshold ({offset}) must remain <= onset_threshold ({v}); lower offset first",
+      offset = self.offset_threshold
+    );
     self.onset_threshold = v;
     self
   }
   /// Mutating: set the offset threshold.
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
+  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
   pub fn set_offset_threshold(&mut self, v: f32) -> &mut Self {
+    assert!(
+      check_hysteresis_threshold(v),
+      "offset_threshold must be finite in [0.0, 1.0]; got {v}"
+    );
+    assert!(
+      v <= self.onset_threshold,
+      "offset_threshold ({v}) must be <= onset_threshold ({onset}); raise onset first",
+      onset = self.onset_threshold
+    );
     self.offset_threshold = v;
     self
   }
@@ -203,5 +279,98 @@ mod tests {
   fn set_step_samples_zero_panics() {
     let mut o = SegmentOptions::default();
     o.set_step_samples(0);
+  }
+
+  // Codex review HIGH: hysteresis threshold setters reject invalid
+  // values. With NaN, every `p >= threshold` is false → segmenter
+  // permanently silent. With > 1.0, same effect. With < 0.0, every
+  // probability is "active" → segmenter permanently active. With
+  // offset > onset, no run can ever close.
+
+  #[test]
+  #[should_panic(expected = "onset_threshold must be finite in [0.0, 1.0]")]
+  fn onset_threshold_nan_panics() {
+    let _ = SegmentOptions::default().with_onset_threshold(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset_threshold must be finite in [0.0, 1.0]")]
+  fn onset_threshold_inf_panics() {
+    let _ = SegmentOptions::default().with_onset_threshold(f32::INFINITY);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset_threshold must be finite in [0.0, 1.0]")]
+  fn onset_threshold_above_one_panics() {
+    let _ = SegmentOptions::default().with_onset_threshold(1.01);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset_threshold must be finite in [0.0, 1.0]")]
+  fn onset_threshold_below_zero_panics() {
+    let _ = SegmentOptions::default().with_onset_threshold(-0.01);
+  }
+
+  #[test]
+  #[should_panic(expected = "offset_threshold must be finite in [0.0, 1.0]")]
+  fn offset_threshold_nan_panics() {
+    let _ = SegmentOptions::default().with_offset_threshold(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "offset_threshold must be finite in [0.0, 1.0]")]
+  fn offset_threshold_neg_inf_panics() {
+    let _ = SegmentOptions::default().with_offset_threshold(f32::NEG_INFINITY);
+  }
+
+  /// `with_offset_threshold(0.6)` after the default onset of 0.5
+  /// should reject the invariant violation `offset (0.6) > onset (0.5)`.
+  #[test]
+  #[should_panic(expected = "offset_threshold must be <= onset_threshold")]
+  fn offset_above_onset_panics() {
+    let _ = SegmentOptions::default().with_offset_threshold(0.6);
+  }
+
+  /// Lowering the onset below the current offset must also be rejected.
+  #[test]
+  #[should_panic(expected = "offset_threshold must remain <= onset_threshold")]
+  fn lowering_onset_below_offset_panics() {
+    // Default: onset=0.5, offset=0.357. Lowering onset to 0.3 puts
+    // it below the current offset.
+    let _ = SegmentOptions::default().with_onset_threshold(0.3);
+  }
+
+  /// Boundary 0.0 = 0.0 = 0.0 is degenerate but valid (everything always active).
+  #[test]
+  fn onset_offset_zero_zero_ok() {
+    let o = SegmentOptions::new()
+      .with_offset_threshold(0.0)
+      .with_onset_threshold(0.0);
+    assert_eq!(o.onset_threshold(), 0.0);
+    assert_eq!(o.offset_threshold(), 0.0);
+  }
+
+  /// Equal onset = offset (degenerate but valid).
+  #[test]
+  fn onset_equals_offset_ok() {
+    let o = SegmentOptions::new()
+      .with_onset_threshold(0.7)
+      .with_offset_threshold(0.7);
+    assert_eq!(o.onset_threshold(), 0.7);
+    assert_eq!(o.offset_threshold(), 0.7);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset_threshold must be finite in [0.0, 1.0]")]
+  fn set_onset_threshold_validates() {
+    let mut o = SegmentOptions::default();
+    o.set_onset_threshold(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "offset_threshold must be finite in [0.0, 1.0]")]
+  fn set_offset_threshold_validates() {
+    let mut o = SegmentOptions::default();
+    o.set_offset_threshold(f32::INFINITY);
   }
 }

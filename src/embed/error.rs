@@ -1,6 +1,6 @@
 //! Error type for `dia::embed`.
 
-#[cfg(all(feature = "std", feature = "ort"))]
+#[cfg(feature = "ort")]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -64,8 +64,8 @@ pub enum Error {
   },
 
   /// Failed to load the ONNX model from disk.
-  #[cfg(all(feature = "std", feature = "ort"))]
-  #[cfg_attr(docsrs, doc(cfg(all(feature = "std", feature = "ort"))))]
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error("failed to load model from {path}: {source}", path = path.display())]
   LoadModel {
     path: PathBuf,

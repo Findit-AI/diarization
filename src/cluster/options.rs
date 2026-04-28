@@ -62,15 +62,25 @@ pub const MAX_AUTO_SPEAKERS: u32 = 15;
 /// [`Error::InputTooLarge`](crate::cluster::Error::InputTooLarge).
 ///
 /// Both supported offline methods allocate dense `N × N` matrices:
-/// spectral builds the affinity matrix and computes eigendecomposition
-/// (`O(N³)` time, `O(N²)` memory); average-/complete-/single-linkage
-/// agglomerative builds the same affinity. At `N = 5_000`,
-/// `5_000² × 4 B ≈ 100 MB` for `f32` and ~200 MB for the f64 affinity
-/// matrix used by spectral — already well into "noticeable" territory.
-/// The cap below is a defense-in-depth bound; callers reclustering
-/// long sessions should down-sample to a representative subset rather
-/// than feeding raw per-activity embeddings. Codex review MEDIUM.
-pub const MAX_OFFLINE_INPUT: usize = 5_000;
+/// spectral builds the f64 affinity matrix and runs eigendecomposition
+/// (`O(N³)` time, `O(N²)` memory); agglomerative builds the same
+/// affinity in f32. At the chosen cap (`N = 1_000`):
+///
+/// - spectral affinity: `1_000² × 8 B ≈ 8 MB`
+/// - intermediate Laplacian + identity: `~16 MB` more
+/// - eigendecomposition working memory: another `~10 MB`
+///
+/// Total memory ≈ tens of MB, eigendecomposition a few seconds on a
+/// modern CPU — comfortably within an interactive offline-recluster
+/// budget. The previous cap of 5_000 allowed `5_000² × 8 B ≈ 200 MB`
+/// per dense matrix and minutes of CPU; that was a documented
+/// "defense in depth" bound but not actually safe. Codex review
+/// MEDIUM.
+///
+/// Callers reclustering long sessions should down-sample collected
+/// embeddings to a representative subset rather than feed every
+/// per-activity embedding back through `cluster_offline`.
+pub const MAX_OFFLINE_INPUT: usize = 1_000;
 
 // ── Online clustering options ─────────────────────────────────────────────
 

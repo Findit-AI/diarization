@@ -4,7 +4,7 @@
 use crate::{
   cluster::{
     Error, agglomerative,
-    options::{MAX_OFFLINE_INPUT, OfflineClusterOptions, OfflineMethod},
+    options::{Linkage, MAX_OFFLINE_INPUT, OfflineClusterOptions, OfflineMethod},
     spectral,
   },
   embed::{Embedding, NORM_EPSILON},
@@ -94,7 +94,18 @@ pub fn cluster_offline(
   // Dispatch.
   match opts.method() {
     OfflineMethod::Agglomerative { linkage } => agglomerative::cluster(embeddings, linkage, opts),
-    OfflineMethod::Spectral => spectral::cluster(embeddings, opts),
+    OfflineMethod::Spectral => match spectral::cluster(embeddings, opts) {
+      // Codex review MEDIUM: spectral's normalized Laplacian is
+      // undefined when any node has zero positive affinity (an
+      // orthogonal/antipodal outlier). Failing the whole batch on
+      // a single outlier is hostile to post-hoc reclustering — fall
+      // back to Agglomerative with Average linkage so the outlier
+      // becomes its own speaker and the rest cluster normally.
+      // `similarity_threshold` is honored by agglomerative, so the
+      // user's threshold tuning still applies in this fallback.
+      Err(Error::AllDissimilar) => agglomerative::cluster(embeddings, Linkage::Average, opts),
+      other => other,
+    },
   }
 }
 
@@ -210,6 +221,43 @@ mod tests {
   fn validate_returns_n_on_valid_with_target() {
     let n = validate_offline_input(&[unit(0), unit(1), unit(2)], Some(2)).unwrap();
     assert_eq!(n, 3);
+  }
+
+  /// Codex review MEDIUM regression: three orthogonal embeddings
+  /// would trip spectral's `AllDissimilar` (each node has zero
+  /// affinity to the others). The `OfflineMethod::Spectral` path now
+  /// falls back to Agglomerative + Average so the outliers become
+  /// distinct speakers rather than failing the whole batch.
+  #[test]
+  fn spectral_falls_back_on_all_dissimilar_no_target() {
+    let inputs = vec![unit(0), unit(1), unit(2)];
+    let opts = OfflineClusterOptions::default().with_method(OfflineMethod::Spectral);
+    let labels = cluster_offline(&inputs, &opts).expect("fallback to agglomerative");
+    // All three orthogonal → distinct labels.
+    assert_eq!(labels.len(), 3);
+    let unique: std::collections::HashSet<u64> = labels.iter().copied().collect();
+    assert_eq!(
+      unique.len(),
+      3,
+      "expected 3 distinct speakers, got {labels:?}"
+    );
+  }
+
+  /// Same input but with `target_speakers = 2` — agglomerative's
+  /// fallback respects the target by collapsing to two clusters.
+  #[test]
+  fn spectral_falls_back_on_all_dissimilar_with_target() {
+    let inputs = vec![unit(0), unit(1), unit(2)];
+    let opts = OfflineClusterOptions::default()
+      .with_method(OfflineMethod::Spectral)
+      .with_target_speakers(2);
+    let labels = cluster_offline(&inputs, &opts).expect("fallback to agglomerative");
+    let unique: std::collections::HashSet<u64> = labels.iter().copied().collect();
+    assert_eq!(
+      unique.len(),
+      2,
+      "target_speakers=2 must yield 2 clusters; got {labels:?}"
+    );
   }
 
   #[test]
