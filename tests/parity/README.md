@@ -27,11 +27,19 @@ on a curated multi-speaker clip.
 
 ```bash
 cd dia
-./tests/parity/run.sh tests/fixtures/your_real_clip.wav
+./tests/parity/run.sh                                    # default fixture
+./tests/parity/run.sh tests/fixtures/your_real_clip.wav  # custom clip
 ```
 
-The script will install pyannote into a per-session venv, run both
-reference + dia, and print DER. Exit code 0 iff DER ≤ 0.10.
+The script:
+1. Brings up `tests/parity/python/.venv` via `uv` if needed.
+2. If the fixture directory has no `manifest.json` (i.e. Phase-0
+   capture has not been run for this clip), invokes
+   `python/capture_intermediates.py` to produce one.
+3. Runs the dia binary and computes DER against the captured
+   reference RTTM (no need to rerun pyannote per parity check).
+
+Exit code 0 iff DER ≤ 0.10.
 
 ## Notes
 
@@ -106,3 +114,37 @@ ships:
 License: CC-BY-4.0 (see `models/plda/SOURCE.md` for attribution). The
 capture script copies both to `models/plda/`; the Rust port (Phase 1+)
 reads them directly and must reproduce the same transformation.
+
+## Refreshing or verifying the snapshot
+
+The canonical fixture lives at `tests/parity/fixtures/01_dialogue/`.
+It is produced by `python/capture_intermediates.py` and is
+**deterministic** — same pyannote version + same clip + same hardware
+must produce byte-identical artifacts.
+
+```bash
+cd tests/parity/python
+
+# Refresh (overwrites every artifact under the fixture directory and
+# re-exports models/plda/{xvec_transform,plda}.npz):
+uv run python capture_intermediates.py \
+  ../fixtures/01_dialogue/clip_16k.wav
+
+# Verify determinism (re-runs capture, sha256-compares against manifest):
+uv run python verify_capture.py \
+  ../fixtures/01_dialogue/clip_16k.wav
+```
+
+A green `verify_capture.py` is required before merging any Phase-1+
+Rust port — every Rust port parity-checks against this snapshot.
+
+## Why we pin pyannote
+
+`python/pyproject.toml` pins `pyannote.audio == 4.0.4`. If upstream
+pyannote ships a behavior change, `verify_capture.py` will fail and
+force a deliberate snapshot refresh + version bump rather than letting
+the change leak silently into Rust-port reviews. The
+`CapturingVBxClustering` body in `capture_intermediates.py` is also a
+verbatim copy of `pipelines/clustering.py:572-668` from this exact
+release — bumping pyannote requires re-syncing it against the new
+upstream source.

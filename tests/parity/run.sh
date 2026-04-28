@@ -1,30 +1,45 @@
 #!/usr/bin/env bash
-# Pyannote parity harness: runs both reference + dia, computes DER.
+# Pyannote parity harness.
+#
 # Requires:
 # - models/segmentation-3.0.onnx and models/wespeaker_resnet34_lm.onnx
-# - uv (or python3 + venv)
-# - the clip path provided as $1, relative to dia crate root
+# - models/plda/xvec_transform.npz and models/plda/plda.npz (Phase 0)
+# - uv (https://docs.astral.sh/uv/)
+# - the clip path; defaults to the canonical 2-speaker fixture
+#
+# Behavior:
+# - If <fixture-dir>/manifest.json is missing, runs Phase-0 capture first.
+# - Then runs dia and pyannote, computes DER.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/../.."
 
-CLIP="${1:?usage: run.sh <clip.wav>}"
+DEFAULT_CLIP="$SCRIPT_DIR/fixtures/01_dialogue/clip_16k.wav"
+CLIP="${1:-$DEFAULT_CLIP}"
 ABS_CLIP="$(cd "$ROOT" && realpath "$CLIP")"
+SNAPSHOT_DIR="$(dirname "$ABS_CLIP")"
+MANIFEST="$SNAPSHOT_DIR/manifest.json"
 
-# Python reference.
 cd "$SCRIPT_DIR/python"
 if [ ! -d .venv ]; then
   uv venv
 fi
-uv pip install -e .
-uv run python reference.py "$ABS_CLIP" > "$SCRIPT_DIR/ref.rttm"
+uv pip install -e . > /dev/null
 
-# Rust dia.
+if [ ! -f "$MANIFEST" ]; then
+  echo "[run.sh] no manifest at $MANIFEST; running Phase-0 capture..."
+  uv run python capture_intermediates.py "$ABS_CLIP"
+else
+  echo "[run.sh] reusing existing snapshot at $SNAPSHOT_DIR"
+fi
+
+# Reuse the captured RTTM as the reference (no need to rerun pyannote).
+REF_RTTM="$SNAPSHOT_DIR/reference.rttm"
+
 cd "$ROOT"
 cargo run --release --manifest-path tests/parity/Cargo.toml -- "$CLIP" \
   > "$SCRIPT_DIR/hyp.rttm"
 
-# Score.
 cd "$SCRIPT_DIR/python"
-uv run python score.py "$SCRIPT_DIR/ref.rttm" "$SCRIPT_DIR/hyp.rttm"
+uv run python score.py "$REF_RTTM" "$SCRIPT_DIR/hyp.rttm"
