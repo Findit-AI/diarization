@@ -96,7 +96,10 @@ fn raw_embedding_rejects_nan() {
   let mut arr = [0.5f32; EMBEDDING_DIMENSION];
   arr[42] = f32::NAN;
   let result = RawEmbedding::from_raw_array(arr);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -104,7 +107,10 @@ fn raw_embedding_rejects_pos_inf() {
   let mut arr = [0.5f32; EMBEDDING_DIMENSION];
   arr[7] = f32::INFINITY;
   let result = RawEmbedding::from_raw_array(arr);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -112,7 +118,10 @@ fn raw_embedding_rejects_neg_inf() {
   let mut arr = [0.5f32; EMBEDDING_DIMENSION];
   arr[42] = f32::NEG_INFINITY;
   let result = RawEmbedding::from_raw_array(arr);
-  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFiniteInput)),
+    "got {result:?}"
+  );
 }
 
 // NOTE on `Error::DegenerateInput` from `xvec_transform`: that error

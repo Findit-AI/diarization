@@ -98,8 +98,7 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
 
     // Captured pyannote outputs are RAW (un-L2-normed); wrap them
     // explicitly to match the type-safe API.
-    let raw = RawEmbedding::from_raw_array(input)
-      .expect("captured WeSpeaker outputs are finite");
+    let raw = RawEmbedding::from_raw_array(input).expect("captured WeSpeaker outputs are finite");
     let actual = plda
       .xvec_transform(&raw)
       .expect("captured raw embedding is non-degenerate");

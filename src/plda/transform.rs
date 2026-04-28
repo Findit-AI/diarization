@@ -215,19 +215,14 @@ impl PldaTransform {
   /// - [`Error::DegenerateInput`] if `‖input - mean1‖ < NORM_EPSILON`
   ///   (the input is essentially equal to `mean1` and L2-normalizing
   ///   the centered vector would amplify noise to dominate signal).
-  pub fn xvec_transform(
-    &self,
-    input: &RawEmbedding,
-  ) -> Result<[f64; PLDA_DIMENSION], Error> {
+  pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<[f64; PLDA_DIMENSION], Error> {
     // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
     // so we don't re-validate here. Intermediate-vector checks happen
     // inside `checked_l2_normalize_in_place` below.
 
     // 1. Promote f32 input to f64 and center: x = input - mean1.
-    let mut x = DVector::<f64>::from_iterator(
-      EMBEDDING_DIMENSION,
-      input.0.iter().map(|v| *v as f64),
-    );
+    let mut x =
+      DVector::<f64>::from_iterator(EMBEDDING_DIMENSION, input.0.iter().map(|v| *v as f64));
     x -= &self.mean1;
 
     // 2. L2-normalize, then scale by sqrt(D_in). Validate the norm
@@ -309,10 +304,7 @@ impl PldaTransform {
 
   /// Convenience: chain `xvec_transform` → `plda_transform`. Returns
   /// the same error variants as the underlying calls.
-  pub fn project(
-    &self,
-    input: &RawEmbedding,
-  ) -> Result<[f64; PLDA_DIMENSION], Error> {
+  pub fn project(&self, input: &RawEmbedding) -> Result<[f64; PLDA_DIMENSION], Error> {
     let post_xvec = self.xvec_transform(input)?;
     self.plda_transform(&post_xvec)
   }
