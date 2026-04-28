@@ -28,3 +28,10 @@ spikes/kaldi_fbank/python.csv
 
 # Phase-0 parity capture: large local artifacts.
 tests/parity/fixtures/*/clip_16k.wav
+# verify_capture.py writes a backup before re-running.
+tests/parity/fixtures/.*.backup/
+
+# uv venv + setuptools editable-install scaffolding for tests/parity/python/.
+tests/parity/python/.venv/
+tests/parity/python/uv.lock
+tests/parity/python/*.egg-info/
