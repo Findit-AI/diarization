@@ -20,20 +20,31 @@ fn main() -> Result<()> {
   let clip_path = &args[1];
 
   let mut reader = hound::WavReader::open(clip_path).context("open clip")?;
-  if reader.spec().sample_rate != 16_000 {
-    bail!(
-      "expected 16 kHz; clip has {} Hz",
-      reader.spec().sample_rate
-    );
+  let spec = reader.spec();
+  if spec.sample_rate != 16_000 {
+    bail!("expected 16 kHz; clip has {} Hz", spec.sample_rate);
   }
-  if reader.spec().channels != 1 {
-    bail!("expected mono; clip has {} channels", reader.spec().channels);
+  if spec.channels != 1 {
+    bail!("expected mono; clip has {} channels", spec.channels);
   }
 
-  let samples: Vec<f32> = reader
-    .samples::<i16>()
-    .map(|s| s.map(|v| v as f32 / i16::MAX as f32))
-    .collect::<Result<Vec<_>, _>>()?;
+  // Accept either 16-bit PCM (canonical) or 32-bit float (Phase-0
+  // canonical fixture is `pcm_f32le`). hound dispatches by the
+  // sample-format/bits combination.
+  let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+    (hound::SampleFormat::Int, 16) => reader
+      .samples::<i16>()
+      .map(|s| s.map(|v| v as f32 / i16::MAX as f32))
+      .collect::<Result<Vec<_>, _>>()?,
+    (hound::SampleFormat::Float, 32) => reader
+      .samples::<f32>()
+      .collect::<Result<Vec<_>, _>>()?,
+    other => bail!(
+      "unsupported WAV sample format: {:?} ({}-bit); use s16le or f32le",
+      other.0,
+      other.1
+    ),
+  };
 
   // Segment + embed models. Paths can be overridden via env vars.
   let seg_path = std::env::var("DIA_SEGMENT_MODEL_PATH")

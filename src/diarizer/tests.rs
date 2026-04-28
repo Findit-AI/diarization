@@ -144,6 +144,25 @@ fn clear_resets_pending_seg_inference() {
   );
 }
 
+/// Codex review HIGH: clear() must also drop any stashed embed
+/// retry. Mirrors `clear_resets_pending_seg_inference`. The runtime
+/// path that populates `pending_embed` requires real ONNX models;
+/// here we verify the field is reset, mirroring the existing
+/// poison-flag and pending-seg-inference tests.
+#[test]
+fn clear_resets_pending_embed() {
+  let mut d = Diarizer::new(DiarizerOptions::default());
+  assert!(
+    d.pending_embed.is_none(),
+    "fresh Diarizer must not have stashed embed"
+  );
+  d.clear();
+  assert!(
+    d.pending_embed.is_none(),
+    "clear() must drop pending_embed"
+  );
+}
+
 #[test]
 fn take_collected_returns_and_drops() {
   let mut d = Diarizer::new(DiarizerOptions::default());
