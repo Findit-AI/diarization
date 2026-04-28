@@ -5,7 +5,9 @@
 //! invariants — the kind of thing that should hold for any input,
 //! and that catches regressions long before the parity tests fail.
 
-use crate::plda::{EMBEDDING_DIMENSION, Error, PLDA_DIMENSION, PldaTransform, RawEmbedding};
+use crate::plda::{
+  EMBEDDING_DIMENSION, Error, PLDA_DIMENSION, PldaTransform, PostXvecEmbedding, RawEmbedding,
+};
 
 fn raw(arr: [f32; EMBEDDING_DIMENSION]) -> RawEmbedding {
   RawEmbedding::from_raw_array(arr).expect("test input must be finite")
@@ -20,7 +22,7 @@ fn xvec_transform_output_norm_is_sqrt_d_out() {
   // Constant input — non-trivial after centering by mean1.
   let input = raw([0.1f32; EMBEDDING_DIMENSION]);
   let out = plda.xvec_transform(&input).expect("non-degenerate input");
-  let norm = out.iter().map(|v| v * v).sum::<f64>().sqrt();
+  let norm = out.as_array().iter().map(|v| v * v).sum::<f64>().sqrt();
   let expected = (PLDA_DIMENSION as f64).sqrt();
   assert!(
     (norm - expected).abs() < 1e-6,
@@ -135,33 +137,75 @@ fn raw_embedding_rejects_neg_inf() {
 // helper-level test for that path lives in `transform.rs` instead
 // (see `tests::checked_l2_normalize_rejects_near_zero`).
 
-/// `plda_transform` rejects NaN in `post_xvec`. There is no L2-norm
-/// inside this stage so DegenerateInput is not applicable; only the
-/// finite check applies. No `RawEmbedding`-style wrapper here because
-/// the `[f64; 128]` input domain is internal — only consumers of this
-/// API are `Self::project` and tests.
+// ── PostXvecEmbedding boundary (Codex review HIGH stage 2) ─────────
+//
+// `plda_transform` no longer accepts a bare `[f64; 128]` — its input
+// is now `&PostXvecEmbedding`, a newtype that enforces the post-`xvec_tf`
+// distribution invariant. NaN/Inf rejection moved to the constructor.
+
 #[test]
-fn plda_transform_rejects_nan_input() {
-  let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.0f64; PLDA_DIMENSION];
-  input[3] = f64::NAN;
-  let result = plda.plda_transform(&input);
+fn post_xvec_capture_rejects_nan() {
+  let mut arr = [0.0f64; PLDA_DIMENSION];
+  arr[3] = f64::NAN;
+  let result = PostXvecEmbedding::from_pyannote_capture(arr);
+  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+}
+
+#[test]
+fn post_xvec_capture_rejects_inf() {
+  let mut arr = [0.0f64; PLDA_DIMENSION];
+  arr[100] = f64::INFINITY;
+  let result = PostXvecEmbedding::from_pyannote_capture(arr);
+  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+}
+
+/// L2-normalized 128-d vector (norm = 1.0) is the most likely
+/// stage-2 misuse. The `from_pyannote_capture` norm check rejects it.
+#[test]
+fn post_xvec_capture_rejects_l2_normalized_vector() {
+  let mut arr = [0.0f64; PLDA_DIMENSION];
+  arr[0] = 1.0; // unit vector along axis 0 — norm = 1.0
+  let result = PostXvecEmbedding::from_pyannote_capture(arr);
   assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
+    matches!(result, Err(Error::WrongPostXvecNorm { actual, expected, .. })
+        if (actual - 1.0).abs() < 1e-12 && (expected - (PLDA_DIMENSION as f64).sqrt()).abs() < 1e-9),
     "got {result:?}"
   );
 }
 
+/// Random / hand-constructed input with arbitrary norm is also
+/// rejected. Catches accidental zero-vectors, mis-scaled inputs, etc.
 #[test]
-fn plda_transform_rejects_inf_input() {
-  let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.0f64; PLDA_DIMENSION];
-  input[100] = f64::INFINITY;
-  let result = plda.plda_transform(&input);
+fn post_xvec_capture_rejects_zero_vector() {
+  let arr = [0.0f64; PLDA_DIMENSION];
+  let result = PostXvecEmbedding::from_pyannote_capture(arr);
   assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
+    matches!(result, Err(Error::WrongPostXvecNorm { actual: 0.0, .. })),
     "got {result:?}"
   );
+}
+
+/// Sanity: a synthetic vector with the right norm passes the gate.
+#[test]
+fn post_xvec_capture_accepts_correctly_scaled_vector() {
+  let expected_norm = (PLDA_DIMENSION as f64).sqrt();
+  let per_elem = expected_norm / (PLDA_DIMENSION as f64).sqrt();
+  // each element = 1.0; sum of squares = 128; norm = sqrt(128) ✓
+  assert!((per_elem - 1.0).abs() < 1e-12);
+  let arr = [per_elem; PLDA_DIMENSION];
+  let post =
+    PostXvecEmbedding::from_pyannote_capture(arr).expect("right norm");
+  assert_eq!(post.as_array().len(), PLDA_DIMENSION);
+}
+
+/// Round-trip: `xvec_transform`'s output goes straight into
+/// `plda_transform` via the type system — no extra validation needed.
+#[test]
+fn xvec_to_plda_round_trip_uses_post_xvec_type() {
+  let plda = PldaTransform::new().expect("load PLDA");
+  let input = raw([0.5f32; EMBEDDING_DIMENSION]);
+  let post = plda.xvec_transform(&input).expect("non-degenerate");
+  let _ = plda.plda_transform(&post); // infallible — no Result on stage 2
 }
 
 // ── RawEmbedding domain enforcement (Codex review HIGH) ────────────
@@ -202,8 +246,9 @@ fn normalized_vs_raw_input_produce_materially_different_output() {
   let normed_out = plda.xvec_transform(&normed_in).expect("normed out");
 
   let l1_diff: f64 = raw_out
+    .as_array()
     .iter()
-    .zip(normed_out.iter())
+    .zip(normed_out.as_array().iter())
     .map(|(a, b)| (a - b).abs())
     .sum();
   // The PLDA transform is non-linear (centering + L2-norm + sqrt(D)

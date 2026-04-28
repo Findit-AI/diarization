@@ -10,7 +10,9 @@
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
-use dia::plda::{EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform, RawEmbedding};
+use dia::plda::{
+  EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform, PostXvecEmbedding, RawEmbedding,
+};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 
@@ -99,9 +101,10 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
     // Captured pyannote outputs are RAW (un-L2-normed); wrap them
     // explicitly to match the type-safe API.
     let raw = RawEmbedding::from_raw_array(input).expect("captured WeSpeaker outputs are finite");
-    let actual = plda
+    let actual_pe = plda
       .xvec_transform(&raw)
       .expect("captured raw embedding is non-degenerate");
+    let actual = actual_pe.as_array();
 
     for d in 0..PLDA_DIMENSION {
       let want = post_xvec_expected[(i, d)];
@@ -167,9 +170,12 @@ fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
     for d in 0..PLDA_DIMENSION {
       input[d] = post_xvec_in[(i, d)];
     }
-    let actual = plda
-      .plda_transform(&input)
-      .expect("captured post_xvec is finite");
+    // The captured post_xvec values come from a verified pyannote
+    // run; wrap explicitly via the from_pyannote_capture constructor
+    // (which validates norm ≈ sqrt(D_out)).
+    let post = PostXvecEmbedding::from_pyannote_capture(input)
+      .expect("captured post_xvec is in-distribution");
+    let actual = plda.plda_transform(&post);
     for d in 0..PLDA_DIMENSION {
       rust_post_plda[(i, d)] = actual[d];
       // Sign-invariant element comparison: |abs(want) - abs(got)|.

@@ -43,4 +43,31 @@ pub enum Error {
   /// is producing degenerate output.
   #[error("PLDA: centered input has near-zero norm; cannot L2-normalize")]
   DegenerateInput,
+
+  /// Vector handed to
+  /// [`PostXvecEmbedding::from_pyannote_capture`](crate::plda::PostXvecEmbedding::from_pyannote_capture)
+  /// has a norm too far from `sqrt(PLDA_DIMENSION) ≈ 11.31` — i.e.
+  /// it is not in the post-`xvec_tf` distribution that `plda_tf`
+  /// requires.
+  ///
+  /// Common misuses this catches:
+  /// - L2-normalized 128-d vector (norm = 1.0).
+  /// - Stale or wrong-revision pyannote capture.
+  /// - Random / hand-constructed input.
+  ///
+  /// Returning whitened features for any of these would silently
+  /// drift VBx clustering off the captured pyannote distribution.
+  /// Codex review HIGH.
+  #[error(
+    "PLDA: post-xvec norm {actual:.6} too far from expected sqrt(D_out) {expected:.6} \
+     (tolerance {tolerance:.0e}); not a post-xvec_tf vector"
+  )]
+  WrongPostXvecNorm {
+    /// Actual L2 norm of the offending input.
+    actual: f64,
+    /// Expected L2 norm — `sqrt(PLDA_DIMENSION)`.
+    expected: f64,
+    /// Absolute tolerance applied for the check.
+    tolerance: f64,
+  },
 }

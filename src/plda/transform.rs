@@ -97,6 +97,97 @@ impl RawEmbedding {
   }
 }
 
+/// Output of [`PldaTransform::xvec_transform`] / input to
+/// [`PldaTransform::plda_transform`]. A 128-d f64 vector with norm
+/// `sqrt(PLDA_DIMENSION) ≈ 11.31` — the intermediate distribution
+/// that `plda_tf` is mathematically defined for.
+///
+/// Wrapping the `[f64; 128]` in a distinct type prevents the
+/// stage-2 analogue of the `RawEmbedding` misuse: feeding
+/// `plda_transform` a vector that wasn't produced by `xvec_transform`
+/// (e.g. an L2-normalized 128-d vector with norm 1.0, a stale
+/// pyannote capture from a different revision, or hand-constructed
+/// input). Without this gate, `plda_transform` would whiten any
+/// finite input and return `Ok` — VBx then clusters wrong-distribution
+/// features without any error signal.
+///
+/// The legitimate ways to obtain a `PostXvecEmbedding` are:
+/// - Call [`PldaTransform::xvec_transform`] (the runtime path).
+/// - Call [`Self::from_pyannote_capture`] with a captured
+///   `post_xvec` value (parity tests / offline tooling); the
+///   constructor validates the norm matches `sqrt(D_out)`.
+///
+/// # Codex review HIGH
+///
+/// Phase 1 originally exposed `plda_transform(&[f64; 128])` directly.
+/// That allowed callers to feed wrong-distribution data and silently
+/// produce garbage whitened features. This wrapper makes the contract
+/// type-safe.
+#[derive(Debug, Clone)]
+pub struct PostXvecEmbedding([f64; PLDA_DIMENSION]);
+
+impl PostXvecEmbedding {
+  /// Internal constructor for `xvec_transform`. Skips norm validation
+  /// because the algorithm guarantees the invariant by construction.
+  pub(super) fn from_xvec_output(arr: [f64; PLDA_DIMENSION]) -> Self {
+    Self(arr)
+  }
+
+  /// External constructor for parity tests and offline tooling that
+  /// load a `post_xvec` value from a captured pyannote run. Validates
+  /// finite + norm within `1e-3` of `sqrt(PLDA_DIMENSION)`.
+  ///
+  /// # Errors
+  ///
+  /// - [`Error::NonFiniteInput`] on any NaN/`±inf` element.
+  /// - [`Error::WrongPostXvecNorm`] if the norm is outside the
+  ///   expected `sqrt(D_out) ± 1e-3` band — the input is not a
+  ///   post-`xvec_tf` vector.
+  ///
+  /// # Examples
+  ///
+  /// Captured pyannote post_xvec (norm ≈ sqrt(128)) is accepted:
+  ///
+  /// ```
+  /// use dia::plda::PostXvecEmbedding;
+  /// let mut arr = [0.0_f64; 128];
+  /// // Construct a vector with the right norm.
+  /// arr[0] = (128.0_f64).sqrt();
+  /// let _ = PostXvecEmbedding::from_pyannote_capture(arr).expect("right norm");
+  /// ```
+  ///
+  /// Raw `[f64; 128]` cannot be passed to `plda_transform` directly:
+  ///
+  /// ```compile_fail
+  /// use dia::plda::PldaTransform;
+  /// let plda = PldaTransform::new().unwrap();
+  /// let arr = [0.0_f64; 128];
+  /// // Doesn't compile — `plda_transform` requires `&PostXvecEmbedding`.
+  /// let _ = plda.plda_transform(&arr);
+  /// ```
+  pub fn from_pyannote_capture(arr: [f64; PLDA_DIMENSION]) -> Result<Self, Error> {
+    if !arr.iter().all(|v| v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
+    let norm: f64 = arr.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let expected = (PLDA_DIMENSION as f64).sqrt();
+    let tolerance = 1.0e-3;
+    if (norm - expected).abs() > tolerance {
+      return Err(Error::WrongPostXvecNorm {
+        actual: norm,
+        expected,
+        tolerance,
+      });
+    }
+    Ok(Self(arr))
+  }
+
+  /// Borrow the underlying f64 vector.
+  pub fn as_array(&self) -> &[f64; PLDA_DIMENSION] {
+    &self.0
+  }
+}
+
 /// Probabilistic Linear Discriminant Analysis transform. Two stages:
 ///
 /// 1. [`xvec_transform`](Self::xvec_transform): center → L2-norm → LDA →
@@ -215,7 +306,7 @@ impl PldaTransform {
   /// - [`Error::DegenerateInput`] if `‖input - mean1‖ < NORM_EPSILON`
   ///   (the input is essentially equal to `mean1` and L2-normalizing
   ///   the centered vector would amplify noise to dominate signal).
-  pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<[f64; PLDA_DIMENSION], Error> {
+  pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<PostXvecEmbedding, Error> {
     // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
     // so we don't re-validate here. Intermediate-vector checks happen
     // inside `checked_l2_normalize_in_place` below.
@@ -249,7 +340,9 @@ impl PldaTransform {
     for (slot, value) in out.iter_mut().zip(y.iter()) {
       *slot = *value;
     }
-    Ok(out)
+    // The algorithm guarantees `‖out‖ == sqrt(D_out)` by construction
+    // — no need to re-validate via `from_pyannote_capture`.
+    Ok(PostXvecEmbedding::from_xvec_output(out))
   }
 
   /// Second PLDA stage. Mirrors `plda_tf` in
@@ -269,23 +362,13 @@ impl PldaTransform {
   /// matmul in column-vector form — the resulting ordering matches
   /// pyannote's row-major numpy result.
   ///
-  /// # Errors
-  ///
-  /// - [`Error::NonFiniteInput`] if any element of `post_xvec` is
-  ///   NaN or `±inf`. There is no L2 normalization in this stage so
-  ///   no [`Error::DegenerateInput`] case — a zero-norm post_xvec
-  ///   yields a finite (centered, then projected) output, which is
-  ///   degenerate but well-defined.
-  pub fn plda_transform(
-    &self,
-    post_xvec: &[f64; PLDA_DIMENSION],
-  ) -> Result<[f64; PLDA_DIMENSION], Error> {
-    if post_xvec.iter().any(|v| !v.is_finite()) {
-      return Err(Error::NonFiniteInput);
-    }
-
+  /// `post_xvec` must be a [`PostXvecEmbedding`]. Distribution +
+  /// finite-ness are enforced by that type — `plda_transform` itself
+  /// does no validation. Codex review HIGH (stage-2 analogue of the
+  /// `RawEmbedding` boundary).
+  pub fn plda_transform(&self, post_xvec: &PostXvecEmbedding) -> [f64; PLDA_DIMENSION] {
     // 1. Center: x = post_xvec - plda_mu.
-    let mut x = DVector::<f64>::from_iterator(PLDA_DIMENSION, post_xvec.iter().copied());
+    let mut x = DVector::<f64>::from_iterator(PLDA_DIMENSION, post_xvec.0.iter().copied());
     x -= &self.plda_mu;
 
     // 2. Project onto descending eigenvectors. pyannote does
@@ -299,14 +382,16 @@ impl PldaTransform {
     for (slot, value) in out.iter_mut().zip(y.iter()) {
       *slot = *value;
     }
-    Ok(out)
+    out
   }
 
   /// Convenience: chain `xvec_transform` → `plda_transform`. Returns
-  /// the same error variants as the underlying calls.
+  /// only the errors produced by stage 1 (`xvec_transform`); stage 2
+  /// is now infallible because [`PostXvecEmbedding`] enforces its
+  /// own preconditions.
   pub fn project(&self, input: &RawEmbedding) -> Result<[f64; PLDA_DIMENSION], Error> {
     let post_xvec = self.xvec_transform(input)?;
-    self.plda_transform(&post_xvec)
+    Ok(self.plda_transform(&post_xvec))
   }
 
   /// Eigenvalue diagonal `phi` (descending) — `pyannote.audio.core.plda.PLDA.phi`.
