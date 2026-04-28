@@ -316,6 +316,17 @@ def main() -> None:
         q_final=buf.q_final,
         sp_final=buf.sp_final,
         elbo_trajectory=np.array(buf.elbo_trajectory, dtype=np.float64),
+        # `fa`, `fb`, `max_iters` are inputs to VBx — pinned in the
+        # pipeline's config.yaml (community-1 uses Fa=0.07, Fb=0.8;
+        # `cluster_vbx`'s call site at clustering.py:613 overrides
+        # maxIters=20). Capturing the inputs alongside the outputs
+        # (q_final, sp_final, elbo_trajectory) keeps the parity test
+        # self-contained: a future model upgrade surfaces as a
+        # parity failure rather than a silent hardcoded-constant
+        # drift. (Phase 2 plan, Task 0.)
+        fa=np.float64(cap.Fa),
+        fb=np.float64(cap.Fb),
+        max_iters=np.int64(20),
     )
     np.savez_compressed(
         out_dir / "clustering.npz",
