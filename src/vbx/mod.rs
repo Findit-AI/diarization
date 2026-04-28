@@ -19,5 +19,8 @@
 mod algo;
 mod error;
 
+#[cfg(test)]
+mod tests;
+
 pub use algo::{vbx_iterate, VbxOutput};
 pub use error::Error;
