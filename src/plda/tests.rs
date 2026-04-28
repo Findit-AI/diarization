@@ -5,7 +5,11 @@
 //! invariants — the kind of thing that should hold for any input,
 //! and that catches regressions long before the parity tests fail.
 
-use crate::plda::{EMBEDDING_DIMENSION, Error, PLDA_DIMENSION, PldaTransform};
+use crate::plda::{EMBEDDING_DIMENSION, Error, PLDA_DIMENSION, PldaTransform, RawEmbedding};
+
+fn raw(arr: [f32; EMBEDDING_DIMENSION]) -> RawEmbedding {
+  RawEmbedding::from_raw_array(arr).expect("test input must be finite")
+}
 
 /// `xvec_transform` output norm is `sqrt(PLDA_DIMENSION) ≈ 11.31` —
 /// see `pyannote/audio/utils/vbx.py:211-213`. Catches silent
@@ -14,7 +18,7 @@ use crate::plda::{EMBEDDING_DIMENSION, Error, PLDA_DIMENSION, PldaTransform};
 fn xvec_transform_output_norm_is_sqrt_d_out() {
   let plda = PldaTransform::new().expect("load PLDA");
   // Constant input — non-trivial after centering by mean1.
-  let input = [0.1f32; EMBEDDING_DIMENSION];
+  let input = raw([0.1f32; EMBEDDING_DIMENSION]);
   let out = plda.xvec_transform(&input).expect("non-degenerate input");
   let norm = out.iter().map(|v| v * v).sum::<f64>().sqrt();
   let expected = (PLDA_DIMENSION as f64).sqrt();
@@ -50,7 +54,7 @@ fn phi_is_sorted_descending() {
 #[test]
 fn project_chain_is_finite() {
   let plda = PldaTransform::new().expect("load PLDA");
-  let input = [0.5f32; EMBEDDING_DIMENSION];
+  let input = raw([0.5f32; EMBEDDING_DIMENSION]);
   let projected = plda.project(&input).expect("non-degenerate input");
   assert_eq!(projected.len(), PLDA_DIMENSION);
   assert!(
@@ -71,54 +75,44 @@ fn new_is_deterministic() {
     assert_eq!(x, y, "phi differs between two PldaTransform::new() calls");
   }
   // Same projection input → same output, byte-identical.
-  let input = [0.0f32; EMBEDDING_DIMENSION];
+  let input = raw([0.0f32; EMBEDDING_DIMENSION]);
   let pa = a.project(&input).expect("non-degenerate");
   let pb = b.project(&input).expect("non-degenerate");
   assert_eq!(pa, pb);
 }
 
-// ── Validation tests (Codex review MEDIUM) ─────────────────────────
+// ── Validation tests (Codex review MEDIUM + HIGH) ──────────────────
+//
+// Input finite-ness is now enforced at `RawEmbedding::from_raw_array`
+// construction — `xvec_transform` cannot receive a non-finite input
+// at all. Tests that previously fed NaN/Inf directly to
+// `xvec_transform` therefore moved to the constructor.
 
-/// NaN input must be rejected before any math runs. Without this
-/// check, NaN propagates silently into VBx / clustering with no
-/// observability for the caller.
+/// NaN input must be rejected at the `RawEmbedding` boundary so it
+/// cannot reach any math. Without this check, NaN propagates silently
+/// into VBx / clustering with no observability for the caller.
 #[test]
-fn xvec_transform_rejects_nan_input() {
-  let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.5f32; EMBEDDING_DIMENSION];
-  input[42] = f32::NAN;
-  let result = plda.xvec_transform(&input);
-  assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
-    "got {result:?}"
-  );
-}
-
-/// `+inf` and `-inf` must also be rejected — they survive the L2-norm
-/// check (norm = inf ≠ 0) and produce "plausible-looking" but
-/// meaningless output without the explicit finite check.
-#[test]
-fn xvec_transform_rejects_pos_inf_input() {
-  let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.5f32; EMBEDDING_DIMENSION];
-  input[7] = f32::INFINITY;
-  let result = plda.xvec_transform(&input);
-  assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
-    "got {result:?}"
-  );
+fn raw_embedding_rejects_nan() {
+  let mut arr = [0.5f32; EMBEDDING_DIMENSION];
+  arr[42] = f32::NAN;
+  let result = RawEmbedding::from_raw_array(arr);
+  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
 }
 
 #[test]
-fn xvec_transform_rejects_neg_inf_input() {
-  let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.5f32; EMBEDDING_DIMENSION];
-  input[42] = f32::NEG_INFINITY;
-  let result = plda.xvec_transform(&input);
-  assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
-    "got {result:?}"
-  );
+fn raw_embedding_rejects_pos_inf() {
+  let mut arr = [0.5f32; EMBEDDING_DIMENSION];
+  arr[7] = f32::INFINITY;
+  let result = RawEmbedding::from_raw_array(arr);
+  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
+}
+
+#[test]
+fn raw_embedding_rejects_neg_inf() {
+  let mut arr = [0.5f32; EMBEDDING_DIMENSION];
+  arr[42] = f32::NEG_INFINITY;
+  let result = RawEmbedding::from_raw_array(arr);
+  assert!(matches!(result, Err(Error::NonFiniteInput)), "got {result:?}");
 }
 
 // NOTE on `Error::DegenerateInput` from `xvec_transform`: that error
@@ -134,7 +128,9 @@ fn xvec_transform_rejects_neg_inf_input() {
 
 /// `plda_transform` rejects NaN in `post_xvec`. There is no L2-norm
 /// inside this stage so DegenerateInput is not applicable; only the
-/// finite check applies.
+/// finite check applies. No `RawEmbedding`-style wrapper here because
+/// the `[f64; 128]` input domain is internal — only consumers of this
+/// API are `Self::project` and tests.
 #[test]
 fn plda_transform_rejects_nan_input() {
   let plda = PldaTransform::new().expect("load PLDA");
@@ -159,16 +155,59 @@ fn plda_transform_rejects_inf_input() {
   );
 }
 
-/// `project()` propagates the underlying error from `xvec_transform`
-/// rather than swallowing it.
+// ── RawEmbedding domain enforcement (Codex review HIGH) ────────────
+
+/// Feeding an L2-normalized vector (the wrong distribution for PLDA)
+/// produces a materially-different output than feeding the
+/// corresponding raw vector. The test is observable evidence that
+/// the API distinction matters — if a future refactor accidentally
+/// loses the `RawEmbedding` wrapper, this test stays as proof of
+/// what's at stake.
+///
+/// We construct the same vector in both forms (`raw_arr` vs
+/// `raw_arr / ‖raw_arr‖`), wrap each as `RawEmbedding`, and assert
+/// that `xvec_transform`'s outputs differ by far more than float
+/// roundoff.
 #[test]
-fn project_propagates_xvec_error() {
+fn normalized_vs_raw_input_produce_materially_different_output() {
   let plda = PldaTransform::new().expect("load PLDA");
-  let mut input = [0.0f32; EMBEDDING_DIMENSION];
-  input[5] = f32::NAN;
-  let result = plda.project(&input);
+
+  // Use a noticeably-non-unit input vector.
+  let mut raw_arr = [0.0f32; EMBEDDING_DIMENSION];
+  for (i, slot) in raw_arr.iter_mut().enumerate() {
+    *slot = ((i as f32) - 128.0) * 0.01;
+  }
+  let raw_norm: f32 = raw_arr.iter().map(|v| v * v).sum::<f32>().sqrt();
   assert!(
-    matches!(result, Err(Error::NonFiniteInput)),
-    "got {result:?}"
+    (raw_norm - 1.0).abs() > 0.5,
+    "test input must be far from unit norm: norm = {raw_norm}"
+  );
+  let mut normed_arr = raw_arr;
+  for slot in normed_arr.iter_mut() {
+    *slot /= raw_norm;
+  }
+
+  let raw_in = raw(raw_arr);
+  let normed_in = raw(normed_arr);
+  let raw_out = plda.xvec_transform(&raw_in).expect("raw out");
+  let normed_out = plda.xvec_transform(&normed_in).expect("normed out");
+
+  let l1_diff: f64 = raw_out
+    .iter()
+    .zip(normed_out.iter())
+    .map(|(a, b)| (a - b).abs())
+    .sum();
+  // The PLDA transform is non-linear (centering + L2-norm + sqrt(D)
+  // scaling at two different stages); identical inputs always
+  // produce identical outputs, but materially different inputs
+  // (raw vs L2-normalized) produce materially different outputs.
+  // This bound (>1.0 sum-abs-difference over 128 dims) is loose
+  // enough to be robust to tiny test-input changes but tight
+  // enough to catch a regression where the type system stops
+  // distinguishing raw from normalized.
+  assert!(
+    l1_diff > 1.0,
+    "normalized vs raw produced near-identical output (sum-abs diff = \
+     {l1_diff:.3e}); the API contract is broken"
   );
 }

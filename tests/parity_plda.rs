@@ -10,7 +10,7 @@
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
-use dia::plda::{EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform};
+use dia::plda::{EMBEDDING_DIMENSION, PLDA_DIMENSION, PldaTransform, RawEmbedding};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 
@@ -96,9 +96,13 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
     let mut input = [0.0f32; EMBEDDING_DIMENSION];
     input.copy_from_slice(&raw_flat[off..off + EMBEDDING_DIMENSION]);
 
+    // Captured pyannote outputs are RAW (un-L2-normed); wrap them
+    // explicitly to match the type-safe API.
+    let raw = RawEmbedding::from_raw_array(input)
+      .expect("captured WeSpeaker outputs are finite");
     let actual = plda
-      .xvec_transform(&input)
-      .expect("captured WeSpeaker outputs are finite + non-degenerate");
+      .xvec_transform(&raw)
+      .expect("captured raw embedding is non-degenerate");
 
     for d in 0..PLDA_DIMENSION {
       let want = post_xvec_expected[(i, d)];

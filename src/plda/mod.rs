@@ -39,7 +39,7 @@ mod transform;
 mod tests;
 
 pub use error::Error;
-pub use transform::PldaTransform;
+pub use transform::{PldaTransform, RawEmbedding};
 
 /// PLDA stage-1 / stage-2 dimension. Pyannote's
 /// `pyannote/speaker-diarization-community-1` always uses 128.

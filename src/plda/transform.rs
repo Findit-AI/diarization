@@ -15,6 +15,88 @@ use crate::{
   },
 };
 
+/// Raw, **unnormalized** WeSpeaker output destined for the PLDA
+/// transform. Wrapping the `[f32; 256]` in a distinct type prevents
+/// the most likely API misuse: feeding
+/// [`dia::embed::Embedding::as_array`](crate::embed::Embedding::as_array),
+/// which is L2-normalized.
+///
+/// Pyannote's `xvec_tf` operates on **raw** WeSpeaker outputs
+/// (`pyannote/audio/pipelines/clustering.py:608` —
+/// `fea = self.plda(train_embeddings)`, where `train_embeddings` is
+/// the un-normalized output of `get_embeddings`; the
+/// `train_embeddings_normed` copy is only used for AHC linkage). If a
+/// caller feeds an L2-normalized vector here instead, the centering
+/// `x - mean1` produces a different intermediate, the LDA projection
+/// maps to the wrong subspace, and downstream VBx clustering silently
+/// drifts off the captured pyannote distribution. See
+/// `normalized_vs_raw_input_produce_materially_different_output` in
+/// `src/plda/tests.rs`.
+///
+/// # Codex review HIGH
+///
+/// Phase 1 originally exposed `xvec_transform(&[f32; 256])` directly.
+/// That allowed `plda.project(embedding.as_array())` to compile and
+/// silently produce wrong-distribution PLDA features. This wrapper
+/// makes the contract type-safe — `xvec_transform`'s signature now
+/// requires `&RawEmbedding`, which can only be constructed from a
+/// raw array via [`Self::from_raw_array`].
+#[derive(Debug, Clone)]
+pub struct RawEmbedding([f32; EMBEDDING_DIMENSION]);
+
+impl RawEmbedding {
+  /// Wrap a raw, **unnormalized** WeSpeaker embedding vector.
+  ///
+  /// Validates the array is finite (rejects NaN / `±inf`); production
+  /// callers building this from a future `EmbedModel::embed_raw_*`
+  /// API will get the validation for free at the boundary.
+  ///
+  /// **Do NOT pass `dia::embed::Embedding::as_array()` here.** That
+  /// vector has been L2-normalized — wrong distribution for PLDA —
+  /// and the type system will reject it (the doctest below is a
+  /// `compile_fail` example proving it).
+  ///
+  /// # Errors
+  ///
+  /// - [`Error::NonFiniteInput`] if any element is NaN, `+inf`, or
+  ///   `-inf`.
+  ///
+  /// # Examples
+  ///
+  /// Construction from a raw array:
+  ///
+  /// ```
+  /// use dia::plda::RawEmbedding;
+  /// let raw: [f32; 256] = [0.5; 256];
+  /// let _ = RawEmbedding::from_raw_array(raw).expect("finite");
+  /// ```
+  ///
+  /// `dia::embed::Embedding::as_array()` is the wrong-distribution
+  /// type and the compiler rejects it:
+  ///
+  /// ```compile_fail
+  /// use dia::embed::Embedding;
+  /// use dia::plda::PldaTransform;
+  /// let plda = PldaTransform::new().unwrap();
+  /// let emb = Embedding::normalize_from([0.5; 256]).unwrap();
+  /// // The type system rejects this — `xvec_transform` requires
+  /// // `&RawEmbedding`, not `&[f32; 256]`.
+  /// let _ = plda.xvec_transform(emb.as_array());
+  /// ```
+  pub fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
+    if !arr.iter().all(|v| v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
+    Ok(Self(arr))
+  }
+
+  /// Borrow the underlying raw vector. Provided for parity tests and
+  /// internal use; production callers should not need this.
+  pub fn as_array(&self) -> &[f32; EMBEDDING_DIMENSION] {
+    &self.0
+  }
+}
+
 /// Probabilistic Linear Discriminant Analysis transform. Two stages:
 ///
 /// 1. [`xvec_transform`](Self::xvec_transform): center → L2-norm → LDA →
@@ -120,26 +202,32 @@ impl PldaTransform {
   /// for the downstream PLDA whitening; downstream consumers MUST
   /// not re-normalize this output.
   ///
+  /// `input` is a [`RawEmbedding`] — a raw, **unnormalized** WeSpeaker
+  /// vector — not [`dia::embed::Embedding`](crate::embed::Embedding)
+  /// (L2-normalized) which is the wrong distribution for PLDA.
+  ///
   /// # Errors
   ///
-  /// - [`Error::NonFiniteInput`] if any element of `input` is NaN
-  ///   or `±inf`, or if a non-finite value appears in an
-  ///   intermediate vector (e.g. mean2 + Inf).
+  /// - [`Error::NonFiniteInput`] if a non-finite value appears in an
+  ///   intermediate vector (the input is finite by `RawEmbedding`'s
+  ///   construction-time invariant; this guards against arithmetic
+  ///   overflows in the LDA projection).
   /// - [`Error::DegenerateInput`] if `‖input - mean1‖ < NORM_EPSILON`
   ///   (the input is essentially equal to `mean1` and L2-normalizing
   ///   the centered vector would amplify noise to dominate signal).
   pub fn xvec_transform(
     &self,
-    input: &[f32; EMBEDDING_DIMENSION],
+    input: &RawEmbedding,
   ) -> Result<[f64; PLDA_DIMENSION], Error> {
-    // 0. Reject non-finite input outright. Cheap pre-check; avoids
-    //    silently producing NaN garbage downstream.
-    if input.iter().any(|v| !v.is_finite()) {
-      return Err(Error::NonFiniteInput);
-    }
+    // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
+    // so we don't re-validate here. Intermediate-vector checks happen
+    // inside `checked_l2_normalize_in_place` below.
 
     // 1. Promote f32 input to f64 and center: x = input - mean1.
-    let mut x = DVector::<f64>::from_iterator(EMBEDDING_DIMENSION, input.iter().map(|v| *v as f64));
+    let mut x = DVector::<f64>::from_iterator(
+      EMBEDDING_DIMENSION,
+      input.0.iter().map(|v| *v as f64),
+    );
     x -= &self.mean1;
 
     // 2. L2-normalize, then scale by sqrt(D_in). Validate the norm
@@ -223,7 +311,7 @@ impl PldaTransform {
   /// the same error variants as the underlying calls.
   pub fn project(
     &self,
-    input: &[f32; EMBEDDING_DIMENSION],
+    input: &RawEmbedding,
   ) -> Result<[f64; PLDA_DIMENSION], Error> {
     let post_xvec = self.xvec_transform(input)?;
     self.plda_transform(&post_xvec)
