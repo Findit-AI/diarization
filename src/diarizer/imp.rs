@@ -12,8 +12,30 @@ use crate::{
     span::{CollectedEmbedding, DiarizedSpan},
   },
   embed::EmbedModel,
-  segment::{Action, SegmentModel, Segmenter, WINDOW_SAMPLES},
+  segment::{
+    Action, SegmentModel, Segmenter, SpeakerActivity, WINDOW_SAMPLES, WindowId,
+    options::{FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS},
+  },
 };
+
+/// Per-window state stashed by [`Diarizer::pending_embed`] when the
+/// embed phase fails with a retryable error. Holds everything needed
+/// to replay the window from scratch on the next drain — including
+/// the raw scores (so we don't have to re-run segmentation inference)
+/// and the activity list (so we don't have to re-poll the segmenter).
+///
+/// The embed phase is restructured to be transactional (gather all
+/// embeddings before mutating any reconstruction state), so re-running
+/// it never double-records anything. Codex review HIGH.
+pub(crate) type RawProbs = Box<[[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize]>;
+
+#[derive(Debug)]
+pub(crate) struct PendingEmbedWindow {
+  pub(crate) window_id: WindowId,
+  pub(crate) window_start: u64,
+  pub(crate) raw_probs: RawProbs,
+  pub(crate) activities: Vec<SpeakerActivity>,
+}
 
 /// Top-level streaming diarizer.
 ///
@@ -49,6 +71,17 @@ pub struct Diarizer {
   /// its frames would silently disappear from the reconstruction.
   /// Codex review HIGH.
   pub(crate) pending_seg_inference: Option<(crate::segment::WindowId, Box<[f32]>)>,
+  /// Stashed in-flight embedding work. Set when
+  /// [`EmbedModel::embed_masked`](crate::embed::EmbedModel) returns a
+  /// transient error mid-window (e.g. `embed::Error::Ort`). The next
+  /// [`drain`](Self::drain) replays the entire window — the embed
+  /// phase is restructured to run as a pure-gather pass first, so
+  /// failure mid-iteration leaves NO partial reconstruction state.
+  /// Without this stash, an Ort hiccup poisoned the whole stream;
+  /// callers had to drop the session via [`clear`](Self::clear) and
+  /// re-process from scratch even though every previous window had
+  /// already been correctly committed. Codex review HIGH.
+  pub(crate) pending_embed: Option<PendingEmbedWindow>,
   /// Once `true`, [`process_samples`](Self::process_samples) and
   /// [`finish_stream`](Self::finish_stream) immediately return
   /// [`Error::Poisoned`] until [`clear`](Self::clear) resets the state.
@@ -109,6 +142,7 @@ impl Diarizer {
       collected_embeddings: Vec::new(),
       reconstruct: crate::diarizer::reconstruct::ReconstructState::new(),
       pending_seg_inference: None,
+      pending_embed: None,
       poisoned: false,
       finished: false,
       finishing: false,
@@ -152,6 +186,7 @@ impl Diarizer {
     self.collected_embeddings.clear();
     self.reconstruct.clear();
     self.pending_seg_inference = None;
+    self.pending_embed = None;
     self.poisoned = false;
     self.finished = false;
     self.finishing = false;
@@ -333,9 +368,13 @@ impl Diarizer {
       return Err(Error::Finished);
     }
     let result = self.process_samples_inner(seg_model, embed_model, samples, &mut emit);
-    if result.is_err() && self.pending_seg_inference.is_none() {
-      // No retryable stash → not recoverable → poison so the caller
-      // can't continue past partial-state corruption.
+    if result.is_err()
+      && self.pending_seg_inference.is_none()
+      && self.pending_embed.is_none()
+    {
+      // No retryable stash of either kind → not recoverable → poison
+      // so the caller can't continue past partial-state corruption.
+      // Codex review HIGH.
       self.poisoned = true;
     }
     result
@@ -366,7 +405,12 @@ impl Diarizer {
     // retry is the first thing it does and propagates errors with `?`).
     // If the stash retry fails again, we propagate the error WITHOUT
     // pushing the new samples; the caller can retry safely.
-    if self.pending_seg_inference.is_some() {
+    if self.pending_seg_inference.is_some() || self.pending_embed.is_some() {
+      // Both stashes must be cleared before accepting new audio so the
+      // caller's natural retry of the same chunk doesn't double-append
+      // it. Drain replays both stashes (segmentation first, then any
+      // pending embed window) before polling new actions. Codex review
+      // HIGH.
       self.drain(seg_model, embed_model, emit)?;
     }
     self.push_audio(samples);
@@ -412,7 +456,10 @@ impl Diarizer {
     // leaves `finished` still false. Codex review HIGH.
     self.finishing = true;
     let result = self.finish_stream_inner(seg_model, embed_model, &mut emit);
-    if result.is_err() && self.pending_seg_inference.is_none() {
+    if result.is_err()
+      && self.pending_seg_inference.is_none()
+      && self.pending_embed.is_none()
+    {
       self.poisoned = true;
     }
     if result.is_ok() {
@@ -464,15 +511,11 @@ impl Diarizer {
   {
     use std::collections::HashMap;
 
-    use crate::segment::{
-      SpeakerActivity, WindowId,
-      options::{FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS},
-    };
-
     // Per-WindowId batching. Action::SpeakerScores arrives BEFORE the
     // window's Activity events (Task 30 contract), but we make the
     // pump robust to any order by buffering until both have been seen.
-    type RawProbs = Box<[[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize]>;
+    // `RawProbs` is the module-level type alias (also used by
+    // `PendingEmbedWindow`).
     let mut pending_scores: HashMap<WindowId, RawProbs> = HashMap::new();
     let mut pending_window_starts: HashMap<WindowId, u64> = HashMap::new();
     let mut pending_activities: HashMap<WindowId, Vec<SpeakerActivity>> = HashMap::new();
@@ -564,6 +607,46 @@ impl Diarizer {
       }
     }
 
+    // Replay any stashed embed window FIRST so the caller's natural
+    // retry doesn't double-commit anything. The stash holds everything
+    // needed to resume — raw_probs, activities, window_start — and is
+    // cleared on success. Codex review HIGH.
+    if let Some(stash) = self.pending_embed.take() {
+      let PendingEmbedWindow {
+        window_id,
+        window_start,
+        raw_probs,
+        activities,
+      } = stash;
+      match self.process_window_activities(
+        window_id,
+        window_start,
+        &raw_probs,
+        &activities,
+        embed_model,
+      ) {
+        Ok(()) => {
+          self.reconstruct.integrate_window(
+            window_id,
+            window_start,
+            &raw_probs,
+            self.opts.binarize_threshold(),
+          );
+        }
+        Err(e) => {
+          // Re-stash and bail. Phase-A failure leaves no partial
+          // commits — we can replay verbatim next time.
+          self.pending_embed = Some(PendingEmbedWindow {
+            window_id,
+            window_start,
+            raw_probs,
+            activities,
+          });
+          return Err(e);
+        }
+      }
+    }
+
     // Process every observed window (in arrival order — `observed` is
     // a Vec, not a HashSet) once the segmenter is drained. A window is
     // only processed after `push_inference` has fired its Activity +
@@ -580,7 +663,22 @@ impl Diarizer {
       let activities = pending_activities.remove(&id).unwrap_or_default();
 
       // Embed each activity, cluster, record (window, slot) → cluster_id.
-      self.process_window_activities(id, window_start, &raw_probs, &activities, embed_model)?;
+      // On retryable failure (transient ort error from `embed_masked`),
+      // stash the whole window so the next drain can replay it without
+      // re-running segmentation. The Phase-A/B split in
+      // `process_window_activities` guarantees no reconstruction state
+      // was mutated when this returns Err. Codex review HIGH.
+      if let Err(e) =
+        self.process_window_activities(id, window_start, &raw_probs, &activities, embed_model)
+      {
+        self.pending_embed = Some(PendingEmbedWindow {
+          window_id: id,
+          window_start,
+          raw_probs,
+          activities,
+        });
+        return Err(e);
+      }
 
       // Integrate this window into reconstruction.
       self.reconstruct.integrate_window(
@@ -628,6 +726,14 @@ impl Diarizer {
   ///
   /// With `exclude_overlap = false`: skip step 1, use a `[true; len]`
   /// mask directly (equivalent to `EmbedModel::embed`).
+  ///
+  /// **Transactional** (Codex review HIGH): runs in two phases. Phase A
+  /// gathers an embedding for every activity into a local buffer
+  /// without touching reconstruction state; if any embed call returns
+  /// a non-`InvalidClip` error (e.g. transient `ort::Error`), the
+  /// caller can stash the inputs and retry without rolling anything
+  /// back. Phase B then commits clustering + reconstruction state for
+  /// every activity in the buffer.
   fn process_window_activities(
     &mut self,
     window_id: crate::segment::WindowId,
@@ -637,64 +743,35 @@ impl Diarizer {
     activities: &[crate::segment::SpeakerActivity],
     embed_model: &mut EmbedModel,
   ) -> Result<(), Error> {
-    use crate::{
-      diarizer::overlap::{
-        binarize_per_frame, decide_keep_mask, frame_mask_to_sample_keep_mask, speaker_mask_for_slot,
-      },
-      embed::Error as EmbedError,
-    };
-
+    // ── Phase A: gather embeddings (NO state changes on failure). ──
+    //
+    // `embeds[i] = Some((embedding, used_clean))` if activity #i
+    // produced an embedding; `None` if it was skipped (persistent
+    // `InvalidClip`). Any other embed error returns Err immediately
+    // — at that point nothing has been pushed into the clusterer or
+    // the reconstruction state, so the caller can re-stash and retry.
+    let mut embeds: Vec<Option<(crate::embed::Embedding, bool)>> =
+      Vec::with_capacity(activities.len());
     for activity in activities {
+      let result = self.embed_one_activity(activity, raw_probs, window_start, embed_model)?;
+      embeds.push(result);
+    }
+
+    // ── Phase B: commit (cluster + record). ──
+    //
+    // From here on, errors leave reconstruction state partially
+    // committed. The realistic failure mode is
+    // `Cluster::TooManySpeakers` (a configuration error, not
+    // transient), which still propagates and poisons; that matches
+    // the existing contract — it is a caller-side cap problem and
+    // retrying without reconfiguring would not help.
+    for (activity, embed_opt) in activities.iter().zip(embeds) {
+      let Some((embedding, used_clean)) = embed_opt else {
+        continue; // skipped (matches pyannote skip semantics)
+      };
       let s = activity.speaker_slot();
       let s0 = activity.range().start_pts() as u64;
       let s1 = activity.range().end_pts() as u64;
-
-      // Slice the audio for this activity.
-      let activity_samples = self.slice_audio(s0, s1)?;
-
-      // Build the initial mask (clean if exclude_overlap = true; all-true otherwise).
-      let want_clean = self.opts.exclude_overlap();
-      let (mask, used_clean_initial) = if want_clean {
-        let dec = decide_keep_mask(
-          raw_probs,
-          self.opts.binarize_threshold(),
-          s,
-          window_start,
-          s0,
-          s1,
-        );
-        (dec.keep_mask, dec.used_clean)
-      } else {
-        let all_true = vec![true; activity_samples.len()];
-        (all_true, false)
-      };
-
-      // Try embed_masked. On InvalidClip from a clean mask, fall back
-      // to a speaker-only mask. On InvalidClip even on speaker-only,
-      // skip the activity (pyannote semantics).
-      let (embedding_opt, used_clean) = match embed_model.embed_masked(&activity_samples, &mask) {
-        Ok(r) => (Some(*r.embedding()), used_clean_initial),
-        Err(EmbedError::InvalidClip { .. }) if used_clean_initial => {
-          // Fall back to speaker-only mask.
-          let binarized = binarize_per_frame(raw_probs, self.opts.binarize_threshold());
-          let speaker = speaker_mask_for_slot(&binarized, s);
-          let speaker_keep = frame_mask_to_sample_keep_mask(&speaker, window_start, s0, s1);
-          match embed_model.embed_masked(&activity_samples, &speaker_keep) {
-            Ok(r) => (Some(*r.embedding()), false),
-            Err(EmbedError::InvalidClip { .. }) => (None, false), // skip
-            Err(e) => return Err(e.into()),
-          }
-        }
-        Err(EmbedError::InvalidClip { .. }) => {
-          // First attempt was speaker-only or all-true; persistent failure → skip.
-          (None, false)
-        }
-        Err(e) => return Err(e.into()),
-      };
-
-      let Some(embedding) = embedding_opt else {
-        continue; // skipped (matches pyannote skip semantics)
-      };
 
       // Cluster.
       let assignment = self.clusterer.submit(&embedding)?;
@@ -759,5 +836,72 @@ impl Diarizer {
       }
     }
     Ok(())
+  }
+
+  /// Phase-A helper for [`Self::process_window_activities`]: extract
+  /// one activity's embedding without touching any cluster /
+  /// reconstruction state. Returns:
+  /// - `Ok(Some((embedding, used_clean)))` when an embedding was
+  ///   produced (clean mask, with fall-back to speaker-only if the
+  ///   clean mask was too short).
+  /// - `Ok(None)` when both mask paths returned `InvalidClip` —
+  ///   pyannote's "skip the activity" semantics.
+  /// - `Err(_)` for any other error (transient ort, audio buffer
+  ///   underflow, …). The caller MUST treat these as retryable and
+  ///   stash the entire window's inputs without committing anything.
+  ///
+  /// Codex review HIGH.
+  fn embed_one_activity(
+    &self,
+    activity: &SpeakerActivity,
+    raw_probs: &[[f32; crate::segment::options::FRAMES_PER_WINDOW];
+       crate::segment::options::MAX_SPEAKER_SLOTS as usize],
+    window_start: u64,
+    embed_model: &mut EmbedModel,
+  ) -> Result<Option<(crate::embed::Embedding, bool)>, Error> {
+    use crate::{
+      diarizer::overlap::{
+        binarize_per_frame, decide_keep_mask, frame_mask_to_sample_keep_mask, speaker_mask_for_slot,
+      },
+      embed::Error as EmbedError,
+    };
+
+    let s = activity.speaker_slot();
+    let s0 = activity.range().start_pts() as u64;
+    let s1 = activity.range().end_pts() as u64;
+    let activity_samples = self.slice_audio(s0, s1)?;
+
+    let want_clean = self.opts.exclude_overlap();
+    let (mask, used_clean_initial) = if want_clean {
+      let dec = decide_keep_mask(
+        raw_probs,
+        self.opts.binarize_threshold(),
+        s,
+        window_start,
+        s0,
+        s1,
+      );
+      (dec.keep_mask, dec.used_clean)
+    } else {
+      let all_true = vec![true; activity_samples.len()];
+      (all_true, false)
+    };
+
+    match embed_model.embed_masked(&activity_samples, &mask) {
+      Ok(r) => Ok(Some((*r.embedding(), used_clean_initial))),
+      Err(EmbedError::InvalidClip { .. }) if used_clean_initial => {
+        // Fall back to speaker-only mask.
+        let binarized = binarize_per_frame(raw_probs, self.opts.binarize_threshold());
+        let speaker = speaker_mask_for_slot(&binarized, s);
+        let speaker_keep = frame_mask_to_sample_keep_mask(&speaker, window_start, s0, s1);
+        match embed_model.embed_masked(&activity_samples, &speaker_keep) {
+          Ok(r) => Ok(Some((*r.embedding(), false))),
+          Err(EmbedError::InvalidClip { .. }) => Ok(None), // skip
+          Err(e) => Err(e.into()),
+        }
+      }
+      Err(EmbedError::InvalidClip { .. }) => Ok(None), // skip
+      Err(e) => Err(e.into()),
+    }
   }
 }

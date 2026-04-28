@@ -169,7 +169,34 @@ impl SegmentModel {
       self.input_scratch.as_slice()
     ),)?,])?;
 
-    let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    // Validate the trailing two dims (frames, classes) BEFORE relying on
+    // the row-major flattening. A model returning the same element count
+    // in a different layout — e.g. `[1, POWERSET_CLASSES, FRAMES_PER_WINDOW]`
+    // (axes swapped) or `[FRAMES_PER_WINDOW * POWERSET_CLASSES]` (rank
+    // 1) — would otherwise pass the count check, and `push_inference`
+    // would softmax groups of 7 values that are not class logits for
+    // one frame, silently corrupting all speaker probabilities. Codex
+    // review HIGH.
+    let dims: &[i64] = shape.as_ref();
+    let n_frames = FRAMES_PER_WINDOW as i64;
+    let n_classes = POWERSET_CLASSES as i64;
+    // Required canonical layout: `[*, FRAMES_PER_WINDOW, POWERSET_CLASSES]`
+    // where `*` is one or more leading batch / channel dims.
+    let layout_ok = if dims.len() >= 2 {
+      dims[dims.len() - 2] == n_frames && dims[dims.len() - 1] == n_classes
+    } else {
+      false
+    };
+    if !layout_ok {
+      return Err(Error::IncompatibleModel {
+        tensor: "output",
+        // `-1` matches the existing dynamic-batch convention used by
+        // `Error::IncompatibleModel`.
+        expected: &[-1, FRAMES_PER_WINDOW as i64, POWERSET_CLASSES as i64],
+        got: dims.to_vec(),
+      });
+    }
     let expected = FRAMES_PER_WINDOW * POWERSET_CLASSES;
     if data.len() != expected {
       return Err(Error::InferenceShapeMismatch {
