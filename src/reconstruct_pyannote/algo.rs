@@ -3,6 +3,15 @@
 
 use crate::{hungarian::UNMATCHED, reconstruct_pyannote::error::Error};
 
+/// Hard upper bound on the cluster-id range accepted in `hard_clusters`.
+/// Pyannote's diarization pipeline emits ids bounded by the alive
+/// cluster count after VBx (typically 1–4). `1024` is ~256× any
+/// realistic speaker count; it stops a corrupt or malicious caller
+/// from driving the `num_clusters * num_chunks * num_frames_per_chunk`
+/// allocation into the multi-GB range. Codex review MEDIUM round 4
+/// of Phase 5.
+pub const MAX_CLUSTER_ID: i32 = 1023;
+
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingWindow {
@@ -123,6 +132,30 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   for &v in segmentations {
     if !v.is_finite() {
       return Err(Error::NonFinite("segmentations"));
+    }
+  }
+
+  // Validate cluster ids: `UNMATCHED` (-2) is allowed; non-negative
+  // values must be in `[0, MAX_CLUSTER_ID]`. Codex review MEDIUM
+  // round 4: a stray negative id (e.g. -1) silently dropped active
+  // speech under the previous code (skipped by the speakers_in_k
+  // filter), and a corrupt large positive id could drive the
+  // num_clusters allocation into multi-GB range.
+  for row in hard_clusters {
+    for &k in row {
+      if k == UNMATCHED {
+        continue;
+      }
+      if k < 0 {
+        return Err(Error::Shape(
+          "hard_clusters contains a negative id other than UNMATCHED",
+        ));
+      }
+      if k > MAX_CLUSTER_ID {
+        return Err(Error::Shape(
+          "hard_clusters id exceeds MAX_CLUSTER_ID (1023)",
+        ));
+      }
     }
   }
 

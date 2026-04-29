@@ -1,7 +1,8 @@
 //! Model-free unit tests for `dia::reconstruct_pyannote`.
 
+use crate::hungarian::UNMATCHED;
 use crate::reconstruct_pyannote::{
-  Error, ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct,
+  Error, MAX_CLUSTER_ID, ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct,
 };
 
 fn default_swins() -> (SlidingWindow, SlidingWindow) {
@@ -129,6 +130,74 @@ fn rttm_eof_single_final_frame_active_emits_no_span() {
     spans.is_empty(),
     "single-frame EOF should emit no span: {spans:?}"
   );
+}
+
+/// Negative ids other than `UNMATCHED` are rejected at the boundary.
+/// Without this guard, `-1` would silently drop the speaker from any
+/// cluster mapping (the speakers_in_k filter never matches negative
+/// `k_iter`). Codex review MEDIUM round 4 of Phase 5.
+#[test]
+fn rejects_negative_cluster_id_other_than_unmatched() {
+  let (chunks_sw, frames_sw) = default_swins();
+  // hard_clusters with a -1 entry (NOT the UNMATCHED -2 sentinel).
+  let hard_clusters = vec![vec![0i32, -1i32]];
+  let segmentations = vec![0.5_f64; 8];
+  let input = ReconstructInput {
+    segmentations: &segmentations,
+    num_chunks: 1,
+    num_frames_per_chunk: 4,
+    num_speakers: 2,
+    hard_clusters: &hard_clusters,
+    count: &[1u8; 4],
+    num_output_frames: 4,
+    chunks_sw,
+    frames_sw,
+  };
+  assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
+}
+
+/// `UNMATCHED` (`-2`) is the only allowed negative id; this test
+/// pins that contract.
+#[test]
+fn accepts_unmatched_sentinel() {
+  let (chunks_sw, frames_sw) = default_swins();
+  let hard_clusters = vec![vec![0i32, UNMATCHED]];
+  let segmentations = vec![0.5_f64; 8];
+  let input = ReconstructInput {
+    segmentations: &segmentations,
+    num_chunks: 1,
+    num_frames_per_chunk: 4,
+    num_speakers: 2,
+    hard_clusters: &hard_clusters,
+    count: &[1u8; 4],
+    num_output_frames: 4,
+    chunks_sw,
+    frames_sw,
+  };
+  assert!(reconstruct(&input).is_ok());
+}
+
+/// Cluster ids beyond `MAX_CLUSTER_ID` are rejected before allocation.
+/// Without this guard, a caller passing `k = i32::MAX` would force
+/// `num_clusters ≈ 2.1e9`, multiplying with `num_chunks *
+/// num_frames_per_chunk` into a multi-petabyte allocation request.
+#[test]
+fn rejects_cluster_id_above_max() {
+  let (chunks_sw, frames_sw) = default_swins();
+  let hard_clusters = vec![vec![0i32, MAX_CLUSTER_ID + 1]];
+  let segmentations = vec![0.5_f64; 8];
+  let input = ReconstructInput {
+    segmentations: &segmentations,
+    num_chunks: 1,
+    num_frames_per_chunk: 4,
+    num_speakers: 2,
+    hard_clusters: &hard_clusters,
+    count: &[1u8; 4],
+    num_output_frames: 4,
+    chunks_sw,
+    frames_sw,
+  };
+  assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
 #[test]

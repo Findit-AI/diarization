@@ -29,7 +29,7 @@ mod rttm_parity_tests;
 #[cfg(test)]
 mod tests;
 
-pub use algo::{ReconstructInput, SlidingWindow, reconstruct};
+pub use algo::{MAX_CLUSTER_ID, ReconstructInput, SlidingWindow, reconstruct};
 pub use error::Error;
 pub use rttm::{RttmSpan, discrete_to_spans, spans_to_rttm_lines};
 
