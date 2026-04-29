@@ -5,6 +5,36 @@
 //! full `(num_chunks, num_speakers, num_clusters)` cost tensor, replaces
 //! NaN entries with the *global* `np.nanmin(soft_clusters)`, and runs
 //! `scipy.optimize.linear_sum_assignment(cost, maximize=True)` per chunk.
+//!
+//! ## Tie-breaking divergence from scipy (Codex review HIGH round 3)
+//!
+//! `pathfinding::kuhn_munkres` produces a maximum-weight matching, but on
+//! tied optima its label choice can differ from
+//! `scipy.optimize.linear_sum_assignment`. Counterexample: cost
+//! `[[0,0],[0,0],[1,1]]` → scipy returns `[-2, 1, 0]`, pathfinding
+//! returns `[1, -2, 0]`. Both have the same total weight (1.0); they
+//! disagree on which equally-tied speaker is left unmatched.
+//!
+//! The realistic tie source is pyannote's own flow setting inactive
+//! speaker rows to a constant (`const = soft.min() - 1.0` for rows with
+//! `segmentations.sum(1) == 0`). Downstream, `reconstruct(segmentations,
+//! hard_clusters, count)` weights each `(chunk, speaker)`'s cluster
+//! contribution by segmentation activity, so an inactive row's cluster
+//! id contributes zero to `discrete_diarization` regardless of which
+//! cluster it was assigned. The tie-breaking divergence is therefore
+//! invisible to the final DER metric on the realistic input
+//! distribution. The captured 218-chunk fixture has zero tied chunks
+//! and passes parity exactly.
+//!
+//! TODO: if a future use case requires bit-exact pyannote parity on
+//! tied inputs (e.g. round-tripping `hard_clusters` for compatibility
+//! with another pyannote-based tool, not just diarization output), we
+//! may need a hand-rolled Hungarian that mirrors scipy's traversal
+//! order or a pre/post-processing layer that canonicalizes tied
+//! assignments. Until then, the invariant-based tie tests in
+//! `src/hungarian/tests.rs` ("tie-breaking" section) prove that *some*
+//! optimal matching is returned without locking in a specific label
+//! permutation.
 
 use crate::hungarian::error::Error;
 use nalgebra::DMatrix;

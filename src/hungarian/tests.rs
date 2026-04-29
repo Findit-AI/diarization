@@ -240,3 +240,199 @@ fn rejects_when_all_entries_non_finite() {
     "got {result:?}"
   );
 }
+
+// ── Tie-breaking invariants (Codex review HIGH round 3 of Phase 3) ─
+//
+// `pathfinding::kuhn_munkres` and `scipy.optimize.linear_sum_assignment`
+// can return different label permutations on tied optima. See the
+// algo.rs module-level docstring for the rationale. These tests check
+// the *invariants* the algorithm must satisfy under ties — total
+// optimal weight, distinct cluster ids, max matching size — without
+// locking in a specific label permutation.
+
+/// Compute the maximum-weight matching's total cost by brute force on a
+/// 2D matrix. Used as an oracle for tie tests where the algorithm's
+/// chosen permutation is implementation-defined.
+fn brute_force_max_total(cost: &DMatrix<f64>) -> f64 {
+  let (rows, cols) = cost.shape();
+  let n = rows.min(cols);
+  // Enumerate all subsets of `n` columns, then for each, all
+  // permutations of which row gets which column. Tractable for small
+  // matrices used in tests (rows, cols ≤ 4).
+  fn subsets(k: usize, n: usize) -> Vec<Vec<usize>> {
+    if k == 0 {
+      return vec![vec![]];
+    }
+    let mut out = Vec::new();
+    for end in k..=n {
+      for mut sub in subsets(k - 1, end - 1) {
+        sub.push(end - 1);
+        out.push(sub);
+      }
+    }
+    out
+  }
+  fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+    if items.is_empty() {
+      return vec![vec![]];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+      let mut rest: Vec<usize> = items.to_vec();
+      let head = rest.remove(i);
+      for mut perm in permutations(&rest) {
+        perm.insert(0, head);
+        out.push(perm);
+      }
+    }
+    out
+  }
+
+  // Choose `n` rows from `rows`, `n` cols from `cols`, then the
+  // assignment is a permutation between them. Maximize over all.
+  let mut best = f64::NEG_INFINITY;
+  for row_subset in subsets(n, rows) {
+    for col_subset in subsets(n, cols) {
+      for perm in permutations(&col_subset) {
+        let total: f64 = row_subset
+          .iter()
+          .zip(perm.iter())
+          .map(|(&r, &c)| cost[(r, c)])
+          .sum();
+        if total > best {
+          best = total;
+        }
+      }
+    }
+  }
+  best
+}
+
+/// Compute the achieved total cost from an assignment vector for a
+/// chunk. UNMATCHED entries contribute zero (they're not part of the
+/// matching).
+fn achieved_total(cost: &DMatrix<f64>, assign: &[i32]) -> f64 {
+  let mut total = 0.0;
+  for (s, &k) in assign.iter().enumerate() {
+    if k != UNMATCHED {
+      total += cost[(s, k as usize)];
+    }
+  }
+  total
+}
+
+/// Codex's counterexample: 3x2 with two equal zero rows. Both
+/// `[1, -2, 0]` (pathfinding) and `[-2, 1, 0]` (scipy) are valid
+/// optima with total = 1.0. The invariants we enforce: total cost
+/// equals the brute-force max, exactly one speaker is UNMATCHED, and
+/// matched cluster ids are distinct.
+#[test]
+fn tied_3x2_returns_some_optimal_matching() {
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0]);
+  let assign = one(cost.clone()).expect("constrained_argmax");
+
+  let max = brute_force_max_total(&cost);
+  let achieved = achieved_total(&cost, &assign);
+  assert!(
+    (achieved - max).abs() < 1e-12,
+    "tied input must still hit max total ({max:.6}); got {achieved:.6} from {assign:?}"
+  );
+
+  // Exactly min(3, 2) = 2 speakers matched, 1 unmatched.
+  let unmatched_count = assign.iter().filter(|&&k| k == UNMATCHED).count();
+  assert_eq!(unmatched_count, 1, "expected 1 unmatched, got {assign:?}");
+
+  // Matched cluster ids are distinct (hungarian-bipartite invariant).
+  let mut used = std::collections::HashSet::new();
+  for &k in &assign {
+    if k != UNMATCHED {
+      assert!(used.insert(k), "duplicate cluster {k} in {assign:?}");
+    }
+  }
+}
+
+/// All-tied square matrix: every cell equal. Total = n * cell_value.
+/// Every speaker must be matched, every matched cluster distinct —
+/// the *which* cluster each speaker gets is implementation-defined.
+#[test]
+fn tied_3x3_all_equal_returns_some_optimal_matching() {
+  let cost = DMatrix::<f64>::from_element(3, 3, 0.5);
+  let assign = one(cost.clone()).expect("constrained_argmax");
+
+  let max = brute_force_max_total(&cost);
+  let achieved = achieved_total(&cost, &assign);
+  assert!(
+    (achieved - max).abs() < 1e-12,
+    "all-tied square must still hit max ({max:.6}); got {achieved:.6}"
+  );
+  assert!(!assign.contains(&UNMATCHED), "square: all matched; got {assign:?}");
+
+  let mut used = std::collections::HashSet::new();
+  for &k in &assign {
+    assert!(used.insert(k), "duplicate cluster {k} in {assign:?}");
+  }
+}
+
+/// Tall (S < K) with tied rows: every speaker matched, each to a
+/// distinct cluster, total at the brute-force max.
+#[test]
+fn tied_2x3_returns_some_optimal_matching() {
+  // Both rows tied within their own row (0.5 across all clusters);
+  // the matching can pair any speaker with any cluster.
+  let cost = DMatrix::<f64>::from_element(2, 3, 0.5);
+  let assign = one(cost.clone()).expect("constrained_argmax");
+
+  let max = brute_force_max_total(&cost);
+  let achieved = achieved_total(&cost, &assign);
+  assert!(
+    (achieved - max).abs() < 1e-12,
+    "tall tied: must hit max ({max:.6}); got {achieved:.6}"
+  );
+  assert!(
+    !assign.contains(&UNMATCHED),
+    "tall: all speakers matched; got {assign:?}"
+  );
+
+  let mut used = std::collections::HashSet::new();
+  for &k in &assign {
+    assert!(used.insert(k), "duplicate cluster {k} in {assign:?}");
+  }
+}
+
+/// Inactive-speaker shape from pyannote's flow: one strong row + two
+/// equal-constant rows (mimicking `soft_clusters[inactive] = const`).
+/// The strong speaker must be matched to one of its preferred clusters;
+/// the inactive speaker that gets matched can be either of the two
+/// (implementation-defined). Either way, total weight is optimal.
+#[test]
+fn pyannote_inactive_speaker_pattern_hits_optimal_total() {
+  // const = soft.min() - 1.0 = -1.5. Real speaker 0 has cells (0.9, 0.5);
+  // speakers 1 and 2 are inactive (rows of -1.5).
+  let cost = DMatrix::<f64>::from_row_slice(
+    3,
+    2,
+    &[0.9, 0.5, -1.5, -1.5, -1.5, -1.5],
+  );
+  let assign = one(cost.clone()).expect("constrained_argmax");
+
+  let max = brute_force_max_total(&cost);
+  let achieved = achieved_total(&cost, &assign);
+  assert!(
+    (achieved - max).abs() < 1e-12,
+    "inactive-speaker pattern must hit max ({max:.6}); got {achieved:.6} from {assign:?}"
+  );
+
+  // Speaker 0 (the only active one) must get cluster 0 (its 0.9 peak
+  // dominates 0.5 plus any inactive-row contribution at -1.5).
+  assert_eq!(
+    assign[0], 0,
+    "active speaker 0 must be matched to its peak cluster; got {assign:?}"
+  );
+
+  // Exactly one inactive speaker is matched, one unmatched.
+  let inactive_matched = (assign[1] != UNMATCHED) as usize + (assign[2] != UNMATCHED) as usize;
+  assert_eq!(
+    inactive_matched, 1,
+    "exactly one inactive speaker should be matched; got {assign:?}"
+  );
+}
