@@ -14,6 +14,46 @@ pub struct VbxOutput {
   pub elbo_trajectory: Vec<f64>,
 }
 
+/// Per-iteration ELBO regression beyond which the algorithm errors
+/// rather than treating the change as float roundoff. Empirically
+/// the captured Phase-0 trajectory's smallest *positive* delta is
+/// ~1.1e-4 (last meaningful iteration before convergence at
+/// epsilon=1e-4), so any negative delta worse than `-1e-9` is well
+/// outside float-roundoff territory. Codex review MEDIUM round 2.
+const ELBO_REGRESSION_TOLERANCE: f64 = 1.0e-9;
+
+/// Outcome of comparing one EM iteration's ELBO against the previous.
+#[derive(Debug, PartialEq)]
+pub(super) enum ElboStep {
+  /// Improvement >= `epsilon` — keep iterating.
+  Continue,
+  /// Improvement < `epsilon` (including tiny negative deltas within
+  /// `ELBO_REGRESSION_TOLERANCE`) — converged, exit cleanly.
+  Converged,
+  /// Negative delta beyond `ELBO_REGRESSION_TOLERANCE` — VB EM's
+  /// monotonicity invariant is violated. Carries the offending delta.
+  Regressed(f64),
+}
+
+/// Classify an ELBO step into the three convergence regimes.
+///
+/// Pyannote's `vbx.py:133-136` uses `if ELBO - prev < epsilon: break`
+/// for both small-positive convergence AND any negative regression,
+/// printing a warning for the regression case. The Rust port treats a
+/// regression beyond `ELBO_REGRESSION_TOLERANCE` as an error instead
+/// (no print mechanism, and downstream clustering should not silently
+/// consume a regressed posterior). Tiny negative deltas inside the
+/// tolerance are float-roundoff and treated as `Converged`.
+pub(super) fn classify_elbo_step(delta: f64, epsilon: f64) -> ElboStep {
+  if delta < -ELBO_REGRESSION_TOLERANCE {
+    ElboStep::Regressed(delta)
+  } else if delta < epsilon {
+    ElboStep::Converged
+  } else {
+    ElboStep::Continue
+  }
+}
+
 /// Row-wise `logsumexp` (numerically stable). For each row `r`:
 ///
 /// ```text
@@ -269,9 +309,13 @@ pub fn vbx_iterate(
     // ── Convergence check ────────────────────────────────────────
     if ii > 0 {
       let prev = elbo_trajectory[elbo_trajectory.len() - 2];
-      if elbo - prev < epsilon {
-        // pyannote prints a warning if ELBO decreased; we just stop.
-        break;
+      let delta = elbo - prev;
+      match classify_elbo_step(delta, epsilon) {
+        ElboStep::Continue => {}
+        ElboStep::Converged => break,
+        ElboStep::Regressed(d) => {
+          return Err(Error::ElboRegression { iter: ii, delta: d });
+        }
       }
     }
   }

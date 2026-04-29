@@ -332,3 +332,57 @@ fn vbx_max_iters_zero_returns_validated_qinit() {
     assert!((out.pi[c] - 1.0 / s as f64).abs() < 1e-15);
   }
 }
+
+// ── ELBO step classification (Codex review MEDIUM round 2 of Phase 2) ─
+//
+// VB EM's monotonicity is a fundamental invariant. The previous
+// `delta < epsilon` convergence branch fired for both small-positive
+// improvements (intended) and negative deltas (a regression — bug
+// or numerical instability). The new `classify_elbo_step` helper
+// separates the three regimes, and `vbx_iterate` propagates a
+// regression as `Error::ElboRegression` rather than silently
+// returning the regressed posterior.
+
+use super::algo::{ElboStep, classify_elbo_step};
+
+#[test]
+fn classify_elbo_step_continues_on_large_positive_delta() {
+  assert_eq!(classify_elbo_step(0.5, 1.0e-4), ElboStep::Continue);
+}
+
+#[test]
+fn classify_elbo_step_converges_on_small_positive_delta() {
+  assert_eq!(classify_elbo_step(1.0e-5, 1.0e-4), ElboStep::Converged);
+}
+
+#[test]
+fn classify_elbo_step_converges_on_tiny_negative_delta_within_tolerance() {
+  // Delta in float-roundoff regime — treat as converged.
+  assert_eq!(
+    classify_elbo_step(-1.0e-12, 1.0e-4),
+    ElboStep::Converged
+  );
+}
+
+#[test]
+fn classify_elbo_step_regresses_on_large_negative_delta() {
+  match classify_elbo_step(-1.0e-4, 1.0e-4) {
+    ElboStep::Regressed(d) => assert_eq!(d, -1.0e-4),
+    other => panic!("expected Regressed, got {other:?}"),
+  }
+}
+
+#[test]
+fn classify_elbo_step_regresses_just_outside_tolerance() {
+  // Just past the regression tolerance — should error, not converge.
+  match classify_elbo_step(-1.0e-8, 1.0e-4) {
+    ElboStep::Regressed(d) => assert_eq!(d, -1.0e-8),
+    other => panic!("expected Regressed, got {other:?}"),
+  }
+}
+
+#[test]
+fn classify_elbo_step_zero_delta_is_converged() {
+  // Exactly zero — flat ELBO, treat as converged.
+  assert_eq!(classify_elbo_step(0.0, 1.0e-4), ElboStep::Converged);
+}
