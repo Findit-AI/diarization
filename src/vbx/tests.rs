@@ -200,7 +200,10 @@ fn vbx_rejects_qinit_with_nan_entry() {
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(2, 1)] = f64::NAN;
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
-  assert!(matches!(result, Err(Error::NonFinite("qinit"))), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFinite("qinit"))),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -212,7 +215,10 @@ fn vbx_rejects_qinit_with_inf_entry() {
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(0, 0)] = f64::INFINITY;
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
-  assert!(matches!(result, Err(Error::NonFinite("qinit"))), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFinite("qinit"))),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -313,7 +319,10 @@ fn vbx_max_iters_zero_returns_validated_qinit() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0).expect("vbx_iterate");
-  assert!(out.elbo_trajectory.is_empty(), "no iterations → empty trajectory");
+  assert!(
+    out.elbo_trajectory.is_empty(),
+    "no iterations → empty trajectory"
+  );
   for r in 0..t {
     for c in 0..s {
       assert_eq!(out.gamma[(r, c)], qinit[(r, c)]);
