@@ -118,10 +118,37 @@ fn pdist_euclidean(rows: &DMatrix<f64>) -> Vec<f64> {
 /// — i.e. a flat cluster contains pairs whose cophenetic distance is
 /// `≤ threshold`, which is the documented contract.
 ///
-/// Encounter-order remap is applied during a second pass: the first
-/// label seen in leaf-scan order becomes 0, the next becomes 1, etc.,
-/// matching `np.unique(_, return_inverse=True)` on contiguous label
-/// arrays.
+/// # Label assignment: leaf-scan encounter order, not scipy's traversal
+///
+/// The second pass canonicalizes labels via *leaf-scan encounter order*
+/// (the first cluster seen while scanning leaves `0..n` becomes label 0).
+/// This is the np.unique-on-contiguous-labels formula but assumes scipy
+/// already produced canonical scan-order labels — which **scipy does
+/// not do**. Scipy's `fcluster` numbers clusters by tree-traversal
+/// order; the captured `ahc_init_labels.npy` starts with label `4` for
+/// row 0, not `0`. (Codex review MEDIUM round 2 of Phase 4.)
+///
+/// The captured Phase-4 parity test compares partitions, not exact
+/// label assignments — partition equivalence is sufficient for
+/// downstream clustering correctness (the labels are arbitrary
+/// integers naming the buckets; DER is invariant to relabeling).
+///
+/// **TODO** (Phase 5 integration): if a Phase-5 end-to-end parity test
+/// runs `ahc_init → build qinit → vbx_iterate → q_final` and compares
+/// element-wise against captured `q_final`, the `qinit` column ordering
+/// will not match (since our labels are a permutation of scipy's). At
+/// that point, choose one of:
+/// 1. Implement scipy's exact tree-traversal label order here (drop
+///    this canonicalization pass; align DFS push order with scipy's
+///    `_hierarchy.pyx::cluster_dist`).
+/// 2. Have Phase 5 compare `q_final` modulo column permutation
+///    (mathematically equivalent — the permutation is recoverable
+///    from `(our_labels, scipy_labels)` matching).
+/// 3. Have `ahc_init` return `(labels, permutation_to_scipy)` so the
+///    caller can build the column-permuted qinit explicitly.
+///
+/// Either way, the Phase-4 contract is "produce a valid scipy-equivalent
+/// partition", and the existing parity test enforces that.
 fn fcluster_distance_remap(steps: &[Step<f64>], n: usize, threshold: f64) -> Vec<usize> {
   // Single leaf — no merges; one cluster.
   if n == 1 {
