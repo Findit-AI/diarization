@@ -60,10 +60,19 @@ pub fn discrete_to_spans(
         _ => {}
       }
     }
+    // Span still active at end-of-grid: pyannote's `Binarize.__call__`
+    // closes the trailing region with `t = timestamps[-1]` =
+    // `timestamps[num_frames - 1]`, not `timestamps[num_frames]`.
+    // Closing one step past the last frame would over-extend
+    // end-of-file speakers by `frames_sw.step` and convert a single
+    // final-frame run into a non-empty span where pyannote emits
+    // none. Codex review MEDIUM round 3 of Phase 5.
     if let Some(s) = active_start {
       let start = frames_sw.start + s as f64 * frames_sw.step + center_offset;
-      let end = frames_sw.start + num_frames as f64 * frames_sw.step + center_offset;
-      per_cluster.push((start, end));
+      let end = frames_sw.start + (num_frames - 1) as f64 * frames_sw.step + center_offset;
+      if end > start {
+        per_cluster.push((start, end));
+      }
     }
     // min_duration_off: merge adjacent spans whose gap is `≤ collar`.
     if min_duration_off > 0.0 && per_cluster.len() > 1 {

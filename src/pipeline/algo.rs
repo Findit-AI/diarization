@@ -281,10 +281,16 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 
 /// Cosine distance between two rows of two matrices: `1 - dot / (|a| *
 /// |b|)`. Matches `scipy.spatial.distance.cdist(metric="cosine")` for
-/// finite vectors. Returns `1.0` (max distance) for zero-norm rows to
-/// avoid NaN — the caller is expected to have validated finite-ness
-/// upstream, but a zero-norm row can still arise via centroid
-/// computation if all weights are tiny.
+/// finite vectors.
+///
+/// Zero-norm rows return `NaN` (matching scipy's 0/0 behavior). Stage
+/// 7's `dia::hungarian::constrained_argmax` rewrites NaN to the global
+/// nanmin via `np.nan_to_num`, so a zero-norm active row gets the
+/// worst possible cost and is NOT preferred over genuinely-similar
+/// embeddings. Returning `1.0` (mid-similarity) instead — as the
+/// previous version did — would have let a corrupt zero-vector
+/// embedding tie or beat a real low-similarity match. Codex review
+/// HIGH round 3 of Phase 5.
 fn cosine_distance_rows(a: &DMatrix<f64>, ra: usize, b: &DMatrix<f64>, rb: usize) -> f64 {
   let cols = a.ncols();
   debug_assert_eq!(b.ncols(), cols);
@@ -300,7 +306,7 @@ fn cosine_distance_rows(a: &DMatrix<f64>, ra: usize, b: &DMatrix<f64>, rb: usize
   }
   let denom = na.sqrt() * nb.sqrt();
   if denom == 0.0 {
-    return 1.0;
+    return f64::NAN;
   }
   1.0 - dot / denom
 }
