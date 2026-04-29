@@ -392,7 +392,8 @@ fn vbx_does_not_oom_on_huge_max_iters() {
   let qinit = deterministic_qinit(t, s);
   // usize::MAX would have triggered a capacity-overflow panic in
   // the pre-fix code's `Vec::with_capacity(max_iters)`.
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX, PiInit::Uniform).expect("vbx_iterate");
+  let out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX, PiInit::Uniform).expect("vbx_iterate");
   // Convergence should be extremely fast on this trivial input.
   assert!(
     out.elbo_trajectory.len() < 100,
@@ -449,8 +450,8 @@ fn vbx_accepts_qinit_with_alternating_column_assignment() {
     }
   }
   // Each column has at least one row with max=0.95, well above 1/S=0.5.
-  let _out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10, PiInit::Uniform).expect("alternating real columns must pass");
+  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10, PiInit::Uniform)
+    .expect("alternating real columns must pass");
 }
 
 /// Codex round 9 [MEDIUM]: uniform qinit (every cell = 1/S) is a
@@ -573,8 +574,8 @@ fn vbx_accepts_single_speaker_qinit() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0);
-  let out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10, PiInit::Uniform).expect("S=1 single-speaker qinit must pass");
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10, PiInit::Uniform)
+    .expect("S=1 single-speaker qinit must pass");
   // With S=1 there is only one cluster; pi[0] should be 1.0.
   assert!((out.pi[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi[0]);
 }
