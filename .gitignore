@@ -17,6 +17,7 @@
 /target
 Cargo.lock
 /models/*.onnx
+**.claude/
 
 # Spike-specific (kaldi-native-fbank parity)
 spikes/kaldi_fbank/python/.venv/

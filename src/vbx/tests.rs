@@ -445,8 +445,8 @@ fn vbx_accepts_uniform_qinit() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.2);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
-  let _out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("uniform qinit must pass per-row-max check");
+  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10)
+    .expect("uniform qinit must pass per-row-max check");
 }
 
 // ── Tighter qinit column-mass + zero-D rejection (Codex review MEDIUM round 6 of Phase 2) ─
