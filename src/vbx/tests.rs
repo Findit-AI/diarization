@@ -371,8 +371,8 @@ fn vbx_accepts_qinit_with_alternating_column_assignment() {
       qinit[(tt, 1)] = 0.95;
     }
   }
-  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10)
-    .expect("alternating real columns must pass");
+  let _out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("alternating real columns must pass");
 }
 
 /// S=1 is a degenerate case (single speaker) — `qinit` is forced to
@@ -385,8 +385,8 @@ fn vbx_accepts_single_speaker_qinit() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10)
-    .expect("S=1 single-speaker qinit must pass");
+  let out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("S=1 single-speaker qinit must pass");
   // With S=1 there is only one cluster; pi[0] should be 1.0.
   assert!((out.pi[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi[0]);
 }
