@@ -80,3 +80,97 @@ fn vbx_rejects_qinit_with_zero_clusters() {
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
+
+/// VBx must produce a monotonically non-decreasing ELBO (modulo a tiny
+/// epsilon-band at convergence). A regression that, e.g., reuses the
+/// previous iteration's gamma in the alpha update would break this.
+#[test]
+fn vbx_elbo_is_monotonically_non_decreasing() {
+  // 50 frames × 8 dim × 3 speakers, deterministic non-pathological input.
+  let t = 50;
+  let d = 8;
+  let s = 3;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i * 7 + j * 13) as f64 % 11.0) - 5.0;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 2.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
+  for w in out.elbo_trajectory.windows(2) {
+    // Allow tiny float wobble at convergence (≤ 1e-6) before the
+    // epsilon-based stop fires.
+    assert!(
+      w[1] - w[0] > -1.0e-6,
+      "ELBO must not decrease: {} → {}",
+      w[0],
+      w[1]
+    );
+  }
+}
+
+/// At every iteration, `gamma[t, :]` is a discrete probability over
+/// speakers, so each row must sum to 1 (within float roundoff).
+#[test]
+fn vbx_gamma_rows_sum_to_one() {
+  let t = 30;
+  let d = 4;
+  let s = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64).sin();
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.5);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.1, 0.5, 10).expect("vbx_iterate");
+  for r in 0..t {
+    let row_sum: f64 = (0..s).map(|c| out.gamma[(r, c)]).sum();
+    assert!(
+      (row_sum - 1.0).abs() < 1e-12,
+      "gamma row {r} sums to {row_sum}"
+    );
+  }
+}
+
+/// `pi` is a discrete probability over speakers; it must sum to 1.
+#[test]
+fn vbx_pi_sums_to_one() {
+  let t = 20;
+  let d = 4;
+  let s = 5;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i * 3 + j) as f64).cos());
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
+  let pi_sum: f64 = out.pi.iter().sum();
+  assert!((pi_sum - 1.0).abs() < 1e-12, "pi sums to {pi_sum}");
+}
+
+/// The algorithm has no RNG anywhere, so two calls with the same input
+/// must return bit-identical outputs. Catches regressions where, e.g.,
+/// `HashMap` ordering or `f64::partial_cmp` tiebreaks leak into the
+/// algorithm.
+#[test]
+fn vbx_is_deterministic() {
+  let t = 15;
+  let d = 4;
+  let s = 3;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| (i + 2 * j) as f64 * 0.1);
+  let phi = DVector::<f64>::from_element(d, 2.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let a = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("a");
+  let b = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("b");
+  assert_eq!(a.elbo_trajectory, b.elbo_trajectory);
+  for r in 0..t {
+    for c in 0..s {
+      assert_eq!(a.gamma[(r, c)], b.gamma[(r, c)]);
+    }
+  }
+  for c in 0..s {
+    assert_eq!(a.pi[c], b.pi[c]);
+  }
+}
