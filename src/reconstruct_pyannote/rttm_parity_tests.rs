@@ -37,9 +37,20 @@ where
 }
 
 #[test]
-fn rttm_matches_pyannote_reference() {
+fn rttm_matches_pyannote_reference_01_dialogue() {
+  run_rttm_parity("01_dialogue", "clip_16k");
+}
+
+#[test]
+fn rttm_matches_pyannote_reference_02_pyannote_sample() {
+  run_rttm_parity("02_pyannote_sample", "clip_16k");
+}
+
+fn run_rttm_parity(fixture_dir: &str, uri: &str) {
+  let base = format!("tests/parity/fixtures/{fixture_dir}");
+
   // ── Stage 5a + 5b: produce discrete_diarization ───────────────────
-  let raw_path = fixture("tests/parity/fixtures/01_dialogue/raw_embeddings.npz");
+  let raw_path = fixture(&format!("{base}/raw_embeddings.npz"));
   let (raw_flat, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
   let num_chunks = raw_shape[0] as usize;
   let num_speakers = raw_shape[1] as usize;
@@ -54,11 +65,11 @@ fn rttm_matches_pyannote_reference() {
       }
     }
   }
-  let seg_path = fixture("tests/parity/fixtures/01_dialogue/segmentations.npz");
+  let seg_path = fixture(&format!("{base}/segmentations.npz"));
   let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(&seg_path, "segmentations");
   let num_frames_per_chunk = seg_shape[1] as usize;
   let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
-  let plda_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
+  let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
   let num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
@@ -69,9 +80,9 @@ fn rttm_matches_pyannote_reference() {
   let (speaker_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_speaker_idx");
   let train_chunk_idx: Vec<usize> = chunk_idx_i64.iter().map(|&v| v as usize).collect();
   let train_speaker_idx: Vec<usize> = speaker_idx_i64.iter().map(|&v| v as usize).collect();
-  let ahc_path = fixture("tests/parity/fixtures/01_dialogue/ahc_state.npz");
+  let ahc_path = fixture(&format!("{base}/ahc_state.npz"));
   let (threshold_data, _) = read_npz_array::<f64>(&ahc_path, "threshold");
-  let vbx_path = fixture("tests/parity/fixtures/01_dialogue/vbx_state.npz");
+  let vbx_path = fixture(&format!("{base}/vbx_state.npz"));
   let (fa_arr, _) = read_npz_array::<f64>(&vbx_path, "fa");
   let (fb_arr, _) = read_npz_array::<f64>(&vbx_path, "fb");
   let (max_iters_arr, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
@@ -93,7 +104,7 @@ fn rttm_matches_pyannote_reference() {
   };
   let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
 
-  let recon_path = fixture("tests/parity/fixtures/01_dialogue/reconstruction.npz");
+  let recon_path = fixture(&format!("{base}/reconstruction.npz"));
   let (count_u8, count_shape) = read_npz_array::<u8>(&recon_path, "count");
   let num_output_frames = count_shape[0] as usize;
   let (chunk_start_arr, _) = read_npz_array::<f64>(&recon_path, "chunk_start");
@@ -137,10 +148,10 @@ fn rttm_matches_pyannote_reference() {
     frames_sw,
     min_duration_off,
   );
-  let lines = spans_to_rttm_lines(&spans, "clip_16k");
+  let lines = spans_to_rttm_lines(&spans, uri);
 
   // ── Compare to reference.rttm ─────────────────────────────────────
-  let ref_path = fixture("tests/parity/fixtures/01_dialogue/reference.rttm");
+  let ref_path = fixture(&format!("{base}/reference.rttm"));
   let ref_text = std::fs::read_to_string(&ref_path).expect("read reference.rttm");
   let ref_lines: Vec<&str> = ref_text.lines().filter(|l| !l.is_empty()).collect();
 

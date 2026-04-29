@@ -19,19 +19,22 @@ fn fixture(rel: &str) -> PathBuf {
   repo_root().join(rel)
 }
 
-fn require_fixtures() {
-  let required = [
-    "tests/parity/fixtures/01_dialogue/raw_embeddings.npz",
-    "tests/parity/fixtures/01_dialogue/segmentations.npz",
-    "tests/parity/fixtures/01_dialogue/plda_embeddings.npz",
-    "tests/parity/fixtures/01_dialogue/ahc_state.npz",
-    "tests/parity/fixtures/01_dialogue/vbx_state.npz",
-    "tests/parity/fixtures/01_dialogue/clustering.npz",
-    "tests/parity/fixtures/01_dialogue/reconstruction.npz",
-  ];
+fn require_fixtures(fixture_dir: &str) {
+  let required: Vec<String> = [
+    "raw_embeddings.npz",
+    "segmentations.npz",
+    "plda_embeddings.npz",
+    "ahc_state.npz",
+    "vbx_state.npz",
+    "clustering.npz",
+    "reconstruction.npz",
+  ]
+  .iter()
+  .map(|f| format!("tests/parity/fixtures/{fixture_dir}/{f}"))
+  .collect();
   let missing: Vec<&str> = required
     .iter()
-    .copied()
+    .map(String::as_str)
     .filter(|p| !repo_root().join(p).exists())
     .collect();
   assert!(
@@ -57,11 +60,21 @@ where
 }
 
 #[test]
-fn reconstruct_matches_pyannote_discrete_diarization() {
-  require_fixtures();
+fn reconstruct_matches_pyannote_discrete_diarization_01_dialogue() {
+  run_reconstruct_parity("01_dialogue");
+}
+
+#[test]
+fn reconstruct_matches_pyannote_discrete_diarization_02_pyannote_sample() {
+  run_reconstruct_parity("02_pyannote_sample");
+}
+
+fn run_reconstruct_parity(fixture_dir: &str) {
+  require_fixtures(fixture_dir);
+  let base = format!("tests/parity/fixtures/{fixture_dir}");
 
   // ── Stage 5a: produce hard_clusters via the assign_embeddings port ──
-  let raw_path = fixture("tests/parity/fixtures/01_dialogue/raw_embeddings.npz");
+  let raw_path = fixture(&format!("{base}/raw_embeddings.npz"));
   let (raw_flat, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
   let num_chunks = raw_shape[0] as usize;
   let num_speakers = raw_shape[1] as usize;
@@ -77,12 +90,12 @@ fn reconstruct_matches_pyannote_discrete_diarization() {
     }
   }
 
-  let seg_path = fixture("tests/parity/fixtures/01_dialogue/segmentations.npz");
+  let seg_path = fixture(&format!("{base}/segmentations.npz"));
   let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(&seg_path, "segmentations");
   let num_frames_per_chunk = seg_shape[1] as usize;
   let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
 
-  let plda_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
+  let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
   let num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
@@ -94,10 +107,10 @@ fn reconstruct_matches_pyannote_discrete_diarization() {
   let train_chunk_idx: Vec<usize> = chunk_idx_i64.iter().map(|&v| v as usize).collect();
   let train_speaker_idx: Vec<usize> = speaker_idx_i64.iter().map(|&v| v as usize).collect();
 
-  let ahc_path = fixture("tests/parity/fixtures/01_dialogue/ahc_state.npz");
+  let ahc_path = fixture(&format!("{base}/ahc_state.npz"));
   let (threshold_data, _) = read_npz_array::<f64>(&ahc_path, "threshold");
   let threshold = threshold_data[0];
-  let vbx_path = fixture("tests/parity/fixtures/01_dialogue/vbx_state.npz");
+  let vbx_path = fixture(&format!("{base}/vbx_state.npz"));
   let (fa_arr, _) = read_npz_array::<f64>(&vbx_path, "fa");
   let (fb_arr, _) = read_npz_array::<f64>(&vbx_path, "fb");
   let (max_iters_arr, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
@@ -120,7 +133,7 @@ fn reconstruct_matches_pyannote_discrete_diarization() {
   let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
 
   // ── Stage 5b: reconstruct ──────────────────────────────────────
-  let recon_path = fixture("tests/parity/fixtures/01_dialogue/reconstruction.npz");
+  let recon_path = fixture(&format!("{base}/reconstruction.npz"));
   let (count_u8, count_shape) = read_npz_array::<u8>(&recon_path, "count");
   assert_eq!(count_shape.len(), 2);
   let num_output_frames = count_shape[0] as usize;

@@ -37,18 +37,21 @@ fn fixture(rel: &str) -> PathBuf {
   repo_root().join(rel)
 }
 
-fn require_fixtures() {
-  let required = [
-    "tests/parity/fixtures/01_dialogue/raw_embeddings.npz",
-    "tests/parity/fixtures/01_dialogue/segmentations.npz",
-    "tests/parity/fixtures/01_dialogue/plda_embeddings.npz",
-    "tests/parity/fixtures/01_dialogue/ahc_state.npz",
-    "tests/parity/fixtures/01_dialogue/vbx_state.npz",
-    "tests/parity/fixtures/01_dialogue/clustering.npz",
-  ];
+fn require_fixtures(fixture_dir: &str) {
+  let required: Vec<String> = [
+    "raw_embeddings.npz",
+    "segmentations.npz",
+    "plda_embeddings.npz",
+    "ahc_state.npz",
+    "vbx_state.npz",
+    "clustering.npz",
+  ]
+  .iter()
+  .map(|f| format!("tests/parity/fixtures/{fixture_dir}/{f}"))
+  .collect();
   let missing: Vec<&str> = required
     .iter()
-    .copied()
+    .map(String::as_str)
     .filter(|p| !repo_root().join(p).exists())
     .collect();
   assert!(
@@ -74,11 +77,21 @@ where
 }
 
 #[test]
-fn assign_embeddings_matches_pyannote_hard_clusters() {
-  require_fixtures();
+fn assign_embeddings_matches_pyannote_hard_clusters_01_dialogue() {
+  run_pipeline_parity("01_dialogue");
+}
 
+#[test]
+fn assign_embeddings_matches_pyannote_hard_clusters_02_pyannote_sample() {
+  run_pipeline_parity("02_pyannote_sample");
+}
+
+fn run_pipeline_parity(fixture_dir: &str) {
+  require_fixtures(fixture_dir);
+
+  let base = format!("tests/parity/fixtures/{fixture_dir}");
   // Raw embeddings (chunks, speakers, embed_dim).
-  let raw_path = fixture("tests/parity/fixtures/01_dialogue/raw_embeddings.npz");
+  let raw_path = fixture(&format!("{base}/raw_embeddings.npz"));
   let (raw_flat, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
   assert_eq!(raw_shape.len(), 3);
   let num_chunks = raw_shape[0] as usize;
@@ -96,7 +109,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters() {
   }
 
   // Segmentations (chunks, frames, speakers).
-  let seg_path = fixture("tests/parity/fixtures/01_dialogue/segmentations.npz");
+  let seg_path = fixture(&format!("{base}/segmentations.npz"));
   let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(&seg_path, "segmentations");
   assert_eq!(seg_shape.len(), 3);
   let num_frames = seg_shape[1] as usize;
@@ -105,7 +118,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters() {
   let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
 
   // post_plda + phi + train_*idx (pre-filtered, pre-projected).
-  let plda_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
+  let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
   assert_eq!(post_plda_shape.len(), 2);
   let num_train = post_plda_shape[0] as usize;
@@ -124,11 +137,11 @@ fn assign_embeddings_matches_pyannote_hard_clusters() {
   let train_speaker_idx: Vec<usize> = speaker_idx_i64.iter().map(|&v| v as usize).collect();
 
   // Hyperparameters.
-  let ahc_path = fixture("tests/parity/fixtures/01_dialogue/ahc_state.npz");
+  let ahc_path = fixture(&format!("{base}/ahc_state.npz"));
   let (threshold_data, _) = read_npz_array::<f64>(&ahc_path, "threshold");
   let threshold = threshold_data[0];
 
-  let vbx_path = fixture("tests/parity/fixtures/01_dialogue/vbx_state.npz");
+  let vbx_path = fixture(&format!("{base}/vbx_state.npz"));
   let (fa_arr, _) = read_npz_array::<f64>(&vbx_path, "fa");
   let (fb_arr, _) = read_npz_array::<f64>(&vbx_path, "fb");
   let (max_iters_arr, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
@@ -155,7 +168,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters() {
   let got = assign_embeddings(&input).expect("assign_embeddings");
 
   // Captured ground truth.
-  let cluster_path = fixture("tests/parity/fixtures/01_dialogue/clustering.npz");
+  let cluster_path = fixture(&format!("{base}/clustering.npz"));
   let (hard_flat_i8, hard_shape) = read_npz_array::<i8>(&cluster_path, "hard_clusters");
   assert_eq!(hard_shape, vec![num_chunks as u64, num_speakers as u64]);
 
