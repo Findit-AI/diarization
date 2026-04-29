@@ -62,6 +62,32 @@ pub struct AssignEmbeddingsInput<'a> {
 /// reduced (`sp > SP_ALIVE_THRESHOLD`) cluster space, or
 /// [`crate::hungarian::UNMATCHED`] = `-2` for speakers with no
 /// surviving cluster.
+///
+/// # Speaker-count constraints (currently unsupported)
+///
+/// Pyannote's `cluster_vbx` (`clustering.py:617-633`) supports
+/// `num_clusters` / `min_clusters` / `max_clusters` constraints by
+/// running a KMeans fallback over the L2-normalized training
+/// embeddings *after* VBx, when auto-VBx's cluster count violates
+/// the constraints. This Rust port currently only exposes the
+/// auto-VBx path — there is no `num_clusters` field in
+/// [`AssignEmbeddingsInput`]. All five captured fixtures used the
+/// auto path, so existing parity tests are unaffected, but any
+/// caller that needs a forced speaker count must either
+/// post-process VBx output or wait for this feature to land.
+///
+/// **TODO** (Codex review HIGH round 2 of Phase 5): add
+/// `num_clusters: Option<usize>`, `min_clusters: Option<usize>`,
+/// `max_clusters: Option<usize>` to the input struct and port
+/// pyannote's KMeans branch when an auto-VBx count violates the
+/// constraints. Adding it will require:
+///   1. A k-means++ implementation (or a `linfa-clustering` dep) on
+///      L2-normalized embeddings — pyannote uses sklearn's KMeans
+///      with `n_init=3, random_state=42`.
+///   2. Centroid recomputation from the KMeans cluster assignment.
+///   3. Disabling `constrained_assignment` in this branch (pyannote
+///      does this to avoid artificial cluster inflation).
+///   4. A new fixture captured with `num_clusters` forcing != auto.
 pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
   let &AssignEmbeddingsInput {
     embeddings,

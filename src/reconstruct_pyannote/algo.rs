@@ -112,8 +112,16 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
       return Err(Error::Timing("non-positive duration or step"));
     }
   }
+  // Reject all non-finite segmentation values (NaN and ±inf). Pyannote's
+  // `Inference.aggregate` does `np.nan_to_num(score, nan=0.0)` and tracks
+  // missingness via a parallel mask, but the realistic source of NaN is
+  // upstream model corruption (torch nan-prop), and a silent fallback
+  // here lets a degraded inference dependency produce plausible-but-
+  // wrong RTTM output. Surfacing it as a clear typed error matches the
+  // Phase 3 round-2 decision for `dia::hungarian` (±inf rejection at the
+  // solver boundary). Codex review MEDIUM round 2 of Phase 5.
   for &v in segmentations {
-    if v.is_infinite() {
+    if !v.is_finite() {
       return Err(Error::NonFinite("segmentations"));
     }
   }
