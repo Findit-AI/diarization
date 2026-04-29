@@ -3,6 +3,15 @@
 use crate::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
+/// Hard upper bound on `max_iters`. A misconfigured caller that
+/// passes `usize::MAX` (or any sufficiently large value) cannot
+/// monopolize a diarization worker for arbitrarily long. Pyannote's
+/// `cluster_vbx` hardcodes `maxIters=20`; the captured Phase-0
+/// trajectory converged in 16 iterations. `1000` leaves 50× the
+/// pyannote default for unusual numerical-difficulty cases while
+/// bounding the worst-case run length. Codex review MEDIUM round 13.
+pub const MAX_ITERS_CAP: usize = 1000;
+
 /// How `vbx_iterate` initializes the speaker prior `pi`.
 ///
 /// Pyannote's `cluster_vbx` always invokes `VBx(..., pi=int(S), ...)`,
@@ -336,6 +345,21 @@ pub fn vbx_iterate(
   // is by definition a misuse. Codex review MEDIUM round 7.
   if max_iters == 0 {
     return Err(Error::Shape("max_iters must be at least 1"));
+  }
+  // Reject oversized `max_iters` so a misconfigured caller (e.g. a
+  // production config typo, `usize::MAX`, accidental u32-cast
+  // overflow) cannot monopolize a diarization worker. Pyannote
+  // hardcodes maxIters=20 inside `cluster_vbx`; the captured Phase-0
+  // trajectory converged in 16. The cap at `MAX_ITERS_CAP = 1000`
+  // is 50× the pyannote default — generous enough to absorb any
+  // realistic numerical-difficulty case, tight enough to bound the
+  // worst case at a few seconds rather than minutes/hours. Codex
+  // review MEDIUM round 13 secondary finding.
+  if max_iters > MAX_ITERS_CAP {
+    return Err(Error::Shape(
+      "max_iters exceeds MAX_ITERS_CAP (1000): bounded to prevent \
+       worker monopolization on misconfigured input",
+    ));
   }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))

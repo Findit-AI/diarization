@@ -366,17 +366,13 @@ fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
 
 // ── Allocation + dead-column hardening (Codex review MEDIUM round 4 of Phase 2) ─
 
-/// Regression for the OOM concern: an enormous `max_iters` no longer
-/// preallocates an `elbo_trajectory` of that capacity. The loop body
-/// converges quickly on the small input here, so this exercises the
-/// fix without actually running for billions of iterations.
-///
-/// Pre-fix: `Vec::with_capacity(usize::MAX)` panics at "capacity
-/// overflow" before the loop runs.
-/// Post-fix: `Vec::new()` allocates lazily; the algorithm converges
-/// in 1-3 iterations on this small input and returns successfully.
+/// Codex round 13 secondary [MEDIUM]: misconfigured `max_iters`
+/// (e.g. `usize::MAX`, accidental u32 overflow, config-typo
+/// "20000" instead of "20") could monopolize a diarization worker
+/// since the loop terminates only on convergence. The
+/// `MAX_ITERS_CAP = 1000` upper bound at the boundary prevents this.
 #[test]
-fn vbx_does_not_oom_on_huge_max_iters() {
+fn vbx_rejects_max_iters_above_cap() {
   let t = 6;
   let s = 2;
   let d = 4;
@@ -387,14 +383,52 @@ fn vbx_does_not_oom_on_huge_max_iters() {
     }
   }
   let phi = DVector::<f64>::from_element(d, 1.0);
-  // Non-uniform qinit so the column-validation passes — we need to
-  // reach the actual EM loop to exercise the allocation behavior.
   let qinit = deterministic_qinit(t, s);
-  // usize::MAX would have triggered a capacity-overflow panic in
-  // the pre-fix code's `Vec::with_capacity(max_iters)`.
-  let out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX, PiInit::Uniform).expect("vbx_iterate");
-  // Convergence should be extremely fast on this trivial input.
+  // usize::MAX is the most pathological case — pre-cap, this
+  // would loop until the algorithm happened to converge (or run
+  // until heat-death of the universe on adversarial input).
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX, PiInit::Uniform);
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "max_iters=usize::MAX must be rejected; got {result:?}"
+  );
+  // Just-above-cap is also rejected (1001).
+  use crate::vbx::MAX_ITERS_CAP;
+  let result = vbx_iterate(
+    &x,
+    &phi,
+    &qinit,
+    0.07,
+    0.8,
+    MAX_ITERS_CAP + 1,
+    PiInit::Uniform,
+  );
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "max_iters > MAX_ITERS_CAP must be rejected; got {result:?}"
+  );
+}
+
+/// Sanity: `max_iters = MAX_ITERS_CAP` exactly is accepted (the
+/// cap is a strict-greater rejection, not strict-greater-or-equal).
+#[test]
+fn vbx_accepts_max_iters_at_cap() {
+  use crate::vbx::MAX_ITERS_CAP;
+  let t = 6;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.5;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = deterministic_qinit(t, s);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP, PiInit::Uniform)
+    .expect("vbx_iterate at cap");
+  // Convergence should still be fast on this trivial input,
+  // nowhere near the cap.
   assert!(
     out.elbo_trajectory.len() < 100,
     "expected fast convergence, got {} iterations",
