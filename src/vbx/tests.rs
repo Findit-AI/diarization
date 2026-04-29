@@ -47,6 +47,22 @@ fn logsumexp_rows_all_neg_inf_returns_neg_inf() {
 use crate::vbx::{Error, vbx_iterate};
 use nalgebra::DVector;
 
+/// Deterministic non-uniform qinit for tests that need a valid VBx
+/// initializer (i.e., one that breaks symmetry across speaker
+/// columns). Each row `tt` is peaked on speaker `tt % s` with mass
+/// 0.95; the remaining 0.05 mass is split evenly across the other
+/// speakers. Per-row max for each column is 0.95, well above the
+/// `1/S` uniform-rejection floor.
+///
+/// Codex round 9 closed the uniform-qinit symmetry trap. Tests
+/// that previously used `DMatrix::from_element(t, s, 1.0 / s)`
+/// (the uniform 1/S pattern) now use this helper.
+fn deterministic_qinit(t: usize, s: usize) -> DMatrix<f64> {
+  assert!(s > 1, "deterministic_qinit requires S > 1");
+  let off = 0.05 / (s - 1) as f64;
+  DMatrix::<f64>::from_fn(t, s, |tt, sj| if sj == tt % s { 0.95 } else { off })
+}
+
 #[test]
 fn vbx_rejects_phi_with_non_positive_entry() {
   let x = DMatrix::<f64>::zeros(5, 4);
@@ -103,7 +119,7 @@ fn vbx_elbo_is_monotonically_non_decreasing() {
     }
   }
   let phi = DVector::<f64>::from_element(d, 2.0);
-  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
   for w in out.elbo_trajectory.windows(2) {
     // Allow tiny float wobble at convergence (≤ 1e-6) before the
@@ -131,7 +147,7 @@ fn vbx_gamma_rows_sum_to_one() {
     }
   }
   let phi = DVector::<f64>::from_element(d, 1.5);
-  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.1, 0.5, 10).expect("vbx_iterate");
   for r in 0..t {
     let row_sum: f64 = (0..s).map(|c| out.gamma[(r, c)]).sum();
@@ -150,7 +166,7 @@ fn vbx_pi_sums_to_one() {
   let s = 5;
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i * 3 + j) as f64).cos());
   let phi = DVector::<f64>::from_element(d, 1.0);
-  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
   let pi_sum: f64 = out.pi.iter().sum();
   assert!((pi_sum - 1.0).abs() < 1e-12, "pi sums to {pi_sum}");
@@ -167,7 +183,7 @@ fn vbx_is_deterministic() {
   let s = 3;
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| (i + 2 * j) as f64 * 0.1);
   let phi = DVector::<f64>::from_element(d, 2.0);
-  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let qinit = deterministic_qinit(t, s);
   let a = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("a");
   let b = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("b");
   assert_eq!(a.elbo_trajectory, b.elbo_trajectory);
@@ -312,19 +328,22 @@ fn vbx_rejects_inf_fb() {
 /// VBx run by the type system. Codex review MEDIUM round 7.
 #[test]
 fn vbx_rejects_max_iters_zero() {
-  let t = 5;
+  let t = 6;
   let s = 3;
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
-  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  // Use a valid (non-uniform, peaked-per-row) qinit so the
+  // max_iters check is what fires, not the column-validation.
+  let qinit = deterministic_qinit(t, s);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
-/// Codex's specific recommended regression: a non-uniform qinit
-/// with `max_iters = 0` would return `pi = 1/S` while
-/// `gamma = qinit`, advertising a clustering result whose stats
-/// are inconsistent. Now blocked at the boundary.
+/// Codex's round-7 recommended regression: a strongly non-uniform
+/// qinit (each row peaked on a different speaker) with `max_iters = 0`
+/// would return `gamma = qinit` and `pi = 1/S` — inconsistent
+/// (`pi` should equal `gamma.col_sum() / T`). Now blocked at the
+/// boundary by the max_iters check.
 #[test]
 fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
   let t = 10;
@@ -332,13 +351,11 @@ fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
   let d = 4;
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.3);
   let phi = DVector::<f64>::from_element(d, 1.0);
-  // 80/20 row split → column sums 8.0 and 2.0 (very non-uniform).
-  // Both above the 0.5 floor, so column-mass validation passes.
-  let mut qinit = DMatrix::<f64>::zeros(t, s);
-  for tt in 0..t {
-    qinit[(tt, 0)] = 0.8;
-    qinit[(tt, 1)] = 0.2;
-  }
+  // Alternating per-row peak: even rows favor speaker 0, odd rows
+  // speaker 1. Each column has rows with mass 0.95, well above the
+  // 1/S = 0.5 floor — column-validation passes, max_iters check
+  // is what fires.
+  let qinit = deterministic_qinit(t, s);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
   assert!(
     matches!(result, Err(Error::Shape(_))),
@@ -360,7 +377,7 @@ fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
 /// in 1-3 iterations on this small input and returns successfully.
 #[test]
 fn vbx_does_not_oom_on_huge_max_iters() {
-  let t = 5;
+  let t = 6;
   let s = 2;
   let d = 4;
   let mut x = DMatrix::<f64>::zeros(t, d);
@@ -370,7 +387,9 @@ fn vbx_does_not_oom_on_huge_max_iters() {
     }
   }
   let phi = DVector::<f64>::from_element(d, 1.0);
-  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  // Non-uniform qinit so the column-validation passes — we need to
+  // reach the actual EM loop to exercise the allocation behavior.
+  let qinit = deterministic_qinit(t, s);
   // usize::MAX would have triggered a capacity-overflow panic in
   // the pre-fix code's `Vec::with_capacity(max_iters)`.
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX).expect("vbx_iterate");
@@ -434,19 +453,45 @@ fn vbx_accepts_qinit_with_alternating_column_assignment() {
     vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("alternating real columns must pass");
 }
 
-/// Uniform qinit (each cell = 1/S). Per-row max = 1/S exactly.
-/// The check uses a 16-ULP epsilon allowance so this canonical
-/// "no-info prior" passes.
+/// Codex round 9 [MEDIUM]: uniform qinit (every cell = 1/S) is a
+/// VBx fixed point. With identical columns gamma_sum / invL / alpha
+/// / log_p are symmetric across speakers, EM has no way to break
+/// the symmetry, and the algorithm returns the same uniform input
+/// as a "clustering result". The strict-greater per-row-max check
+/// rejects this case at the boundary.
 #[test]
-fn vbx_accepts_uniform_qinit() {
+fn vbx_rejects_uniform_qinit_for_s_gt_1() {
   let t = 8;
   let s = 4;
   let d = 4;
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.2);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
-  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10)
-    .expect("uniform qinit must pass per-row-max check");
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10);
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "uniform qinit (per-row max = 1/S = {}) is a symmetry-trap \
+     fixed point and must be rejected; got {result:?}",
+    1.0 / s as f64
+  );
+}
+
+/// S=1 is a degenerate case (single speaker) — `qinit` is forced to
+/// be all 1.0 by the row-sum invariant, and there is no symmetry to
+/// break with one column. The check skips the per-row-max test for
+/// S=1 to avoid over-rejecting this corner case.
+#[test]
+fn vbx_accepts_single_speaker_qinit() {
+  let t = 5;
+  let s = 1;
+  let d = 4;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0);
+  let out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("S=1 single-speaker qinit must pass");
+  // With S=1 there is only one cluster; pi[0] should be 1.0.
+  assert!((out.pi[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi[0]);
 }
 
 // ── Tighter qinit column-mass + zero-D rejection (Codex review MEDIUM round 6 of Phase 2) ─

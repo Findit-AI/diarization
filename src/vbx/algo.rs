@@ -240,35 +240,43 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject "dead" or "near-dead" speaker columns by per-row maximum.
-  // A real per-frame assignment puts at least one row's mass for
-  // this column AT OR ABOVE the uniform 1/S baseline (pyannote's
-  // softmax(7) on-mass is ~0.984 for S=19, ~0.523 for S=1000 — far
-  // above 1/S). Pure smoothing residue under any positive smoothing
-  // factor sits BELOW 1/S in every row (off-mass = 1/(exp(k) + S - 1)
-  // for smoothing factor k > 0).
+  // Reject "dead" / "near-dead" / "no-information" speaker columns
+  // by per-row maximum. Each column must have at least one row where
+  // its mass is *strictly greater* than the uniform `1/S` baseline.
   //
-  // The earlier rounds used a column-sum floor that scaled with T,
-  // and Codex round 8 pointed out the obvious failure mode: at
-  // T=1000, S=19, a pure-residue column has col_sum ≈ 0.897 — well
-  // above the previous fixed 0.5 floor. The per-row max is
-  // recording-length-invariant: residue is < 1/S in every row no
-  // matter how many rows there are.
+  // Pure smoothing residue under any positive smoothing factor sits
+  // below 1/S in every row (off-mass = 1/(exp(k)+S-1) < 1/S for k>0).
+  // Real per-frame assignments put on-mass well above 1/S
+  // (pyannote softmax(7) on-mass: 0.984 at S=19, 0.523 at S=1000).
+  //
+  // The strict-greater comparison also rejects uniform qinit (every
+  // cell = 1/S exactly): with identical columns, gamma_sum/invL/
+  // alpha/log_p are symmetric across speakers, EM has no way to
+  // break the symmetry, and the algorithm returns the same uniform
+  // input as a "clustering result". Codex review MEDIUM round 9.
+  //
+  // Recording-length invariant (T-invariant): residue per-row max
+  // depends only on the smoothing factor and S, not T. Codex round 8.
   //
   // Caveat: at S > ~1000 with smoothing=7, the residue/uniform
   // discrimination weakens (off-mass / (1/S) → 0.477 at S=1000,
-  // 0.901 at S=10000). VBx use cases are S ≤ ~100 in practice; for
-  // larger S this check needs revisiting. Codex review HIGH round 8.
-  let qinit_col_max_floor = 1.0 / s as f64 - 16.0 * f64::EPSILON;
-  for sj in 0..s {
-    let col_max = (0..t)
-      .map(|tt| qinit[(tt, sj)])
-      .fold(f64::NEG_INFINITY, f64::max);
-    if col_max < qinit_col_max_floor {
-      return Err(Error::Shape(
-        "qinit speaker column has no row where its mass reaches the \
-         uniform 1/S baseline (would be resurrected by uniform-pi)",
-      ));
+  // 0.901 at S=10000). VBx use cases are S ≤ ~100 in practice.
+  //
+  // S=1 is a degenerate case (single speaker, no symmetry to break);
+  // skip the check there since per-row max = 1.0 = 1/S exactly.
+  if s > 1 {
+    let qinit_col_max_floor = 1.0 / s as f64;
+    for sj in 0..s {
+      let col_max = (0..t)
+        .map(|tt| qinit[(tt, sj)])
+        .fold(f64::NEG_INFINITY, f64::max);
+      if col_max <= qinit_col_max_floor {
+        return Err(Error::Shape(
+          "qinit speaker column lacks any row strictly above the \
+           uniform 1/S baseline (would be resurrected by uniform-pi \
+           or would lock EM into a symmetric fixed point)",
+        ));
+      }
     }
   }
   // Reject `max_iters == 0`. Skipping the EM loop returns gamma=qinit
