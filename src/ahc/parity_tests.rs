@@ -106,7 +106,10 @@ fn ahc_init_matches_pyannote_ahc_init_labels() {
   for i in 0..num_train {
     let c = chunk_idx[i] as usize;
     let s = speaker_idx[i] as usize;
-    assert!(c < num_chunks && s < num_speakers, "active idx out of range");
+    assert!(
+      c < num_chunks && s < num_speakers,
+      "active idx out of range"
+    );
     let base = (c * num_speakers + s) * dim;
     for d in 0..dim {
       train[(i, d)] = raw_flat[base + d] as f64;
@@ -143,7 +146,8 @@ fn ahc_init_matches_pyannote_ahc_init_labels() {
   let got_canon = canonicalize_to_encounter_order(&got);
   let want_canon = canonicalize_to_encounter_order(&want);
   assert_eq!(
-    got_canon, want_canon,
+    got_canon,
+    want_canon,
     "ahc_init partition diverged from pyannote (first 20 got vs want canonicalized: {:?} vs {:?}; threshold={threshold})",
     &got_canon[..20.min(got_canon.len())],
     &want_canon[..20.min(want_canon.len())],

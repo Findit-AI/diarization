@@ -95,7 +95,9 @@ fn single_alive_cluster_uniform_q_returns_mean() {
   let emb = DMatrix::<f64>::from_row_slice(
     4,
     3,
-    &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    &[
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+    ],
   );
   let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
   // Expected mean of each column: (1+4+7+10)/4=5.5, (2+5+8+11)/4=6.5, (3+6+9+12)/4=7.5
@@ -112,17 +114,9 @@ fn single_alive_cluster_uniform_q_returns_mean() {
 fn filter_drops_dead_clusters() {
   // q: column 0 puts all weight on row 0; column 1 has zero everywhere
   // (sp will be filtered); column 2 puts all weight on row 2.
-  let q = DMatrix::<f64>::from_row_slice(
-    3,
-    3,
-    &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-  );
+  let q = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![0.6, 1.0e-10, 0.4]);
-  let emb = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-  );
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
   let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
   assert_eq!(c.shape(), (2, 2));
   // Surviving cluster 0 (alive_idx 0) → row 0 of emb.
@@ -163,7 +157,9 @@ fn zero_total_weight_in_alive_cluster_errors() {
 
 #[test]
 fn deterministic_on_repeated_calls() {
-  let q = DMatrix::<f64>::from_fn(8, 3, |i, j| ((i * 7 + j * 13) as f64 * 0.05).sin().abs() + 0.01);
+  let q = DMatrix::<f64>::from_fn(8, 3, |i, j| {
+    ((i * 7 + j * 13) as f64 * 0.05).sin().abs() + 0.01
+  });
   let sp = DVector::<f64>::from_vec(vec![0.4, 0.4, 0.2]);
   let emb = DMatrix::<f64>::from_fn(8, 5, |i, j| ((i + 2 * j) as f64 * 0.1).cos());
   let a = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("a");

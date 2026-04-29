@@ -77,11 +77,7 @@ fn single_row_returns_single_cluster() {
 /// At threshold = 0.5: only the (0,1) pair merges → labels `[0, 0, 1]`.
 #[test]
 fn merges_close_pair_separates_far_row() {
-  let m = DMatrix::<f64>::from_row_slice(3, 3, &[
-    1.0, 0.0, 0.0,
-    100.0, 1.0, 0.0,
-    0.0, 1.0, 0.0,
-  ]);
+  let m = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 100.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
   let labels = ahc_init(&m, 0.5).expect("ahc_init");
   assert_eq!(labels, vec![0, 0, 1]);
 }
@@ -90,12 +86,14 @@ fn merges_close_pair_separates_far_row() {
 /// of threshold. Distances are zero, so any positive threshold merges all.
 #[test]
 fn all_identical_normed_rows_collapse_to_one_cluster() {
-  let m = DMatrix::<f64>::from_row_slice(4, 2, &[
-    1.0, 0.0,
-    2.0, 0.0,  // same direction → same after L2 norm
-    3.0, 0.0,
-    0.5, 0.0,
-  ]);
+  let m = DMatrix::<f64>::from_row_slice(
+    4,
+    2,
+    &[
+      1.0, 0.0, 2.0, 0.0, // same direction → same after L2 norm
+      3.0, 0.0, 0.5, 0.0,
+    ],
+  );
   let labels = ahc_init(&m, 0.001).expect("ahc_init");
   assert_eq!(labels, vec![0, 0, 0, 0]);
 }
@@ -104,11 +102,7 @@ fn all_identical_normed_rows_collapse_to_one_cluster() {
 #[test]
 fn tiny_threshold_keeps_every_row_isolated() {
   // Three orthogonal directions; pairwise distance after L2 norm ≈ √2 ≈ 1.414.
-  let m = DMatrix::<f64>::from_row_slice(3, 3, &[
-    1.0, 0.0, 0.0,
-    0.0, 1.0, 0.0,
-    0.0, 0.0, 1.0,
-  ]);
+  let m = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
   let labels = ahc_init(&m, 0.1).expect("ahc_init");
   // Encounter-order labels — each leaf is its own cluster, labelled in
   // its first-encountered order.
@@ -122,14 +116,18 @@ fn labels_are_encounter_order_contiguous() {
   // Six rows: two pairs that should merge, plus two singletons that
   // shouldn't. Specific arrangement: pair A (rows 0, 3), pair B (rows
   // 1, 4), singleton (row 2), singleton (row 5).
-  let m = DMatrix::<f64>::from_row_slice(6, 3, &[
-    1.0, 0.0, 0.0,    // row 0: pair A
-    0.0, 1.0, 0.0,    // row 1: pair B
-    0.0, 0.0, 1.0,    // row 2: singleton
-    1.001, 0.0, 0.0,  // row 3: pair A (close to row 0 after norm)
-    0.0, 1.001, 0.0,  // row 4: pair B (close to row 1 after norm)
-    1.0, 1.0, 1.0,    // row 5: singleton
-  ]);
+  let m = DMatrix::<f64>::from_row_slice(
+    6,
+    3,
+    &[
+      1.0, 0.0, 0.0, // row 0: pair A
+      0.0, 1.0, 0.0, // row 1: pair B
+      0.0, 0.0, 1.0, // row 2: singleton
+      1.001, 0.0, 0.0, // row 3: pair A (close to row 0 after norm)
+      0.0, 1.001, 0.0, // row 4: pair B (close to row 1 after norm)
+      1.0, 1.0, 1.0, // row 5: singleton
+    ],
+  );
   let labels = ahc_init(&m, 0.1).expect("ahc_init");
   // Encounter order of labels: row 0 → 0, row 1 → 1, row 2 → 2,
   // row 3 → 0 (same cluster as row 0), row 4 → 1, row 5 → 3.
