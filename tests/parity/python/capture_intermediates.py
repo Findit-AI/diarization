@@ -6,6 +6,7 @@ Outputs (under tests/parity/fixtures/<clip-stem>/):
   - segmentations.npz     pyannote per-chunk per-frame speaker probs
   - ahc_init_labels.npy   (num_train,) AHC init labels
   - ahc_state.npz         threshold
+  - reconstruction.npz    count + discrete_diarization (Phase 5b)
   - vbx_state.npz         qinit, q_final, sp_final, elbo_trajectory
   - clustering.npz        soft_clusters, hard_clusters, centroids
   - reference.rttm        final RTTM
@@ -55,6 +56,12 @@ class CaptureBuffer:
     speaker_counting: np.ndarray | None = None
     raw_embeddings: np.ndarray | None = None
     discrete_diarization: np.ndarray | None = None
+    chunk_start: float | None = None
+    chunk_duration: float | None = None
+    chunk_step: float | None = None
+    frame_start: float | None = None
+    frame_duration: float | None = None
+    frame_step: float | None = None
 
     # via CapturingVBxClustering
     train_embeddings: np.ndarray | None = None
@@ -221,8 +228,19 @@ def make_hook(buf: CaptureBuffer):
             return
         if name == "segmentation":
             buf.segmentation = np.asarray(artifact.data).copy()
+            # Capture sliding-window timing metadata for Phase 5b
+            # reconstruction port: pyannote's `Inference.aggregate`
+            # uses these to map chunk indices to output-frame indices.
+            sw = artifact.sliding_window
+            buf.chunk_start = float(sw.start)
+            buf.chunk_duration = float(sw.duration)
+            buf.chunk_step = float(sw.step)
         elif name == "speaker_counting":
             buf.speaker_counting = np.asarray(artifact.data).copy()
+            sw = artifact.sliding_window
+            buf.frame_start = float(sw.start)
+            buf.frame_duration = float(sw.duration)
+            buf.frame_step = float(sw.step)
         elif name == "embeddings":
             buf.raw_embeddings = np.asarray(artifact).copy()
         elif name == "discrete_diarization":
@@ -304,6 +322,26 @@ def main() -> None:
         out_dir / "segmentations.npz",
         segmentations=buf.segmentation,
     )
+    # Reconstruction stage 8 fixtures — Phase 5b. `count` is the
+    # per-frame instantaneous-active-speaker count derived by
+    # pyannote's `binarize+sum` over the aggregated segmentations
+    # (used as top-K cap when binarizing the clustered output).
+    # `discrete_diarization` is the final per-frame discrete labels.
+    np.savez_compressed(
+        out_dir / "reconstruction.npz",
+        count=buf.speaker_counting,
+        discrete_diarization=buf.discrete_diarization,
+        # Sliding-window timing — needed by Phase 5b's overlap-add
+        # aggregation port. Without these, the chunk-to-output-frame
+        # mapping is implicit and would have to be reverse-engineered
+        # from numpy shape alone.
+        chunk_start=np.float64(buf.chunk_start),
+        chunk_duration=np.float64(buf.chunk_duration),
+        chunk_step=np.float64(buf.chunk_step),
+        frame_start=np.float64(buf.frame_start),
+        frame_duration=np.float64(buf.frame_duration),
+        frame_step=np.float64(buf.frame_step),
+    )
     np.savez_compressed(
         out_dir / "plda_embeddings.npz",
         post_xvec=buf.post_xvec,
@@ -369,6 +407,7 @@ def main() -> None:
         "ahc_state.npz",
         "vbx_state.npz",
         "clustering.npz",
+        "reconstruction.npz",
         "reference.rttm",
     ]
     manifest = {
