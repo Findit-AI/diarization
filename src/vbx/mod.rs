@@ -22,5 +22,8 @@ mod error;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod parity_tests;
+
 pub use algo::{vbx_iterate, VbxOutput};
 pub use error::Error;
