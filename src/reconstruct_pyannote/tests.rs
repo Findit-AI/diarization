@@ -125,7 +125,10 @@ fn rttm_eof_single_final_frame_active_emits_no_span() {
   // start = end → no span.
   let grid = vec![0.0_f32, 0.0, 0.0, 1.0];
   let spans = discrete_to_spans(&grid, 4, 1, frames_sw, 0.0);
-  assert!(spans.is_empty(), "single-frame EOF should emit no span: {spans:?}");
+  assert!(
+    spans.is_empty(),
+    "single-frame EOF should emit no span: {spans:?}"
+  );
 }
 
 #[test]
