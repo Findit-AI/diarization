@@ -476,6 +476,63 @@ fn vbx_rejects_uniform_qinit_for_s_gt_1() {
   );
 }
 
+/// Codex round 11 [HIGH]: a "near-dead spike" — column with a
+/// single row at `1/S + ε` and all other rows at zero — passes
+/// round-9's strict `> 1/S` check but has total mass barely above
+/// the residue floor. With uniform pi initialization, EM could
+/// resurrect this near-dead speaker on low-evidence inputs. The
+/// tightened `> 1.5/S` threshold rejects it.
+#[test]
+fn vbx_rejects_qinit_with_near_dead_spike_column() {
+  let t = 19;
+  let s = 19;
+  let d = 4;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
+  let phi = DVector::<f64>::from_element(d, 1.0);
+
+  // First S-1 rows: pyannote-style softmax(7) "real" assignments
+  // (one-hot peaked at speaker `tt`).
+  let on_mass = (7.0_f64).exp() / ((7.0_f64).exp() + (s - 1) as f64);
+  let off_mass = 1.0 / ((7.0_f64).exp() + (s - 1) as f64);
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  for tt in 0..(s - 1) {
+    for sj in 0..s {
+      qinit[(tt, sj)] = if sj == tt { on_mass } else { off_mass };
+    }
+  }
+  // Last row: speaker S-1 has just `1/S + ε` mass (the near-dead
+  // spike). Other speakers in this row share the rest evenly.
+  let one_over_s = 1.0 / s as f64;
+  let near_dead = one_over_s + 1.0e-12;
+  let other = (1.0 - near_dead) / (s - 1) as f64;
+  for sj in 0..s {
+    qinit[(s - 1, sj)] = if sj == s - 1 { near_dead } else { other };
+  }
+
+  // Test setup invariant: col S-1's per-row max is just above 1/S
+  // but well below the new 1.5/S threshold.
+  let col_max_near_dead = (0..t)
+    .map(|tt| qinit[(tt, s - 1)])
+    .fold(f64::NEG_INFINITY, f64::max);
+  let new_floor = 1.5 / s as f64;
+  assert!(
+    col_max_near_dead > one_over_s,
+    "test invariant: near-dead col_max = {col_max_near_dead:.4e} \
+     must sit above the previous round-9 threshold (1/S = {one_over_s:.4e})"
+  );
+  assert!(
+    col_max_near_dead < new_floor,
+    "test invariant: near-dead col_max = {col_max_near_dead:.4e} \
+     must sit below the new round-11 floor (1.5/S = {new_floor:.4e})"
+  );
+
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "near-dead spike column must be rejected; got {result:?}"
+  );
+}
+
 /// S=1 is a degenerate case (single speaker) — `qinit` is forced to
 /// be all 1.0 by the row-sum invariant, and there is no symmetry to
 /// break with one column. The check skips the per-row-max test for
