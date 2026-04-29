@@ -71,17 +71,24 @@ fn constrained_argmax_matches_pyannote_hard_clusters() {
   assert_eq!(hard_shape[1] as usize, num_speakers);
 
   let chunk_stride = num_speakers * num_clusters;
+  let chunks: Vec<DMatrix<f64>> = (0..num_chunks)
+    .map(|c| {
+      let slice = &soft_flat[c * chunk_stride..(c + 1) * chunk_stride];
+      DMatrix::<f64>::from_row_slice(num_speakers, num_clusters, slice)
+    })
+    .collect();
+
+  let assignments = constrained_argmax(&chunks).expect("constrained_argmax");
+  assert_eq!(assignments.len(), num_chunks);
+
   let mut mismatches: Vec<(usize, Vec<i32>, Vec<i32>)> = Vec::new();
   for c in 0..num_chunks {
-    let chunk = &soft_flat[c * chunk_stride..(c + 1) * chunk_stride];
-    let cost = DMatrix::<f64>::from_row_slice(num_speakers, num_clusters, chunk);
-
-    let got = constrained_argmax(&cost).expect("constrained_argmax");
+    let got = &assignments[c];
     let want: Vec<i32> = (0..num_speakers)
       .map(|s| hard_flat[c * num_speakers + s] as i32)
       .collect();
-    if got != want {
-      mismatches.push((c, got, want));
+    if *got != want {
+      mismatches.push((c, got.clone(), want));
     }
   }
 
