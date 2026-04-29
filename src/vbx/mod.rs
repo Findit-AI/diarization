@@ -25,5 +25,5 @@ mod tests;
 #[cfg(test)]
 mod parity_tests;
 
-pub use algo::{MAX_ITERS_CAP, PiInit, StopReason, VbxOutput, vbx_iterate};
+pub use algo::{StopReason, VbxOutput, vbx_iterate};
 pub use error::Error;

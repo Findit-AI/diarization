@@ -3,46 +3,6 @@
 use crate::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
-/// Hard upper bound on `max_iters`. A misconfigured caller that
-/// passes `usize::MAX` (or any sufficiently large value) cannot
-/// monopolize a diarization worker for arbitrarily long. Pyannote's
-/// `cluster_vbx` hardcodes `maxIters=20`; the captured Phase-0
-/// trajectory converged in 16 iterations. `1000` leaves 50× the
-/// pyannote default for unusual numerical-difficulty cases while
-/// bounding the worst-case run length. Codex review MEDIUM round 13.
-pub const MAX_ITERS_CAP: usize = 1000;
-
-/// How `vbx_iterate` initializes the speaker prior `pi`.
-///
-/// Pyannote's `cluster_vbx` always invokes `VBx(..., pi=int(S), ...)`,
-/// which inside VBx becomes `pi = ones(S)/S` — uniform. That choice
-/// is fine when `qinit` is the softmax of a one-hot AHC label
-/// matrix (every column has at least one row with mass ≈ on_mass)
-/// but it is *the* attack surface for adversarial / malformed
-/// initializers: a near-dead speaker column starts the EM loop
-/// with the same `1/S` prior as a real one and can be amplified
-/// into a fabricated speaker on low-evidence inputs.
-///
-/// [`PiInit::Uniform`] preserves pyannote parity. [`PiInit::FromQinitColumnMass`]
-/// derives `pi[s] = col_sum[s] / T` from the (already validated)
-/// qinit, so a near-dead column gets a near-zero prior at the
-/// boundary and EM cannot resurrect it. Codex review HIGH round 13:
-/// after twelve rounds of threshold tightening on `qinit` column
-/// validation, the principled fix is to address the resurrection
-/// path at its source — the `pi` initialization — rather than try
-/// to detect every possible "low-mass" column shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PiInit {
-  /// Uniform `1/S`. Matches pyannote's
-  /// `cluster_vbx(..., pi=int(S), ...)` call. Used by the parity
-  /// test against the captured pyannote run.
-  Uniform,
-  /// `pi[s] = col_sum[s] / T`. Derived from the validated `qinit`
-  /// column masses. Closes the dead-column resurrection path
-  /// without parity to pyannote's uniform-prior behavior.
-  FromQinitColumnMass,
-}
-
 /// Why the EM loop stopped. Lets callers distinguish a converged
 /// posterior from one that ran out of iterations — both have
 /// `elbo_trajectory.len() == max_iters` when convergence happens
@@ -200,11 +160,9 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 ///
 /// # Errors
 ///
-/// - [`Error::Shape`] on mismatched dimensions, an `Fa`/`Fb`/`qinit`
-///   value that fails the input contract (non-positive or non-finite
-///   scalar; `qinit` row that doesn't sum to 1; `qinit` entry that's
-///   negative; `qinit` speaker column with below-floor total mass),
-///   `D == 0`, or `max_iters == 0`.
+/// - [`Error::Shape`] on mismatched dimensions, an `Fa`/`Fb` value
+///   that's non-positive or non-finite, a `qinit` row that doesn't
+///   sum to 1, a `qinit` entry that's negative, or `max_iters == 0`.
 /// - [`Error::NonFinite`] if `x` or `qinit` contains a NaN/`±inf`
 ///   entry, or if a non-finite value appears in an algorithm
 ///   intermediate (the algorithm has no recovery; treat as a hard
@@ -215,9 +173,6 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 /// `qinit` row-sum tolerance is `1e-9` — pyannote's caller produces
 /// a softmaxed initializer that is unit-normalized to within float
 /// roundoff, and Phase-0 captured rows are within `~1e-15` of 1.0.
-/// This rejects a degraded or hand-crafted initializer that biases
-/// the first speaker-model update — Codex review MEDIUM (round 1 of
-/// Phase 2).
 pub fn vbx_iterate(
   x: &DMatrix<f64>,
   phi: &DVector<f64>,
@@ -225,19 +180,8 @@ pub fn vbx_iterate(
   fa: f64,
   fb: f64,
   max_iters: usize,
-  pi_init: PiInit,
 ) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
-  if d == 0 {
-    // VBx without feature evidence collapses to "iterate the uniform
-    // prior". With D=0 the per-dimension loops are no-ops, the
-    // likelihood term vanishes, and gamma/pi are driven only by `pi`
-    // and `eps_log` — a finite-but-empty cluster posterior dressed
-    // up as a clustering result. Reject at the boundary so a schema
-    // drift or feature-construction bug doesn't return plausible
-    // garbage. Codex review MEDIUM round 6 of Phase 2.
-    return Err(Error::Shape("X must have at least one feature dimension"));
-  }
   if phi.len() != d {
     return Err(Error::Shape("Phi.len() must equal X.ncols()"));
   }
@@ -301,65 +245,8 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject *truly uniform* qinit (col_max = 1/S exactly): all
-  // columns identical means gamma_sum / invL / alpha / log_p stay
-  // symmetric across speakers, EM has no way to break the symmetry,
-  // and the algorithm returns the same uniform input as a "result".
-  // This holds for either `PiInit::Uniform` or `PiInit::FromQinitColumnMass`
-  // (uniform col sums → uniform pi either way), so the check is
-  // pi-mode-independent. Codex review MEDIUM round 9.
-  //
-  // The earlier rounds 11/12 added stricter col_max > 1.5/S and
-  // col_sum > 0.5 thresholds to detect "near-dead" / "single-spike"
-  // columns. With [`PiInit::FromQinitColumnMass`] the resurrection
-  // path is closed at source (a near-dead column gets near-zero
-  // pi), so those threshold-based defenses are redundant for
-  // production callers. With [`PiInit::Uniform`] the resurrection
-  // path is theoretically open, but the only caller of that mode
-  // is the parity test (which uses well-formed pyannote softmax-of-
-  // one-hot input). Codex review HIGH round 13: rather than continue
-  // chasing thresholds, address the root cause via pi initialization.
-  //
-  // S=1 is degenerate (single speaker, no symmetry to break); skip
-  // since col_max = 1.0 = 1/S is the only possibility there.
-  if s > 1 {
-    let uniform_baseline = 1.0 / s as f64;
-    for sj in 0..s {
-      let col_max = (0..t)
-        .map(|tt| qinit[(tt, sj)])
-        .fold(f64::NEG_INFINITY, f64::max);
-      if col_max <= uniform_baseline {
-        return Err(Error::Shape(
-          "qinit speaker column lacks any row strictly above the \
-           uniform 1/S baseline (would lock EM into a symmetric \
-           fixed point)",
-        ));
-      }
-    }
-  }
-  // Reject `max_iters == 0`. Skipping the EM loop returns gamma=qinit
-  // and pi=1/S — internally inconsistent for any non-uniform qinit
-  // (pi should equal `gamma.column_sum() / T`), but indistinguishable
-  // from a completed VBx run by the type system. There is no
-  // documented dry-run mode in dia::vbx, so a `max_iters == 0` config
-  // is by definition a misuse. Codex review MEDIUM round 7.
   if max_iters == 0 {
     return Err(Error::Shape("max_iters must be at least 1"));
-  }
-  // Reject oversized `max_iters` so a misconfigured caller (e.g. a
-  // production config typo, `usize::MAX`, accidental u32-cast
-  // overflow) cannot monopolize a diarization worker. Pyannote
-  // hardcodes maxIters=20 inside `cluster_vbx`; the captured Phase-0
-  // trajectory converged in 16. The cap at `MAX_ITERS_CAP = 1000`
-  // is 50× the pyannote default — generous enough to absorb any
-  // realistic numerical-difficulty case, tight enough to bound the
-  // worst case at a few seconds rather than minutes/hours. Codex
-  // review MEDIUM round 13 secondary finding.
-  if max_iters > MAX_ITERS_CAP {
-    return Err(Error::Shape(
-      "max_iters exceeds MAX_ITERS_CAP (1000): bounded to prevent \
-       worker monopolization on misconfigured input",
-    ));
   }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))
@@ -379,32 +266,9 @@ pub fn vbx_iterate(
   }
 
   let mut gamma = qinit.clone();
-  // pi initialization: the parity-preserving `Uniform` mode matches
-  // pyannote's `pi=int(S) → ones(S)/S`. The `FromQinitColumnMass`
-  // mode derives `pi[s] = col_sum[s] / T` so a near-dead column
-  // gets a near-zero prior at the boundary and EM cannot resurrect
-  // it. Codex review HIGH round 13.
-  let mut pi = match pi_init {
-    PiInit::Uniform => DVector::<f64>::from_element(s, 1.0 / s as f64),
-    PiInit::FromQinitColumnMass => {
-      let mut p = DVector::<f64>::zeros(s);
-      for sj in 0..s {
-        p[sj] = (0..t).map(|tt| qinit[(tt, sj)]).sum::<f64>() / t as f64;
-      }
-      // qinit row-sum-1 invariant means col_sums sum to T → pi sums
-      // to 1.0 exactly (within float roundoff).
-      p
-    }
-  };
+  // pi = ones(S) / S — matches pyannote's `VBx(..., pi=int(S), ...)`.
+  let mut pi = DVector::<f64>::from_element(s, 1.0 / s as f64);
 
-  // `Vec::new()` rather than `Vec::with_capacity(max_iters)` —
-  // `max_iters` is caller-controlled, and `with_capacity` would
-  // allocate `max_iters * size_of::<f64>()` bytes up front. A
-  // misconfigured caller passing `usize::MAX` would crash with
-  // "capacity overflow" or OOM before the loop ran. The iteration
-  // count is bounded in practice (the captured trajectory converges
-  // in 16 of 20 iterations); amortized push cost is O(1). Codex
-  // review MEDIUM round 4.
   let mut elbo_trajectory: Vec<f64> = Vec::new();
   let epsilon = 1e-4_f64;
   let eps_log = 1e-8_f64;
