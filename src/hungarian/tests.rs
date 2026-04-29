@@ -72,11 +72,7 @@ fn tall_2x3_assigns_both_speakers_to_distinct_clusters() {
 /// Exercises the transpose path. Two speakers matched, one UNMATCHED.
 #[test]
 fn wide_3x2_leaves_one_speaker_unmatched() {
-  let cost = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[0.95, 0.05, 0.05, 0.95, 0.10, 0.10],
-  );
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.95, 0.05, 0.05, 0.95, 0.10, 0.10]);
   let assign = one(cost).expect("constrained_argmax");
   assert_eq!(assign, vec![0, 1, UNMATCHED]);
 }
@@ -87,11 +83,7 @@ fn wide_3x2_leaves_one_speaker_unmatched() {
 /// Catches a "leave the lowest-row speaker unmatched" greedy bug.
 #[test]
 fn wide_3x2_optimal_unmatches_non_weakest_speaker() {
-  let cost = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[0.95, 0.10, 0.05, 0.95, 0.99, 0.10],
-  );
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.95, 0.10, 0.05, 0.95, 0.99, 0.10]);
   let assign = one(cost).expect("constrained_argmax");
   assert_eq!(assign, vec![UNMATCHED, 1, 0]);
 }
@@ -195,10 +187,7 @@ fn rejects_pos_inf_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(0, 1)] = f64::INFINITY;
   let result = one(cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 #[test]
@@ -206,10 +195,7 @@ fn rejects_neg_inf_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(1, 0)] = f64::NEG_INFINITY;
   let result = one(cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 /// Mixed: a chunk with both NaN and `±inf` rejects rather than
@@ -220,10 +206,7 @@ fn rejects_inf_even_when_nan_also_present() {
   cost[(0, 0)] = f64::NAN;
   cost[(1, 1)] = f64::NEG_INFINITY;
   let result = one(cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 /// All entries non-finite → there's no value to use as the nanmin
@@ -235,10 +218,7 @@ fn rejects_inf_even_when_nan_also_present() {
 fn rejects_when_all_entries_non_finite() {
   let cost = DMatrix::<f64>::from_element(2, 2, f64::NAN);
   let result = one(cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 // ── Tie-breaking invariants (Codex review HIGH round 3 of Phase 3) ─
@@ -365,7 +345,10 @@ fn tied_3x3_all_equal_returns_some_optimal_matching() {
     (achieved - max).abs() < 1e-12,
     "all-tied square must still hit max ({max:.6}); got {achieved:.6}"
   );
-  assert!(!assign.contains(&UNMATCHED), "square: all matched; got {assign:?}");
+  assert!(
+    !assign.contains(&UNMATCHED),
+    "square: all matched; got {assign:?}"
+  );
 
   let mut used = std::collections::HashSet::new();
   for &k in &assign {
@@ -408,11 +391,7 @@ fn tied_2x3_returns_some_optimal_matching() {
 fn pyannote_inactive_speaker_pattern_hits_optimal_total() {
   // const = soft.min() - 1.0 = -1.5. Real speaker 0 has cells (0.9, 0.5);
   // speakers 1 and 2 are inactive (rows of -1.5).
-  let cost = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[0.9, 0.5, -1.5, -1.5, -1.5, -1.5],
-  );
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.9, 0.5, -1.5, -1.5, -1.5, -1.5]);
   let assign = one(cost.clone()).expect("constrained_argmax");
 
   let max = brute_force_max_total(&cost);
