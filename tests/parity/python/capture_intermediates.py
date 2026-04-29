@@ -4,6 +4,7 @@ Outputs (under tests/parity/fixtures/<clip-stem>/):
   - raw_embeddings.npz    (num_chunks, num_slots, 256) pre-PLDA WeSpeaker
   - plda_embeddings.npz   post_xvec + post_plda (num_train, 128) + train indices
   - ahc_init_labels.npy   (num_train,) AHC init labels
+  - ahc_state.npz         threshold
   - vbx_state.npz         qinit, q_final, sp_final, elbo_trajectory
   - clustering.npz        soft_clusters, hard_clusters, centroids
   - reference.rttm        final RTTM
@@ -311,6 +312,14 @@ def main() -> None:
     )
     np.save(out_dir / "ahc_init_labels.npy", buf.ahc_clusters)
     np.savez_compressed(
+        out_dir / "ahc_state.npz",
+        # `threshold` is the AHC linkage cutoff (config.yaml; community-1
+        # default is 0.6). Captured alongside the labels so a future
+        # config retune surfaces as a parity failure instead of silent
+        # hardcoded-constant drift. (Phase 4, Task 0.)
+        threshold=np.float64(cap.threshold),
+    )
+    np.savez_compressed(
         out_dir / "vbx_state.npz",
         qinit=buf.qinit,
         q_final=buf.q_final,
@@ -347,6 +356,7 @@ def main() -> None:
         "raw_embeddings.npz",
         "plda_embeddings.npz",
         "ahc_init_labels.npy",
+        "ahc_state.npz",
         "vbx_state.npz",
         "clustering.npz",
         "reference.rttm",

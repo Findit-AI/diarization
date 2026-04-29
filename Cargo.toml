@@ -54,6 +54,9 @@ rand_chacha = { version = "0.10", default-features = false }
 ordered-float = "5.3"
 pathfinding = "4.15"
 
+# Phase 4: AHC initialization (centroid-method linkage).
+kodama = "0.3"
+
 
 [dev-dependencies]
 anyhow = "1"

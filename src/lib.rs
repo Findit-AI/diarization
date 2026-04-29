@@ -78,3 +78,10 @@ pub(crate) mod vbx;
 // Phase 3 ships per-chunk constrained Hungarian assignment math,
 // integration lands in Phase 5.
 pub(crate) mod hungarian;
+// `ahc` is crate-private for the same reason as `plda`/`vbx`/`hungarian`:
+// Phase 4 ships AHC initialization (centroid-method linkage + distance
+// fcluster + label remap), integration lands in Phase 5.
+pub(crate) mod ahc;
+// `centroid` is crate-private for the same reason: Phase 4 ships the
+// post-VBx weighted centroid math, integration lands in Phase 5.
+pub(crate) mod centroid;
