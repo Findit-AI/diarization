@@ -458,7 +458,10 @@ fn vbx_rejects_x_with_nan() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
-  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFinite("x"))),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -468,7 +471,10 @@ fn vbx_rejects_x_with_pos_inf() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
-  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFinite("x"))),
+    "got {result:?}"
+  );
 }
 
 #[test]
@@ -478,7 +484,10 @@ fn vbx_rejects_x_with_neg_inf() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
-  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+  assert!(
+    matches!(result, Err(Error::NonFinite("x"))),
+    "got {result:?}"
+  );
 }
 
 /// Codex's specific concern: at `max_iters = 0` the loop never
