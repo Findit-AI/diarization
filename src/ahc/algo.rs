@@ -103,90 +103,91 @@ fn pdist_euclidean(rows: &DMatrix<f64>) -> Vec<f64> {
 }
 
 /// `fcluster(criterion="distance", t=threshold)` followed by
-/// `np.unique(return_inverse=True)`. Walks the dendrogram steps and
-/// unions only those whose dissimilarity is `≤ threshold`, then assigns
-/// encounter-order labels `0..k` to leaves.
+/// `np.unique(return_inverse=True)`. Mirrors `scipy._hierarchy.cluster_dist`:
+/// (1) precompute the *maximum* merge dissimilarity in each subtree,
+/// (2) walk top-down, cutting wherever that max exceeds the threshold.
 ///
-/// kodama returns `n - 1` steps, each merging two cluster ids. Leaf ids
-/// are `0..n`; compound ids are `n + step_idx`. We track each cluster
-/// id's leaf representative (any leaf in its set) so subsequent steps
-/// referencing a compound id can union the right leaves.
+/// Why max-per-subtree rather than the root's own dissimilarity:
+/// centroid linkage can produce *inversions* (a parent merge has lower
+/// dissimilarity than one of its children — Codex review HIGH round 1
+/// of Phase 4). A walk that only checks the root's `step.dissimilarity`
+/// would merge an entire subtree based on a low-dist parent even when
+/// an internal child merge is above the threshold. Scipy's fcluster
+/// (`scipy/cluster/_hierarchy.pyx::cluster_dist`) propagates the max
+/// dissimilarity up the tree first, then uses that as the cut criterion
+/// — i.e. a flat cluster contains pairs whose cophenetic distance is
+/// `≤ threshold`, which is the documented contract.
+///
+/// Encounter-order remap is applied during a second pass: the first
+/// label seen in leaf-scan order becomes 0, the next becomes 1, etc.,
+/// matching `np.unique(_, return_inverse=True)` on contiguous label
+/// arrays.
 fn fcluster_distance_remap(steps: &[Step<f64>], n: usize, threshold: f64) -> Vec<usize> {
-  let mut uf = UnionFind::new(n);
-  // cluster_leaf_rep[id] = some leaf id in cluster `id`. Pre-fill the n
-  // leaves; compound clusters get their rep set as steps are processed.
-  let mut cluster_leaf_rep: Vec<usize> = (0..n).collect();
-  cluster_leaf_rep.resize(n + steps.len(), usize::MAX);
+  // Single leaf — no merges; one cluster.
+  if n == 1 {
+    return vec![0];
+  }
 
-  for (step_idx, step) in steps.iter().enumerate() {
-    let rep1 = cluster_leaf_rep[step.cluster1];
-    let rep2 = cluster_leaf_rep[step.cluster2];
-    cluster_leaf_rep[n + step_idx] = rep1; // any leaf in the merged set
-    if step.dissimilarity <= threshold {
-      uf.union(rep1, rep2);
+  // Precompute the maximum dissimilarity in each subtree. Leaves have 0
+  // (they contain no merges); compound id `n + i` has max of its own
+  // merge plus the max of its two children.
+  let total_nodes = n + steps.len();
+  let mut subtree_max = vec![0.0_f64; total_nodes];
+  for (i, step) in steps.iter().enumerate() {
+    let m1 = subtree_max[step.cluster1];
+    let m2 = subtree_max[step.cluster2];
+    subtree_max[n + i] = step.dissimilarity.max(m1).max(m2);
+  }
+
+  // First pass: top-down DFS labels leaves by partition class.
+  let mut raw = vec![usize::MAX; n];
+  let mut next_dfs_label = 0usize;
+  let root = total_nodes - 1;
+  let mut stack: Vec<usize> = vec![root];
+  while let Some(node) = stack.pop() {
+    if node < n {
+      // Bare leaf surfaced via a split — its own cluster.
+      raw[node] = next_dfs_label;
+      next_dfs_label += 1;
+    } else if subtree_max[node] <= threshold {
+      // Whole subtree fits within the threshold — one cluster.
+      let l = next_dfs_label;
+      next_dfs_label += 1;
+      paint_leaves(node, n, steps, l, &mut raw);
+    } else {
+      // Subtree contains a merge above threshold; split into children.
+      let step = &steps[node - n];
+      stack.push(step.cluster2);
+      stack.push(step.cluster1);
     }
   }
 
-  // Assign encounter-order labels to roots.
-  let mut label_of_root: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+  // Second pass: scan leaves 0..n and assign encounter-order labels.
+  let mut canonical = vec![0usize; n];
   let mut next_label = 0usize;
-  let mut labels = vec![0usize; n];
-  for (i, slot) in labels.iter_mut().enumerate() {
-    let root = uf.find(i);
-    *slot = *label_of_root.entry(root).or_insert_with(|| {
+  let mut label_of_class: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+  for (i, slot) in canonical.iter_mut().enumerate() {
+    *slot = *label_of_class.entry(raw[i]).or_insert_with(|| {
       let l = next_label;
       next_label += 1;
       l
     });
   }
-  labels
+  canonical
 }
 
-/// Minimal union-find with path compression. Sized at construction
-/// (one node per leaf); compound dendrogram nodes never carry their own
-/// union-find slot — the algorithm unions the leaf reps directly.
-struct UnionFind {
-  parent: Vec<usize>,
-  rank: Vec<u32>,
-}
-
-impl UnionFind {
-  fn new(n: usize) -> Self {
-    Self {
-      parent: (0..n).collect(),
-      rank: vec![0; n],
-    }
-  }
-
-  fn find(&mut self, x: usize) -> usize {
-    let mut root = x;
-    while self.parent[root] != root {
-      root = self.parent[root];
-    }
-    // Path compression.
-    let mut cur = x;
-    while self.parent[cur] != root {
-      let next = self.parent[cur];
-      self.parent[cur] = root;
-      cur = next;
-    }
-    root
-  }
-
-  fn union(&mut self, a: usize, b: usize) {
-    let ra = self.find(a);
-    let rb = self.find(b);
-    if ra == rb {
-      return;
-    }
-    // Union by rank.
-    if self.rank[ra] < self.rank[rb] {
-      self.parent[ra] = rb;
-    } else if self.rank[ra] > self.rank[rb] {
-      self.parent[rb] = ra;
+/// Recursively assign `label` to every leaf reachable from `node`.
+/// Uses iterative traversal to avoid stack-depth concerns on deep
+/// dendrograms.
+fn paint_leaves(node: usize, n: usize, steps: &[Step<f64>], label: usize, labels: &mut [usize]) {
+  let mut stack = vec![node];
+  while let Some(cur) = stack.pop() {
+    if cur < n {
+      labels[cur] = label;
     } else {
-      self.parent[rb] = ra;
-      self.rank[ra] += 1;
+      let step = &steps[cur - n];
+      stack.push(step.cluster1);
+      stack.push(step.cluster2);
     }
   }
 }

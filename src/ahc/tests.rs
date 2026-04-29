@@ -142,6 +142,68 @@ fn labels_are_encounter_order_contiguous() {
   assert!(seen.iter().all(|&s| s), "labels {labels:?} not contiguous");
 }
 
+// ── Centroid-linkage inversion (Codex review HIGH round 1 of Phase 4) ─
+//
+// Centroid linkage (the method pyannote uses) does not produce
+// monotonic dendrograms in general — a parent merge can have a
+// *lower* dissimilarity than one of its children. Scipy's
+// `fcluster(criterion="distance")` handles this by computing the
+// max merge dissimilarity in each subtree before cutting, so a
+// flat cluster's pairwise cophenetic distances are all `≤ t`.
+//
+// The regression test below uses a 4-point unit-vector configuration
+// where:
+// - d(0, 1) = 0.65          (above threshold 0.6 → step 0)
+// - d(2, {0, 1}) = 0.574    (BELOW threshold via Lance-Williams)
+// - d(3, *) ≈ 1.89          (far above)
+//
+// The dendrogram has an inversion at step 1 (lower than step 0).
+// A naive bottom-up "union when step.dist ≤ t" walk would merge
+// {0, 1, 2} into one cluster (matching root step 1's low dist), but
+// scipy splits all three because the {0, 1} subtree's max internal
+// merge (0.65) is still above threshold. The Rust port must agree
+// with scipy.
+
+/// Pyannote's centroid-linkage flow can produce a non-monotonic
+/// dendrogram. The fcluster cut must use the *max* dissimilarity in
+/// each subtree, not just the root's `step.dissimilarity`. This test
+/// constructs a deterministic 4-point input that triggers the
+/// inversion at threshold 0.6 — same partition as scipy.
+#[test]
+fn centroid_linkage_inversion_matches_scipy() {
+  // 4 unit vectors in 3D. d(0,1)=0.65 above threshold, but step 1
+  // (merging point 2 with {0,1}) inverts to dist=0.574, BELOW threshold.
+  let alpha = 2.0_f64 * (0.65_f64 / 2.0).asin();
+  let p0 = (1.0_f64, 0.0_f64, 0.0_f64);
+  let p1 = (alpha.cos(), alpha.sin(), 0.0_f64);
+  // p2 chosen so |p2-p0| = |p2-p1| = 0.66, |p2| = 1.
+  let cdota = 1.0 - 0.66_f64.powi(2) / 2.0;
+  let cy = (cdota - p1.0 * cdota) / p1.1;
+  let cz = (1.0_f64 - cdota * cdota - cy * cy).sqrt();
+  let p2 = (cdota, cy, cz);
+  let p3 = (-1.0_f64, 0.0_f64, 0.0_f64);
+
+  let m = DMatrix::<f64>::from_row_slice(
+    4,
+    3,
+    &[p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2, p3.0, p3.1, p3.2],
+  );
+
+  let labels = ahc_init(&m, 0.6).expect("ahc_init");
+
+  // Scipy on this dendrogram:
+  //   step 0 (merge 0, 1): d=0.65 > 0.6
+  //   step 1 (merge 2, {0,1}): d=0.574 ≤ 0.6 BUT subtree's max = 0.65 > 0.6
+  //   step 2 (merge 3, ...): d=1.89 > 0.6
+  // → no merges accepted; each leaf is its own cluster.
+  // Encounter-order labels: [0, 1, 2, 3].
+  assert_eq!(
+    labels,
+    vec![0, 1, 2, 3],
+    "inversion case must match scipy: subtree max > threshold means split"
+  );
+}
+
 /// Determinism: same input → identical output.
 #[test]
 fn deterministic_on_repeated_calls() {
