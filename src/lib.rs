@@ -74,3 +74,7 @@ pub(crate) mod plda;
 // integration with `EmbedModel` + `Diarizer` lands in Phase 5.
 pub mod segment;
 pub(crate) mod vbx;
+// `hungarian` is crate-private for the same reason as `plda`/`vbx`:
+// Phase 3 ships per-chunk constrained Hungarian assignment math,
+// integration lands in Phase 5.
+pub(crate) mod hungarian;
