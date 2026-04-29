@@ -1,7 +1,7 @@
 //! Parity tests for `dia::vbx` against the Phase-0 captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{plda_embeddings, vbx_state}.npz`
-//! and asserts that `vbx_iterate(post_plda, phi, qinit, fa, fb, max_iters)`
+//! and asserts that `vbx_iterate(post_plda, phi, qinit, fa, fb, max_iters, PiInit::Uniform)`
 //! reproduces pyannote's `q_final`, `sp_final`, and `elbo_trajectory`
 //! within float-cast tolerance.
 //!
@@ -15,7 +15,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::vbx::{StopReason, vbx_iterate};
+use crate::vbx::{PiInit, StopReason, vbx_iterate};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -99,7 +99,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let max_iters = max_iters_flat[0] as usize;
 
   // ── Run ────────────────────────────────────────────────────────
-  let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
+  let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters, PiInit::Uniform).expect("vbx_iterate");
 
   // The captured run converged in 16 of 20 iterations — the
   // pyannote-equivalent should hit the convergence branch, not

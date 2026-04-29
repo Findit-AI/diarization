@@ -3,6 +3,37 @@
 use crate::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
+/// How `vbx_iterate` initializes the speaker prior `pi`.
+///
+/// Pyannote's `cluster_vbx` always invokes `VBx(..., pi=int(S), ...)`,
+/// which inside VBx becomes `pi = ones(S)/S` — uniform. That choice
+/// is fine when `qinit` is the softmax of a one-hot AHC label
+/// matrix (every column has at least one row with mass ≈ on_mass)
+/// but it is *the* attack surface for adversarial / malformed
+/// initializers: a near-dead speaker column starts the EM loop
+/// with the same `1/S` prior as a real one and can be amplified
+/// into a fabricated speaker on low-evidence inputs.
+///
+/// [`PiInit::Uniform`] preserves pyannote parity. [`PiInit::FromQinitColumnMass`]
+/// derives `pi[s] = col_sum[s] / T` from the (already validated)
+/// qinit, so a near-dead column gets a near-zero prior at the
+/// boundary and EM cannot resurrect it. Codex review HIGH round 13:
+/// after twelve rounds of threshold tightening on `qinit` column
+/// validation, the principled fix is to address the resurrection
+/// path at its source — the `pi` initialization — rather than try
+/// to detect every possible "low-mass" column shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiInit {
+  /// Uniform `1/S`. Matches pyannote's
+  /// `cluster_vbx(..., pi=int(S), ...)` call. Used by the parity
+  /// test against the captured pyannote run.
+  Uniform,
+  /// `pi[s] = col_sum[s] / T`. Derived from the validated `qinit`
+  /// column masses. Closes the dead-column resurrection path
+  /// without parity to pyannote's uniform-prior behavior.
+  FromQinitColumnMass,
+}
+
 /// Why the EM loop stopped. Lets callers distinguish a converged
 /// posterior from one that ran out of iterations — both have
 /// `elbo_trajectory.len() == max_iters` when convergence happens
@@ -185,6 +216,7 @@ pub fn vbx_iterate(
   fa: f64,
   fb: f64,
   max_iters: usize,
+  pi_init: PiInit,
 ) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
   if d == 0 {
@@ -260,66 +292,38 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject "dead" / "near-dead" / "near-uniform" / "spike-only"
-  // speaker columns. Each column must satisfy BOTH:
+  // Reject *truly uniform* qinit (col_max = 1/S exactly): all
+  // columns identical means gamma_sum / invL / alpha / log_p stay
+  // symmetric across speakers, EM has no way to break the symmetry,
+  // and the algorithm returns the same uniform input as a "result".
+  // This holds for either `PiInit::Uniform` or `PiInit::FromQinitColumnMass`
+  // (uniform col sums → uniform pi either way), so the check is
+  // pi-mode-independent. Codex review MEDIUM round 9.
   //
-  //   1. Per-row max > `1.5 / S` (peak-vs-uniform check)
-  //   2. Total mass > `QINIT_COL_SUM_FLOOR` (peak-with-support check)
-  //
-  // Why both: the threshold-based check (1) alone is fundamentally
-  // circumventable — any per-row-max threshold `X` admits a single
-  // spike at `X + ε` with zero elsewhere (a column with only
-  // negligible total support that would still receive the uniform
-  // `pi = 1/S` prior and could be resurrected by EM). The col-sum
-  // floor (2) catches that class. Conversely, long-T residue has
-  // `col_sum = T * off_mass` which scales with T and exceeds any
-  // fixed sum floor (Codex round 8), but residue per-row max stays
-  // below `1/S` regardless of T, so the per-row-max check (1)
-  // catches it. Each check covers a distinct failure mode; together
-  // they close both. Codex review HIGH round 12.
-  //
-  // (1) Per-row-max threshold:
-  //   - Rejects pure residue (residue per-row max < 1/S < 1.5/S)
-  //   - Rejects uniform qinit (col_max = 1/S < 1.5/S)
-  //   - Rejects "near-uniform" spikes at 1/S + ε
-  //   - Pyannote softmax(7) on-mass: 0.999 (S=2), 0.984 (S=19),
-  //     0.523 (S=1000) — comfortably above 1.5/S in all cases
-  //
-  // (2) Col-sum threshold (`QINIT_COL_SUM_FLOOR = 0.5`):
-  //   - Pyannote softmax(7) real K=1: col_sum ≈ on_mass + (T-1)*off_mass
-  //     ≥ 0.984 (S=19), 0.523 + tiny (S=1000) — always > 0.5
-  //   - Single-spike at threshold+ε with rest 0: col_sum = threshold+ε
-  //     (= 0.0789+ε for S=19) ≪ 0.5 — rejected
-  //   - Long-T residue at S=19, T=1000: col_sum ≈ 0.897 > 0.5 — but
-  //     per-row max check already catches this case
-  //
-  // Recording-length invariant (T-invariant): per-row max ✓
-  //   col-sum is NOT T-invariant for residue, which is why we need
-  //   per-row-max as the primary check.
+  // The earlier rounds 11/12 added stricter col_max > 1.5/S and
+  // col_sum > 0.5 thresholds to detect "near-dead" / "single-spike"
+  // columns. With [`PiInit::FromQinitColumnMass`] the resurrection
+  // path is closed at source (a near-dead column gets near-zero
+  // pi), so those threshold-based defenses are redundant for
+  // production callers. With [`PiInit::Uniform`] the resurrection
+  // path is theoretically open, but the only caller of that mode
+  // is the parity test (which uses well-formed pyannote softmax-of-
+  // one-hot input). Codex review HIGH round 13: rather than continue
+  // chasing thresholds, address the root cause via pi initialization.
   //
   // S=1 is degenerate (single speaker, no symmetry to break); skip
-  // both checks since per-row max = 1.0 ≯ 1.5/S = 1.5 and col_sum
-  // = T trivially exceeds any reasonable floor.
-  const QINIT_COL_SUM_FLOOR: f64 = 0.5;
+  // since col_max = 1.0 = 1/S is the only possibility there.
   if s > 1 {
-    let qinit_col_max_floor = 1.5 / s as f64;
+    let uniform_baseline = 1.0 / s as f64;
     for sj in 0..s {
       let col_max = (0..t)
         .map(|tt| qinit[(tt, sj)])
         .fold(f64::NEG_INFINITY, f64::max);
-      if col_max <= qinit_col_max_floor {
+      if col_max <= uniform_baseline {
         return Err(Error::Shape(
-          "qinit speaker column lacks any row substantially above the \
-           uniform 1/S baseline (would be resurrected by uniform-pi \
-           initialization)",
-        ));
-      }
-      let col_sum: f64 = (0..t).map(|tt| qinit[(tt, sj)]).sum();
-      if col_sum <= QINIT_COL_SUM_FLOOR {
-        return Err(Error::Shape(
-          "qinit speaker column has insufficient total support \
-           (single-spike attack: barely-supported column would be \
-           resurrected by uniform-pi initialization)",
+          "qinit speaker column lacks any row strictly above the \
+           uniform 1/S baseline (would lock EM into a symmetric \
+           fixed point)",
         ));
       }
     }
@@ -351,9 +355,23 @@ pub fn vbx_iterate(
   }
 
   let mut gamma = qinit.clone();
-  // pi starts as the uniform 1/S vector (matches pyannote's
-  // `if type(pi) is int: pi = ones(pi)/pi` for the integer-pi path).
-  let mut pi = DVector::<f64>::from_element(s, 1.0 / s as f64);
+  // pi initialization: the parity-preserving `Uniform` mode matches
+  // pyannote's `pi=int(S) → ones(S)/S`. The `FromQinitColumnMass`
+  // mode derives `pi[s] = col_sum[s] / T` so a near-dead column
+  // gets a near-zero prior at the boundary and EM cannot resurrect
+  // it. Codex review HIGH round 13.
+  let mut pi = match pi_init {
+    PiInit::Uniform => DVector::<f64>::from_element(s, 1.0 / s as f64),
+    PiInit::FromQinitColumnMass => {
+      let mut p = DVector::<f64>::zeros(s);
+      for sj in 0..s {
+        p[sj] = (0..t).map(|tt| qinit[(tt, sj)]).sum::<f64>() / t as f64;
+      }
+      // qinit row-sum-1 invariant means col_sums sum to T → pi sums
+      // to 1.0 exactly (within float roundoff).
+      p
+    }
+  };
 
   // `Vec::new()` rather than `Vec::with_capacity(max_iters)` —
   // `max_iters` is caller-controlled, and `with_capacity` would
