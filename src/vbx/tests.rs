@@ -358,10 +358,7 @@ fn classify_elbo_step_converges_on_small_positive_delta() {
 #[test]
 fn classify_elbo_step_converges_on_tiny_negative_delta_within_tolerance() {
   // Delta in float-roundoff regime — treat as converged.
-  assert_eq!(
-    classify_elbo_step(-1.0e-12, 1.0e-4),
-    ElboStep::Converged
-  );
+  assert_eq!(classify_elbo_step(-1.0e-12, 1.0e-4), ElboStep::Converged);
 }
 
 #[test]
