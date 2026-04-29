@@ -240,29 +240,34 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject "dead" or "near-dead" speaker columns. A column whose
-  // total initial mass is below the calibrated `QINIT_COL_SUM_MIN`
-  // floor cannot be a legitimate speaker initialization: pyannote's
-  // softmax-of-smoothed-one-hot caller produces every real-speaker
-  // column with `col_sum ≥ ~1.16` (a single-frame speaker; observed
-  // empirically across the Phase-0 fixture has min `1.158`), while
-  // a column with no real-frame assignment under the same smoothing
-  // sits around `T * exp(0) / (exp(7) + (S-1))` ≈ `0.175` for `S=19,
-  // T=195`. The `0.5` threshold cleanly separates the two regimes
-  // (~2.3× margin to the real minimum, ~2.9× margin above the
-  // residue floor). Without this guard, the uniform `pi = 1/S`
-  // initialization gives a `1/S` prior to a speaker that has only
-  // numerical residue in qinit, and the first EM update can
-  // resurrect it on weak/symmetric features — fabricating an extra
-  // speaker. Round 4 added the exact-zero check; Codex round 6
-  // pointed out that exact-zero is too narrow.
-  const QINIT_COL_SUM_MIN: f64 = 0.5;
+  // Reject "dead" or "near-dead" speaker columns by per-row maximum.
+  // A real per-frame assignment puts at least one row's mass for
+  // this column AT OR ABOVE the uniform 1/S baseline (pyannote's
+  // softmax(7) on-mass is ~0.984 for S=19, ~0.523 for S=1000 — far
+  // above 1/S). Pure smoothing residue under any positive smoothing
+  // factor sits BELOW 1/S in every row (off-mass = 1/(exp(k) + S - 1)
+  // for smoothing factor k > 0).
+  //
+  // The earlier rounds used a column-sum floor that scaled with T,
+  // and Codex round 8 pointed out the obvious failure mode: at
+  // T=1000, S=19, a pure-residue column has col_sum ≈ 0.897 — well
+  // above the previous fixed 0.5 floor. The per-row max is
+  // recording-length-invariant: residue is < 1/S in every row no
+  // matter how many rows there are.
+  //
+  // Caveat: at S > ~1000 with smoothing=7, the residue/uniform
+  // discrimination weakens (off-mass / (1/S) → 0.477 at S=1000,
+  // 0.901 at S=10000). VBx use cases are S ≤ ~100 in practice; for
+  // larger S this check needs revisiting. Codex review HIGH round 8.
+  let qinit_col_max_floor = 1.0 / s as f64 - 16.0 * f64::EPSILON;
   for sj in 0..s {
-    let col_sum: f64 = (0..t).map(|tt| qinit[(tt, sj)]).sum();
-    if col_sum < QINIT_COL_SUM_MIN {
+    let col_max = (0..t)
+      .map(|tt| qinit[(tt, sj)])
+      .fold(f64::NEG_INFINITY, f64::max);
+    if col_max < qinit_col_max_floor {
       return Err(Error::Shape(
-        "qinit speaker column has below-floor total mass (would be \
-         resurrected by uniform-pi initialization)",
+        "qinit speaker column has no row where its mass reaches the \
+         uniform 1/S baseline (would be resurrected by uniform-pi)",
       ));
     }
   }

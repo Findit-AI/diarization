@@ -406,42 +406,62 @@ fn vbx_rejects_qinit_with_dead_speaker_column() {
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
-/// Sanity: a qinit with both columns having some mass passes (rules
-/// out a too-strict column-sum threshold). 60/40 split per row
-/// → column sums are 3.0 and 2.0 across 5 rows.
+/// Realistic per-frame assignment: even rows favor speaker 0,
+/// odd rows favor speaker 1. Both columns have at least one row
+/// with mass ≥ 1/S, so both pass the per-row-max check. (Round 4's
+/// "60/40 across all rows" pattern was a non-pyannote-style global
+/// prior — round 8 rejects that case as not a valid per-frame
+/// assignment, so the original test was reframed into this one.)
 #[test]
-fn vbx_accepts_qinit_with_unequal_but_nonzero_column_masses() {
-  let t = 5;
+fn vbx_accepts_qinit_with_alternating_column_assignment() {
+  let t = 10;
   let s = 2;
   let d = 4;
-  let mut x = DMatrix::<f64>::zeros(t, d);
-  for i in 0..t {
-    for j in 0..d {
-      x[(i, j)] = ((i + j) as f64) * 0.3;
-    }
-  }
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.3);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let mut qinit = DMatrix::<f64>::zeros(t, s);
   for tt in 0..t {
-    qinit[(tt, 0)] = 0.6;
-    qinit[(tt, 1)] = 0.4;
+    if tt % 2 == 0 {
+      qinit[(tt, 0)] = 0.95;
+      qinit[(tt, 1)] = 0.05;
+    } else {
+      qinit[(tt, 0)] = 0.05;
+      qinit[(tt, 1)] = 0.95;
+    }
   }
-  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("non-dead columns must pass");
+  // Each column has at least one row with max=0.95, well above 1/S=0.5.
+  let _out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("alternating real columns must pass");
+}
+
+/// Uniform qinit (each cell = 1/S). Per-row max = 1/S exactly.
+/// The check uses a 16-ULP epsilon allowance so this canonical
+/// "no-info prior" passes.
+#[test]
+fn vbx_accepts_uniform_qinit() {
+  let t = 8;
+  let s = 4;
+  let d = 4;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.2);
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let _out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("uniform qinit must pass per-row-max check");
 }
 
 // ── Tighter qinit column-mass + zero-D rejection (Codex review MEDIUM round 6 of Phase 2) ─
 //
 // Round 4's exact-zero check let through "near-dead" columns with
-// tiny positive mass (numerical residue or pure smoothing-residue).
-// Round 6 calibrates the threshold to `QINIT_COL_SUM_MIN = 0.5`,
-// which sits between pyannote's pure-residue floor (~0.175 for
-// S=19, T=195 under smoothing 7.0) and a real 1-frame speaker
-// (~1.16). Also rejects `X.ncols() == 0` so a feature-construction
-// bug doesn't return uniform-prior posteriors as a clustering result.
+// tiny positive mass. Round 6 raised it to a fixed column-sum floor
+// of 0.5. Round 8 (Codex review HIGH) replaced that with a
+// T-invariant per-row-max criterion: column max must reach 1/S
+// (the uniform baseline). The column-sum floor failed open at
+// long T because residue mass scales with T, while per-row max
+// stays bounded by `1/(exp(7) + S - 1) < 1/S` regardless of T.
 
-/// Column sum 0.1 — below `QINIT_COL_SUM_MIN = 0.5`, well above the
-/// exact-zero threshold the previous round used. Round 4's check
-/// would have admitted this; round 6 rejects it.
+/// Per-row residue 0.02 in column 1 (well below 1/S = 0.5 for S=2).
+/// Round 4 admitted this; round 6 still rejected via column-sum
+/// (0.1 < 0.5); round 8 rejects via per-row-max (0.02 < 0.5).
 #[test]
 fn vbx_rejects_qinit_with_tiny_positive_column_mass() {
   let t = 5;
@@ -449,10 +469,6 @@ fn vbx_rejects_qinit_with_tiny_positive_column_mass() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let mut qinit = DMatrix::<f64>::zeros(t, s);
-  // Column 0 has all the real mass; column 1 has tiny per-row
-  // residue. Per-row entries: (0.98, 0.02). Column 1 sum = 5*0.02
-  // = 0.1, which is < 0.5 (the new floor) but > 0 (the previous
-  // floor that would have admitted it).
   for tt in 0..t {
     qinit[(tt, 0)] = 0.98;
     qinit[(tt, 1)] = 0.02;
@@ -461,31 +477,60 @@ fn vbx_rejects_qinit_with_tiny_positive_column_mass() {
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
-/// Sanity: a column at the minimum-real threshold (~ pyannote's
-/// 1-frame-speaker case) still passes. Calibration ground truth:
-/// the captured Phase-0 fixture's smallest column sum is 1.158;
-/// 0.6 sits above the new 0.5 floor with 1.2× margin.
+// ── Codex review HIGH round 8: T-invariant residue rejection ─
+
+/// Regression for the long-T residue case. Simulates pyannote
+/// softmax(7) output where speaker 0 is "on" in every row and
+/// speakers 1..S are pure smoothing residue. With T=1000, the
+/// residue column sum is ~0.897 — passes the previous fixed-0.5
+/// column-sum floor — but its per-row max is ~9e-4 ≪ 1/S = 0.0526,
+/// so the new T-invariant per-row-max check correctly rejects.
 #[test]
-fn vbx_accepts_qinit_at_minimum_real_column_mass() {
-  let t = 10;
-  let s = 2;
+fn vbx_rejects_smoothed_residue_column_at_long_t() {
+  let t = 1000;
+  let s = 19;
   let d = 4;
-  let mut x = DMatrix::<f64>::zeros(t, d);
-  for i in 0..t {
-    for j in 0..d {
-      x[(i, j)] = ((i + j) as f64) * 0.3;
-    }
-  }
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
   let phi = DVector::<f64>::from_element(d, 1.0);
-  // Per-row (0.94, 0.06). Column 1 sum = 10*0.06 = 0.6, just above
-  // the 0.5 floor. Real-but-tiny speaker case — must still pass.
+
+  // Pyannote softmax(7) with hard label always 0:
+  //   on-mass  ≈ exp(7)/(exp(7) + 18) ≈ 0.984
+  //   off-mass ≈ exp(0)/(exp(7) + 18) ≈ 8.97e-4
+  let on_mass = (7.0_f64).exp() / ((7.0_f64).exp() + (s - 1) as f64);
+  let off_mass = 1.0_f64 / ((7.0_f64).exp() + (s - 1) as f64);
   let mut qinit = DMatrix::<f64>::zeros(t, s);
   for tt in 0..t {
-    qinit[(tt, 0)] = 0.94;
-    qinit[(tt, 1)] = 0.06;
+    qinit[(tt, 0)] = on_mass;
+    for sj in 1..s {
+      qinit[(tt, sj)] = off_mass;
+    }
   }
-  let _out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("near-floor real column must pass");
+
+  // Test setup invariants — verify this regression actually exercises
+  // the failure-mode the new check is designed to catch.
+  let col_sum_residue: f64 = (0..t).map(|tt| qinit[(tt, 1)]).sum();
+  assert!(
+    col_sum_residue > 0.5,
+    "test setup invariant: long-T residue col_sum = {col_sum_residue:.3} \
+     must exceed the previous fixed 0.5 floor (else this regression \
+     wouldn't cover the case the old floor missed)"
+  );
+  let per_row_max_residue: f64 = (0..t)
+    .map(|tt| qinit[(tt, 1)])
+    .fold(f64::NEG_INFINITY, f64::max);
+  let one_over_s = 1.0 / s as f64;
+  assert!(
+    per_row_max_residue < one_over_s,
+    "test setup invariant: residue per-row max = {per_row_max_residue:.3e} \
+     must be below 1/S = {one_over_s:.4} for the new check to fire"
+  );
+
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "long-T smoothed-residue column must be rejected by the per-row-max \
+     check (T-invariant); got {result:?}"
+  );
 }
 
 #[test]
