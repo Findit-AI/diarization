@@ -86,6 +86,21 @@ fn assign_embeddings_matches_pyannote_hard_clusters_02_pyannote_sample() {
   run_pipeline_parity("02_pyannote_sample");
 }
 
+#[test]
+fn assign_embeddings_matches_pyannote_hard_clusters_03_dual_speaker() {
+  run_pipeline_parity("03_dual_speaker");
+}
+
+#[test]
+fn assign_embeddings_matches_pyannote_hard_clusters_04_three_speaker() {
+  run_pipeline_parity("04_three_speaker");
+}
+
+#[test]
+fn assign_embeddings_matches_pyannote_hard_clusters_05_four_speaker() {
+  run_pipeline_parity("05_four_speaker");
+}
+
 fn run_pipeline_parity(fixture_dir: &str) {
   require_fixtures(fixture_dir);
 

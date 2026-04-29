@@ -69,6 +69,21 @@ fn reconstruct_matches_pyannote_discrete_diarization_02_pyannote_sample() {
   run_reconstruct_parity("02_pyannote_sample");
 }
 
+#[test]
+fn reconstruct_matches_pyannote_discrete_diarization_03_dual_speaker() {
+  run_reconstruct_parity("03_dual_speaker");
+}
+
+#[test]
+fn reconstruct_matches_pyannote_discrete_diarization_04_three_speaker() {
+  run_reconstruct_parity("04_three_speaker");
+}
+
+#[test]
+fn reconstruct_matches_pyannote_discrete_diarization_05_four_speaker() {
+  run_reconstruct_parity("05_four_speaker");
+}
+
 fn run_reconstruct_parity(fixture_dir: &str) {
   require_fixtures(fixture_dir);
   let base = format!("tests/parity/fixtures/{fixture_dir}");

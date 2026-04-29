@@ -46,6 +46,21 @@ fn rttm_matches_pyannote_reference_02_pyannote_sample() {
   run_rttm_parity("02_pyannote_sample", "clip_16k");
 }
 
+#[test]
+fn rttm_matches_pyannote_reference_03_dual_speaker() {
+  run_rttm_parity("03_dual_speaker", "clip_16k");
+}
+
+#[test]
+fn rttm_matches_pyannote_reference_04_three_speaker() {
+  run_rttm_parity("04_three_speaker", "clip_16k");
+}
+
+#[test]
+fn rttm_matches_pyannote_reference_05_four_speaker() {
+  run_rttm_parity("05_four_speaker", "clip_16k");
+}
+
 fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 
