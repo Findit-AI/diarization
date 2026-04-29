@@ -184,27 +184,46 @@ fn nan_replacement_uses_global_nanmin_across_chunks() {
   assert_eq!(assigns[0], vec![1, 0]);
 }
 
-/// `+inf` → `f64::MAX`, `-inf` → `f64::MIN` (numpy's `posinf`/`neginf`
-/// defaults). With these substitutions a `+inf` cell is the strongest
-/// possible match and `-inf` is the weakest — the assignment must
-/// reflect that.
+/// `±inf` is **rejected** at the boundary rather than substituted with
+/// numpy's `f64::MAX`/`f64::MIN` defaults. Two reasons (Codex review
+/// HIGH round 2): production cosine distances are always finite, so
+/// `±inf` is upstream corruption, not a well-defined edge case; and
+/// feeding `f64::MAX` into `kuhn_munkres`'s slack arithmetic risks
+/// overflow per the crate's own docs.
 #[test]
-fn pos_inf_replaced_with_f64_max_drives_assignment() {
-  // 2x2: speaker 0 → cluster 1 has +inf, all others modest. Optimal
-  // pairs speaker 0 with cluster 1 (the +inf → f64::MAX dominates).
-  let mut cost = DMatrix::<f64>::from_row_slice(2, 2, &[0.9, 0.0, 0.5, 0.6]);
+fn rejects_pos_inf_entry() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(0, 1)] = f64::INFINITY;
-  let assign = one(cost).expect("constrained_argmax");
-  assert_eq!(assign, vec![1, 0]);
+  let result = one(cost);
+  assert!(
+    matches!(result, Err(Error::NonFinite(_))),
+    "got {result:?}"
+  );
 }
 
 #[test]
-fn neg_inf_replaced_with_f64_min_avoids_assignment() {
-  // 2x2: speaker 0 → cluster 0 has -inf, so optimal must avoid it.
+fn rejects_neg_inf_entry() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
+  cost[(1, 0)] = f64::NEG_INFINITY;
+  let result = one(cost);
+  assert!(
+    matches!(result, Err(Error::NonFinite(_))),
+    "got {result:?}"
+  );
+}
+
+/// Mixed: a chunk with both NaN and `±inf` rejects rather than
+/// half-handling it.
+#[test]
+fn rejects_inf_even_when_nan_also_present() {
   let mut cost = DMatrix::<f64>::from_row_slice(2, 2, &[0.0, 0.5, 0.7, 0.0]);
-  cost[(0, 0)] = f64::NEG_INFINITY;
-  let assign = one(cost).expect("constrained_argmax");
-  assert_eq!(assign, vec![1, 0]);
+  cost[(0, 0)] = f64::NAN;
+  cost[(1, 1)] = f64::NEG_INFINITY;
+  let result = one(cost);
+  assert!(
+    matches!(result, Err(Error::NonFinite(_))),
+    "got {result:?}"
+  );
 }
 
 /// All entries non-finite → there's no value to use as the nanmin

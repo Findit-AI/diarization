@@ -23,29 +23,40 @@ pub const UNMATCHED: i32 = -2;
 /// the speaker had no cluster left (only possible when
 /// `num_speakers > num_clusters`).
 ///
-/// # Pyannote parity: `np.nan_to_num` semantics
+/// # Pyannote parity: `np.nan_to_num` semantics (NaN only)
 ///
 /// Pyannote's `constrained_argmax` runs `np.nan_to_num(soft_clusters,
-/// nan=np.nanmin(soft_clusters))` before per-chunk matching. The Rust port
-/// replicates that exactly:
+/// nan=np.nanmin(soft_clusters))` before per-chunk matching. The realistic
+/// NaN source is an empty AHC cluster whose centroid is `NaN/NaN` after
+/// averaging zero embeddings; the Rust port replicates that:
 ///
-/// - **NaN** → global `nanmin` across all chunks (`np.nanmin` semantics).
-/// - **+inf** → `f64::MAX` (numpy `posinf=None` default for f64).
-/// - **-inf** → `f64::MIN` (numpy `neginf=None` default for f64).
+/// - **NaN** → global `nanmin` across all finite entries
+///   (`np.nanmin`-equivalent on the production path where `±inf` cannot
+///   appear).
 ///
-/// This handles the realistic NaN source — an empty AHC cluster whose
-/// centroid is `NaN/NaN` after averaging zero embeddings — without
-/// aborting the diarization run, matching pyannote's "still produce hard
-/// clusters" behavior.
+/// `±inf` is **rejected** rather than substituted with `f64::MAX/MIN`
+/// (numpy's `nan_to_num` defaults). Two reasons:
+///
+/// 1. Production cosine distances over finite embeddings are always
+///    finite, so `±inf` indicates upstream corruption rather than a
+///    well-defined edge case the algorithm should silently handle.
+/// 2. `pathfinding::kuhn_munkres` does `lx[root] + ly[y]` and other
+///    accumulating arithmetic on the costs; feeding `f64::MAX` risks
+///    overflow into `±inf`/`NaN` in the slack labelling, and the crate
+///    docs explicitly warn that *"indefinite values such as positive or
+///    negative infinity or NaN can cause this function to loop endlessly"*.
+///    Rejecting at the boundary keeps the solver inside its safe
+///    operating envelope.
 ///
 /// # Errors
 ///
 /// - [`Error::Shape`] if `chunks` is empty, any chunk has zero rows or
 ///   zero columns, or chunks differ in shape.
-/// - [`Error::NonFinite`] if *every* entry across all chunks is non-finite
-///   (no value to use as the `nanmin` replacement). Matches pyannote
-///   degenerating in the same way (`np.nanmin` returns NaN on an all-NaN
-///   array, then the assignment is undefined).
+/// - [`Error::NonFinite`] if any chunk contains `+inf` or `-inf`, or if
+///   *every* entry across all chunks is NaN (no finite value to use as
+///   the `nanmin` replacement). Pyannote degenerates in the all-NaN case
+///   too (`np.nanmin` returns NaN, and the resulting assignment is
+///   undefined).
 ///
 /// # Algorithm
 ///
@@ -70,8 +81,26 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
     }
   }
 
+  // Reject ±inf upfront. Numpy's `np.nan_to_num` substitutes them with
+  // `f64::MAX/MIN`, but feeding those values into `kuhn_munkres`'s
+  // accumulating slack arithmetic risks overflow into `±inf`/`NaN` and
+  // can wedge the solver per the crate's own docs. Production cosine
+  // distances are always finite, so `±inf` here indicates upstream
+  // corruption — surface a clear typed error rather than silently
+  // proceed with values that may panic the solver. Codex review HIGH
+  // round 2 of Phase 3.
+  for chunk in chunks {
+    for &v in chunk.iter() {
+      if v.is_infinite() {
+        return Err(Error::NonFinite("soft_clusters contains +inf or -inf"));
+      }
+    }
+  }
+
   // Compute the global nanmin across all chunks for the NaN replacement.
-  // Matches `np.nanmin(soft_clusters)` — finite entries only.
+  // After the `±inf` rejection above, `is_finite()` partitions entries
+  // into {finite, NaN}, matching numpy's `nanmin` semantics on the
+  // production path.
   let mut nanmin = f64::INFINITY;
   let mut any_finite = false;
   for chunk in chunks {
@@ -97,21 +126,13 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
   Ok(out)
 }
 
-/// `np.nan_to_num`-equivalent cleanup: NaN → `nanmin`, `+inf` → `f64::MAX`,
-/// `-inf` → `f64::MIN`. Returns the cleaned value; `nan_to_num` semantics
-/// guarantee the result is always finite (assuming `nanmin` is finite,
-/// which the caller guarantees).
+/// NaN-only `np.nan_to_num` cleanup: replace `NaN` with `nanmin`. The
+/// `±inf` cases are rejected upstream by `constrained_argmax`, so this
+/// function is only ever called on `{finite, NaN}` inputs and always
+/// returns a finite value.
 #[inline]
 fn clean(v: f64, nanmin: f64) -> f64 {
-  if v.is_nan() {
-    nanmin
-  } else if v == f64::INFINITY {
-    f64::MAX
-  } else if v == f64::NEG_INFINITY {
-    f64::MIN
-  } else {
-    v
-  }
+  if v.is_nan() { nanmin } else { v }
 }
 
 fn assign_one(
