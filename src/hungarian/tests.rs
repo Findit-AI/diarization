@@ -26,10 +26,7 @@ fn rejects_nan_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(0, 1)] = f64::NAN;
   let result = constrained_argmax(&cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 #[test]
@@ -37,10 +34,7 @@ fn rejects_pos_inf_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(1, 0)] = f64::INFINITY;
   let result = constrained_argmax(&cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 #[test]
@@ -48,10 +42,7 @@ fn rejects_neg_inf_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
   cost[(0, 0)] = f64::NEG_INFINITY;
   let result = constrained_argmax(&cost);
-  assert!(
-    matches!(result, Err(Error::NonFinite(_))),
-    "got {result:?}"
-  );
+  assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
 /// Square 2x2 — direct kuhn_munkres path. Diagonal dominates.
@@ -84,11 +75,7 @@ fn tall_2x3_assigns_both_speakers_to_distinct_clusters() {
 /// Exercises the transpose path. Two speakers matched, one UNMATCHED.
 #[test]
 fn wide_3x2_leaves_one_speaker_unmatched() {
-  let cost = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[0.95, 0.05, 0.05, 0.95, 0.10, 0.10],
-  );
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.95, 0.05, 0.05, 0.95, 0.10, 0.10]);
   let assign = constrained_argmax(&cost).expect("constrained_argmax");
   assert_eq!(assign, vec![0, 1, UNMATCHED]);
 }
@@ -99,11 +86,7 @@ fn wide_3x2_leaves_one_speaker_unmatched() {
 /// Catches a "leave the lowest-row speaker unmatched" greedy bug.
 #[test]
 fn wide_3x2_optimal_unmatches_non_weakest_speaker() {
-  let cost = DMatrix::<f64>::from_row_slice(
-    3,
-    2,
-    &[0.95, 0.10, 0.05, 0.95, 0.99, 0.10],
-  );
+  let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.95, 0.10, 0.05, 0.95, 0.99, 0.10]);
   let assign = constrained_argmax(&cost).expect("constrained_argmax");
   assert_eq!(assign, vec![UNMATCHED, 1, 0]);
 }
