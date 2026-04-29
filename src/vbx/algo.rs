@@ -140,11 +140,11 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 ///
 /// # Errors
 ///
-/// - [`Error::Shape`] on mismatched dimensions, or on an `Fa`/`Fb`/
-///   `qinit` value that fails the input contract (non-positive or
-///   non-finite scalar; `qinit` row that doesn't sum to 1; `qinit`
-///   entry that's negative; `qinit` speaker column with zero total
-///   mass).
+/// - [`Error::Shape`] on mismatched dimensions, an `Fa`/`Fb`/`qinit`
+///   value that fails the input contract (non-positive or non-finite
+///   scalar; `qinit` row that doesn't sum to 1; `qinit` entry that's
+///   negative; `qinit` speaker column with below-floor total mass),
+///   `D == 0`, or `max_iters == 0`.
 /// - [`Error::NonFinite`] if `x` or `qinit` contains a NaN/`±inf`
 ///   entry, or if a non-finite value appears in an algorithm
 ///   intermediate (the algorithm has no recovery; treat as a hard
@@ -265,6 +265,15 @@ pub fn vbx_iterate(
          resurrected by uniform-pi initialization)",
       ));
     }
+  }
+  // Reject `max_iters == 0`. Skipping the EM loop returns gamma=qinit
+  // and pi=1/S — internally inconsistent for any non-uniform qinit
+  // (pi should equal `gamma.column_sum() / T`), but indistinguishable
+  // from a completed VBx run by the type system. There is no
+  // documented dry-run mode in dia::vbx, so a `max_iters == 0` config
+  // is by definition a misuse. Codex review MEDIUM round 7.
+  if max_iters == 0 {
+    return Err(Error::Shape("max_iters must be at least 1"));
   }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))

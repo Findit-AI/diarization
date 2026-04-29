@@ -305,32 +305,46 @@ fn vbx_rejects_inf_fb() {
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
-/// `max_iters == 0` is a valid edge case (matches pyannote's
-/// `range(0)`): the EM loop never runs, gamma is the (validated)
-/// qinit, pi is uniform `1/S`, elbo_trajectory is empty. The qinit
-/// validation is what makes this safe — without it, the function
-/// would return whatever malformed values the caller passed in as
-/// "responsibilities".
+/// `max_iters == 0` is rejected at the boundary. Skipping the EM
+/// loop returns gamma=qinit and pi=1/S, which is internally
+/// inconsistent for any non-uniform qinit (pi should equal
+/// `gamma.column_sum() / T`) but indistinguishable from a completed
+/// VBx run by the type system. Codex review MEDIUM round 7.
 #[test]
-fn vbx_max_iters_zero_returns_validated_qinit() {
+fn vbx_rejects_max_iters_zero() {
   let t = 5;
   let s = 3;
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0).expect("vbx_iterate");
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// Codex's specific recommended regression: a non-uniform qinit
+/// with `max_iters = 0` would return `pi = 1/S` while
+/// `gamma = qinit`, advertising a clustering result whose stats
+/// are inconsistent. Now blocked at the boundary.
+#[test]
+fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
+  let t = 10;
+  let s = 2;
+  let d = 4;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.3);
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  // 80/20 row split → column sums 8.0 and 2.0 (very non-uniform).
+  // Both above the 0.5 floor, so column-mass validation passes.
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  for tt in 0..t {
+    qinit[(tt, 0)] = 0.8;
+    qinit[(tt, 1)] = 0.2;
+  }
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
   assert!(
-    out.elbo_trajectory.is_empty(),
-    "no iterations → empty trajectory"
+    matches!(result, Err(Error::Shape(_))),
+    "non-uniform qinit + max_iters=0 must reject (would otherwise \
+     return gamma=qinit + pi=1/S inconsistent state); got {result:?}"
   );
-  for r in 0..t {
-    for c in 0..s {
-      assert_eq!(out.gamma[(r, c)], qinit[(r, c)]);
-    }
-  }
-  for c in 0..s {
-    assert!((out.pi[c] - 1.0 / s as f64).abs() < 1e-15);
-  }
 }
 
 // ── Allocation + dead-column hardening (Codex review MEDIUM round 4 of Phase 2) ─
