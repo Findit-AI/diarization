@@ -415,6 +415,101 @@ fn vbx_accepts_qinit_with_unequal_but_nonzero_column_masses() {
   let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("non-dead columns must pass");
 }
 
+// ── X / Phi non-finite hardening (Codex review MEDIUM round 5 of Phase 2) ─
+//
+// The previous boundary accepted `+inf` Phi (the check used
+// `is_nan()` only) and didn't validate X at all. Either case
+// poisons G/rho silently — caught downstream as a generic
+// `NonFinite("ELBO")` if max_iters > 0, or returned as Ok with the
+// unvalidated qinit at max_iters = 0. Tightening to `is_finite()`
+// + a leading X scan rejects upstream-corrupted PLDA inputs at the
+// boundary with a clear typed error.
+
+#[test]
+fn vbx_rejects_phi_with_pos_inf() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let mut phi = DVector::<f64>::from_element(4, 1.0);
+  phi[1] = f64::INFINITY;
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(
+    matches!(result, Err(Error::NonPositivePhi(p, 1)) if p.is_infinite() && p > 0.0),
+    "got {result:?}"
+  );
+}
+
+#[test]
+fn vbx_rejects_phi_with_nan() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let mut phi = DVector::<f64>::from_element(4, 1.0);
+  phi[3] = f64::NAN;
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(
+    matches!(result, Err(Error::NonPositivePhi(p, 3)) if p.is_nan()),
+    "got {result:?}"
+  );
+}
+
+#[test]
+fn vbx_rejects_x_with_nan() {
+  let mut x = DMatrix::<f64>::zeros(5, 4);
+  x[(2, 1)] = f64::NAN;
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_x_with_pos_inf() {
+  let mut x = DMatrix::<f64>::zeros(5, 4);
+  x[(0, 0)] = f64::INFINITY;
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_x_with_neg_inf() {
+  let mut x = DMatrix::<f64>::zeros(5, 4);
+  x[(4, 3)] = f64::NEG_INFINITY;
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonFinite("x"))), "got {result:?}");
+}
+
+/// Codex's specific concern: at `max_iters = 0` the loop never
+/// runs, so the generic NaN-intermediate guard never fires. Boundary
+/// validation must catch invalid inputs even when no iterations run.
+#[test]
+fn vbx_rejects_invalid_x_even_with_max_iters_zero() {
+  let mut x = DMatrix::<f64>::zeros(5, 4);
+  x[(2, 2)] = f64::NAN;
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  assert!(
+    matches!(result, Err(Error::NonFinite("x"))),
+    "boundary validation must run even at max_iters=0; got {result:?}"
+  );
+}
+
+#[test]
+fn vbx_rejects_invalid_phi_even_with_max_iters_zero() {
+  let x = DMatrix::<f64>::zeros(5, 4);
+  let mut phi = DVector::<f64>::from_element(4, 1.0);
+  phi[2] = f64::INFINITY;
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  assert!(
+    matches!(result, Err(Error::NonPositivePhi(p, 2)) if p.is_infinite()),
+    "boundary validation must run even at max_iters=0; got {result:?}"
+  );
+}
+
 // ── ELBO step classification (Codex review MEDIUM round 2 of Phase 2) ─
 //
 // VB EM's monotonicity is a fundamental invariant. The previous

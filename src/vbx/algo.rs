@@ -143,11 +143,14 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 /// - [`Error::Shape`] on mismatched dimensions, or on an `Fa`/`Fb`/
 ///   `qinit` value that fails the input contract (non-positive or
 ///   non-finite scalar; `qinit` row that doesn't sum to 1; `qinit`
-///   entry that's negative).
-/// - [`Error::NonFinite`] if `qinit` contains a NaN/`±inf` entry,
-///   or if a non-finite value appears in an algorithm intermediate
-///   (the algorithm has no recovery; treat as a hard failure).
-/// - [`Error::NonPositivePhi`] if any `phi[d] <= 0`.
+///   entry that's negative; `qinit` speaker column with zero total
+///   mass).
+/// - [`Error::NonFinite`] if `x` or `qinit` contains a NaN/`±inf`
+///   entry, or if a non-finite value appears in an algorithm
+///   intermediate (the algorithm has no recovery; treat as a hard
+///   failure).
+/// - [`Error::NonPositivePhi`] if any `phi[d]` is not strictly
+///   positive *and* finite (zero, negative, NaN, or `±inf`).
 ///
 /// `qinit` row-sum tolerance is `1e-9` — pyannote's caller produces
 /// a softmaxed initializer that is unit-normalized to within float
@@ -180,10 +183,28 @@ pub fn vbx_iterate(
   if !fb.is_finite() || fb <= 0.0 {
     return Err(Error::Shape("Fb must be a positive finite scalar"));
   }
+  // Phi must be strictly positive AND finite. The previous check
+  // accepted `+inf` because `inf > 0.0` is true and `inf.is_nan()`
+  // is false; an infinite eigenvalue from a corrupted PLDA upstream
+  // would have flowed into `sqrt(Phi)` and `1 + Fa/Fb * gamma_sum *
+  // Phi`, producing NaN/Inf intermediates downstream. Codex review
+  // MEDIUM round 5.
   for (i, p) in phi.iter().enumerate() {
-    if *p <= 0.0 || p.is_nan() {
+    if !p.is_finite() || *p <= 0.0 {
       return Err(Error::NonPositivePhi(*p, i));
     }
+  }
+  // X must be entirely finite. Without this, NaN/Inf in the
+  // post-PLDA features would either:
+  //   - silently return Ok at `max_iters = 0` with the unvalidated
+  //     qinit as "gamma", or
+  //   - poison G/rho in the pre-loop and surface as a generic
+  //     `NonFinite("ELBO")` later instead of a clear input error.
+  // The boundary contract is "non-finite intermediates are hard
+  // failures"; admitting non-finite inputs violates that. Codex
+  // review MEDIUM round 5.
+  if x.iter().any(|v| !v.is_finite()) {
+    return Err(Error::NonFinite("x"));
   }
   // qinit value validation: each row must be a discrete probability
   // distribution over speakers (finite, nonnegative, row-sum ≈ 1).

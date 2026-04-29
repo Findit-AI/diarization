@@ -16,9 +16,12 @@ pub enum Error {
   NonFinite(&'static str),
 
   /// `Phi` (the eigenvalue diagonal from `PldaTransform::phi()`) had
-  /// a non-positive entry. The algorithm requires `Phi[d] > 0` for
-  /// `sqrt(Phi)` and `1 + … * Phi` to be well-defined.
-  #[error("Phi must be strictly positive; saw {0:.3e} at index {1}")]
+  /// an entry that wasn't strictly positive *and* finite. The
+  /// algorithm requires `0 < Phi[d] < ∞` for `sqrt(Phi)` and
+  /// `1 + … * Phi` to be well-defined; `+inf` would poison
+  /// downstream intermediates without surfacing a clear cause at
+  /// the boundary. Codex review MEDIUM round 5.
+  #[error("Phi must be strictly positive and finite; saw {0:.3e} at index {1}")]
   NonPositivePhi(f64, usize),
 
   /// The ELBO decreased by more than the float-roundoff tolerance
