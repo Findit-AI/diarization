@@ -72,5 +72,5 @@ pub(crate) mod plda;
 // `vbx` is intentionally crate-private in v0.1.0 for the same
 // reason as `plda`: the math ships here but the public-API
 // integration with `EmbedModel` + `Diarizer` lands in Phase 5.
-pub(crate) mod vbx;
 pub mod segment;
+pub(crate) mod vbx;

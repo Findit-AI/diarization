@@ -134,9 +134,7 @@ pub fn vbx_iterate(
     // ── E-step (speaker-model update) ────────────────────────────
     // gamma_sum, invL, alpha
     // gamma_sum[s] = column-sum of gamma over T rows (Eq. 17 input).
-    let gamma_sum = DVector::<f64>::from_vec(
-      (0..s).map(|j| gamma.column(j).sum()).collect(),
-    );
+    let gamma_sum = DVector::<f64>::from_vec((0..s).map(|j| gamma.column(j).sum()).collect());
 
     // invL[s,d] = 1 / (1 + Fa/Fb * gamma_sum[s] * Phi[d])  (Eq. 17)
     let mut inv_l = DMatrix::<f64>::zeros(s, d);
@@ -237,5 +235,9 @@ pub fn vbx_iterate(
     }
   }
 
-  Ok(VbxOutput { gamma, pi, elbo_trajectory })
+  Ok(VbxOutput {
+    gamma,
+    pi,
+    elbo_trajectory,
+  })
 }

@@ -129,7 +129,10 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   assert!(
     gamma_max_err < 1.0e-12,
     "gamma parity failed: max_abs_err = {gamma_max_err:.3e} at (t={}, s={}) got={:.6e} want={:.6e}",
-    gamma_max_err_loc.0, gamma_max_err_loc.1, gamma_max_err_got, gamma_max_err_want,
+    gamma_max_err_loc.0,
+    gamma_max_err_loc.1,
+    gamma_max_err_got,
+    gamma_max_err_want,
   );
 
   // ── Compare pi (S,) ────────────────────────────────────────────

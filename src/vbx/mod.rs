@@ -25,5 +25,5 @@ mod tests;
 #[cfg(test)]
 mod parity_tests;
 
-pub use algo::{vbx_iterate, VbxOutput};
+pub use algo::{VbxOutput, vbx_iterate};
 pub use error::Error;
