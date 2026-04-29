@@ -3,6 +3,24 @@
 use crate::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
+/// Why the EM loop stopped. Lets callers distinguish a converged
+/// posterior from one that ran out of iterations — both have
+/// `elbo_trajectory.len() == max_iters` when convergence happens
+/// on the very last allowed iteration vs. when the cap was hit
+/// without convergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+  /// EM converged: an iteration's ELBO step was classified as
+  /// [`ElboStep::Converged`] (delta within the scale-aware
+  /// regression band) and the loop exited early.
+  Converged,
+  /// The loop ran all `max_iters` iterations without ever firing
+  /// the convergence check. The output is the best estimate seen,
+  /// but downstream consumers should decide whether to accept it,
+  /// retry with a higher cap, or reject. Codex review MEDIUM round 10.
+  MaxIterationsReached,
+}
+
 /// Output of [`vbx_iterate`].
 #[derive(Debug, Clone)]
 pub struct VbxOutput {
@@ -12,6 +30,8 @@ pub struct VbxOutput {
   pub pi: nalgebra::DVector<f64>,
   /// ELBO at each iteration (length ≤ `max_iters`).
   pub elbo_trajectory: Vec<f64>,
+  /// Why the loop stopped — converged vs. hit `max_iters`.
+  pub stop_reason: StopReason,
 }
 
 /// Absolute floor for the ELBO regression tolerance. Caps the band
@@ -322,6 +342,7 @@ pub fn vbx_iterate(
   let epsilon = 1e-4_f64;
   let eps_log = 1e-8_f64;
   let fa_over_fb = fa / fb;
+  let mut converged = false;
 
   for ii in 0..max_iters {
     // ── E-step (speaker-model update) ────────────────────────────
@@ -424,17 +445,26 @@ pub fn vbx_iterate(
       let delta = elbo - prev;
       match classify_elbo_step(delta, prev, elbo, epsilon) {
         ElboStep::Continue => {}
-        ElboStep::Converged => break,
+        ElboStep::Converged => {
+          converged = true;
+          break;
+        }
         ElboStep::Regressed(d) => {
           return Err(Error::ElboRegression { iter: ii, delta: d });
         }
       }
     }
   }
+  let stop_reason = if converged {
+    StopReason::Converged
+  } else {
+    StopReason::MaxIterationsReached
+  };
 
   Ok(VbxOutput {
     gamma,
     pi,
     elbo_trajectory,
+    stop_reason,
   })
 }

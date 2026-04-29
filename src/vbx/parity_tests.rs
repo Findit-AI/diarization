@@ -15,7 +15,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::vbx::vbx_iterate;
+use crate::vbx::{StopReason, vbx_iterate};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -100,6 +100,16 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
 
   // ── Run ────────────────────────────────────────────────────────
   let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
+
+  // The captured run converged in 16 of 20 iterations — the
+  // pyannote-equivalent should hit the convergence branch, not
+  // exhaust max_iters.
+  assert_eq!(
+    out.stop_reason,
+    StopReason::Converged,
+    "captured pyannote run converged within max_iters=20 in 16 iterations; \
+     parity should also converge"
+  );
 
   // ── Compare gamma (T x S) ──────────────────────────────────────
   let (q_final_flat, q_final_shape) = read_npz_array::<f64>(&vbx_path, "q_final");

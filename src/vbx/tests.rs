@@ -809,3 +809,76 @@ fn classify_elbo_step_still_rejects_material_regression_at_large_magnitude() {
     other => panic!("expected Regressed at large magnitude, got {other:?}"),
   }
 }
+
+// ── Stop reason: converged vs max-iters-reached (Codex review MEDIUM round 10) ─
+//
+// Codex round 10 pointed out that `vbx_iterate` returned the same
+// shape of `Ok` for two semantically distinct cases:
+//   - Converged within max_iters (early break on ElboStep::Converged)
+//   - max_iters reached without ever converging (loop falls through)
+// Both could have `elbo_trajectory.len() == max_iters` (when
+// convergence happens on the very last allowed iteration). Callers
+// could not reliably distinguish the two, so an unconverged
+// posterior would silently flow into downstream centroid/label
+// assignment. `VbxOutput::stop_reason` makes the distinction
+// observable at the type level.
+
+use crate::vbx::StopReason;
+
+/// `max_iters = 1`: the convergence check requires `ii > 0`, so a
+/// 1-iter run can never fire the `Converged` branch. The loop ends
+/// naturally and `stop_reason == MaxIterationsReached`.
+#[test]
+fn vbx_reports_max_iterations_reached_when_cap_is_one() {
+  let t = 6;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.5;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = deterministic_qinit(t, s);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 1).expect("vbx_iterate");
+  assert_eq!(
+    out.stop_reason,
+    StopReason::MaxIterationsReached,
+    "max_iters=1 cannot fire convergence (check requires ii > 0)"
+  );
+  assert_eq!(out.elbo_trajectory.len(), 1, "ran exactly 1 iteration");
+}
+
+/// On a small input that converges quickly, the same call with a
+/// generous `max_iters` should report `Converged`. Together with
+/// the previous test this proves callers can distinguish the two
+/// stop reasons.
+#[test]
+fn vbx_reports_converged_on_easy_input() {
+  let t = 6;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.5;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = deterministic_qinit(t, s);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 50).expect("vbx_iterate");
+  assert_eq!(
+    out.stop_reason,
+    StopReason::Converged,
+    "easy input with generous cap must converge before exhaustion; \
+     ran {} iterations",
+    out.elbo_trajectory.len()
+  );
+  // Convergence on a trivial input is fast (well below the cap).
+  assert!(
+    out.elbo_trajectory.len() < 50,
+    "expected early convergence, ran {} iters",
+    out.elbo_trajectory.len()
+  );
+}
