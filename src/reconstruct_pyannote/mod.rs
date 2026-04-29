@@ -23,5 +23,11 @@ mod error;
 #[cfg(test)]
 mod parity_tests;
 
+#[cfg(test)]
+mod rttm_parity_tests;
+
 pub use algo::{ReconstructInput, SlidingWindow, reconstruct};
 pub use error::Error;
+pub use rttm::{RttmSpan, discrete_to_spans, spans_to_rttm_lines};
+
+mod rttm;

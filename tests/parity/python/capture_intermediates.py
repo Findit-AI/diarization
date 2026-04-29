@@ -327,6 +327,9 @@ def main() -> None:
     # pyannote's `binarize+sum` over the aggregated segmentations
     # (used as top-K cap when binarizing the clustered output).
     # `discrete_diarization` is the final per-frame discrete labels.
+    # min_duration_off feeds Phase 5c's Binarize port. Pyannote
+    # community-1's segmentation block hardcodes this from config.yaml.
+    seg_min_duration_off = float(pipeline.segmentation.min_duration_off)
     np.savez_compressed(
         out_dir / "reconstruction.npz",
         count=buf.speaker_counting,
@@ -341,6 +344,7 @@ def main() -> None:
         frame_start=np.float64(buf.frame_start),
         frame_duration=np.float64(buf.frame_duration),
         frame_step=np.float64(buf.frame_step),
+        min_duration_off=np.float64(seg_min_duration_off),
     )
     np.savez_compressed(
         out_dir / "plda_embeddings.npz",
