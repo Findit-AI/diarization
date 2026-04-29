@@ -106,34 +106,55 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   assert_eq!(q_final_shape, vec![t as u64, s as u64]);
   let q_final = DMatrix::<f64>::from_row_slice(t, s, &q_final_flat);
   let mut gamma_max_err = 0.0f64;
+  let mut gamma_max_err_loc = (0usize, 0usize);
+  let mut gamma_max_err_got = 0.0f64;
+  let mut gamma_max_err_want = 0.0f64;
   for tt in 0..t {
     for sj in 0..s {
-      let err = (out.gamma[(tt, sj)] - q_final[(tt, sj)]).abs();
+      let got = out.gamma[(tt, sj)];
+      let want = q_final[(tt, sj)];
+      let err = (got - want).abs();
       if err > gamma_max_err {
         gamma_max_err = err;
+        gamma_max_err_loc = (tt, sj);
+        gamma_max_err_got = got;
+        gamma_max_err_want = want;
       }
     }
   }
-  eprintln!("[parity_vbx] gamma max_abs_err = {gamma_max_err:.3e}");
+  eprintln!(
+    "[parity_vbx] gamma max_abs_err = {gamma_max_err:.3e} at (t={}, s={}) got={:.6e} want={:.6e}",
+    gamma_max_err_loc.0, gamma_max_err_loc.1, gamma_max_err_got, gamma_max_err_want,
+  );
   assert!(
-    gamma_max_err < 1.0e-6,
-    "gamma parity failed: max_abs_err = {gamma_max_err:.3e}"
+    gamma_max_err < 1.0e-12,
+    "gamma parity failed: max_abs_err = {gamma_max_err:.3e} at (t={}, s={}) got={:.6e} want={:.6e}",
+    gamma_max_err_loc.0, gamma_max_err_loc.1, gamma_max_err_got, gamma_max_err_want,
   );
 
   // ── Compare pi (S,) ────────────────────────────────────────────
   let (sp_final_flat, sp_final_shape) = read_npz_array::<f64>(&vbx_path, "sp_final");
   assert_eq!(sp_final_shape, vec![s as u64]);
   let mut pi_max_err = 0.0f64;
-  for (sj, &want) in sp_final_flat.iter().enumerate() {
-    let err = (out.pi[sj] - want).abs();
+  let mut pi_max_err_loc = 0usize;
+  let mut pi_max_err_got = 0.0f64;
+  let mut pi_max_err_want = 0.0f64;
+  for (sj, want) in sp_final_flat.iter().enumerate() {
+    let got = out.pi[sj];
+    let err = (got - want).abs();
     if err > pi_max_err {
       pi_max_err = err;
+      pi_max_err_loc = sj;
+      pi_max_err_got = got;
+      pi_max_err_want = *want;
     }
   }
-  eprintln!("[parity_vbx] pi max_abs_err = {pi_max_err:.3e}");
+  eprintln!(
+    "[parity_vbx] pi max_abs_err = {pi_max_err:.3e} at s={pi_max_err_loc} got={pi_max_err_got:.6e} want={pi_max_err_want:.6e}",
+  );
   assert!(
     pi_max_err < 1.0e-9,
-    "pi parity failed: max_abs_err = {pi_max_err:.3e}"
+    "pi parity failed: max_abs_err = {pi_max_err:.3e} at s={pi_max_err_loc} got={pi_max_err_got:.6e} want={pi_max_err_want:.6e}",
   );
 
   // ── Compare ELBO trajectory ────────────────────────────────────
@@ -147,15 +168,23 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
     elbo_flat.len()
   );
   let mut elbo_max_err = 0.0f64;
-  for (got, want) in out.elbo_trajectory.iter().zip(elbo_flat.iter()) {
+  let mut elbo_max_err_iter = 0usize;
+  let mut elbo_max_err_got = 0.0f64;
+  let mut elbo_max_err_want = 0.0f64;
+  for (ii, (got, want)) in out.elbo_trajectory.iter().zip(elbo_flat.iter()).enumerate() {
     let err = (got - want).abs();
     if err > elbo_max_err {
       elbo_max_err = err;
+      elbo_max_err_iter = ii;
+      elbo_max_err_got = *got;
+      elbo_max_err_want = *want;
     }
   }
-  eprintln!("[parity_vbx] ELBO max_abs_err = {elbo_max_err:.3e}");
+  eprintln!(
+    "[parity_vbx] ELBO max_abs_err = {elbo_max_err:.3e} at iter {elbo_max_err_iter} got={elbo_max_err_got:.6e} want={elbo_max_err_want:.6e}",
+  );
   assert!(
-    elbo_max_err < 1.0e-6,
-    "ELBO parity failed: max_abs_err = {elbo_max_err:.3e}"
+    elbo_max_err < 1.0e-9,
+    "ELBO parity failed: max_abs_err = {elbo_max_err:.3e} at iter {elbo_max_err_iter} got={elbo_max_err_got:.6e} want={elbo_max_err_want:.6e}",
   );
 }
