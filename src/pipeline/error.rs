@@ -13,11 +13,6 @@ pub enum Error {
   /// `min_active_ratio` falls outside `(0.0, 1.0]`.
   #[error("pipeline: invalid min_active_ratio (must be in (0, 1]): {0}")]
   InvalidActiveRatio(f64),
-  /// Fewer than 2 active embeddings — pyannote takes a separate
-  /// fast-path here. The Rust port surfaces this as a typed error so
-  /// the caller can decide (e.g. assign all to a single cluster).
-  #[error("pipeline: only {0} active embeddings; AHC needs >= 2 to cluster")]
-  TooFewActiveEmbeddings(usize),
   /// Propagated from `dia::ahc`.
   #[error("pipeline: ahc: {0}")]
   Ahc(#[from] crate::ahc::Error),

@@ -128,8 +128,15 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
       return Err(Error::Shape("train_speaker_idx[i] out of range"));
     }
   }
+  // Pyannote one-cluster fast path (`clustering.py:588-594`): when
+  // fewer than 2 active embeddings survive `filter_embeddings`,
+  // pyannote skips AHC/VBx entirely and returns
+  // `hard_clusters = np.zeros((num_chunks, num_speakers))` —
+  // i.e. every speaker in every chunk gets cluster 0. This handles
+  // short clips, sparse speech, or single-usable-speaker recordings
+  // without erroring. Codex review HIGH round 1 of Phase 5.
   if num_train < 2 {
-    return Err(Error::TooFewActiveEmbeddings(num_train));
+    return Ok(vec![vec![0i32; num_speakers]; num_chunks]);
   }
   if !(0.0..=f64::MAX).contains(&threshold) || !threshold.is_finite() || threshold <= 0.0 {
     return Err(Error::Shape("threshold must be a positive finite scalar"));

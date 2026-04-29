@@ -28,5 +28,8 @@ mod error;
 #[cfg(test)]
 mod parity_tests;
 
+#[cfg(test)]
+mod tests;
+
 pub use algo::{AssignEmbeddingsInput, assign_embeddings};
 pub use error::Error;
