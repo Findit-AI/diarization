@@ -6,8 +6,10 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::pipeline::{AssignEmbeddingsInput, assign_embeddings};
-use crate::reconstruct_pyannote::{ReconstructInput, SlidingWindow, reconstruct};
+use crate::{
+  pipeline::{AssignEmbeddingsInput, assign_embeddings},
+  reconstruct_pyannote::{ReconstructInput, SlidingWindow, reconstruct},
+};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

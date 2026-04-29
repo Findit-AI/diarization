@@ -6,9 +6,11 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::pipeline::{AssignEmbeddingsInput, assign_embeddings};
-use crate::reconstruct_pyannote::{
-  ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct, spans_to_rttm_lines,
+use crate::{
+  pipeline::{AssignEmbeddingsInput, assign_embeddings},
+  reconstruct_pyannote::{
+    ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct, spans_to_rttm_lines,
+  },
 };
 
 fn repo_root() -> PathBuf {

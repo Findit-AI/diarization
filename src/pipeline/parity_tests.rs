@@ -24,8 +24,10 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::hungarian::UNMATCHED;
-use crate::pipeline::{AssignEmbeddingsInput, assign_embeddings};
+use crate::{
+  hungarian::UNMATCHED,
+  pipeline::{AssignEmbeddingsInput, assign_embeddings},
+};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -187,9 +189,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters() {
       }
       // UNMATCHED only on one side → partition mismatch.
       if g == UNMATCHED || w == UNMATCHED {
-        panic!(
-          "UNMATCHED mismatch at chunk {c}, speaker {s}: got {g}, want {w}"
-        );
+        panic!("UNMATCHED mismatch at chunk {c}, speaker {s}: got {g}, want {w}");
       }
       // Establish or verify the consistent permutation.
       match got_to_want.get(&g).copied() {

@@ -1,8 +1,7 @@
 //! Reconstruction math: clustered_segmentations + overlap-add aggregate
 //! + top-K binarize.
 
-use crate::hungarian::UNMATCHED;
-use crate::reconstruct_pyannote::error::Error;
+use crate::{hungarian::UNMATCHED, reconstruct_pyannote::error::Error};
 
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
@@ -97,7 +96,9 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   }
   for row in hard_clusters {
     if row.len() != num_speakers {
-      return Err(Error::Shape("each hard_clusters[c] must have length num_speakers"));
+      return Err(Error::Shape(
+        "each hard_clusters[c] must have length num_speakers",
+      ));
     }
   }
   if count.len() != num_output_frames {

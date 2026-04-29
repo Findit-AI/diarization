@@ -1,10 +1,12 @@
 //! Pyannote `cluster_vbx` flow stages 2–7 wired end-to-end.
 
-use crate::ahc::ahc_init;
-use crate::centroid::{SP_ALIVE_THRESHOLD, weighted_centroids};
-use crate::hungarian::{UNMATCHED, constrained_argmax};
-use crate::pipeline::error::Error;
-use crate::vbx::{StopReason, vbx_iterate};
+use crate::{
+  ahc::ahc_init,
+  centroid::{SP_ALIVE_THRESHOLD, weighted_centroids},
+  hungarian::{UNMATCHED, constrained_argmax},
+  pipeline::error::Error,
+  vbx::{StopReason, vbx_iterate},
+};
 use nalgebra::{DMatrix, DVector};
 
 /// Pyannote's `qinit` smoothing factor: each AHC label becomes a
