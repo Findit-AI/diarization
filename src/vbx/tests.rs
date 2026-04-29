@@ -345,25 +345,38 @@ fn vbx_max_iters_zero_returns_validated_qinit() {
 
 use super::algo::{ElboStep, classify_elbo_step};
 
+// Most classifier tests use small-magnitude `prev`/`elbo` so the
+// scale-aware regression band collapses to ~atol (~1e-9). Two tests
+// near the bottom exercise the band at large magnitude (Codex round 3).
+
 #[test]
 fn classify_elbo_step_continues_on_large_positive_delta() {
-  assert_eq!(classify_elbo_step(0.5, 1.0e-4), ElboStep::Continue);
+  assert_eq!(
+    classify_elbo_step(0.5, -1.5, -1.0, 1.0e-4),
+    ElboStep::Continue
+  );
 }
 
 #[test]
 fn classify_elbo_step_converges_on_small_positive_delta() {
-  assert_eq!(classify_elbo_step(1.0e-5, 1.0e-4), ElboStep::Converged);
+  assert_eq!(
+    classify_elbo_step(1.0e-5, -1.00001, -1.0, 1.0e-4),
+    ElboStep::Converged
+  );
 }
 
 #[test]
 fn classify_elbo_step_converges_on_tiny_negative_delta_within_tolerance() {
-  // Delta in float-roundoff regime — treat as converged.
-  assert_eq!(classify_elbo_step(-1.0e-12, 1.0e-4), ElboStep::Converged);
+  // Delta in float-roundoff regime — well inside the band.
+  assert_eq!(
+    classify_elbo_step(-1.0e-12, -1.0, -1.0 - 1.0e-12, 1.0e-4),
+    ElboStep::Converged
+  );
 }
 
 #[test]
 fn classify_elbo_step_regresses_on_large_negative_delta() {
-  match classify_elbo_step(-1.0e-4, 1.0e-4) {
+  match classify_elbo_step(-1.0e-4, -1.0, -1.0001, 1.0e-4) {
     ElboStep::Regressed(d) => assert_eq!(d, -1.0e-4),
     other => panic!("expected Regressed, got {other:?}"),
   }
@@ -371,8 +384,8 @@ fn classify_elbo_step_regresses_on_large_negative_delta() {
 
 #[test]
 fn classify_elbo_step_regresses_just_outside_tolerance() {
-  // Just past the regression tolerance — should error, not converge.
-  match classify_elbo_step(-1.0e-8, 1.0e-4) {
+  // |elbo|=1.0 → tol = 1e-9 + 1e-9*1 = 2e-9. delta=-1e-8 is 5x outside.
+  match classify_elbo_step(-1.0e-8, -1.0, -1.00000001, 1.0e-4) {
     ElboStep::Regressed(d) => assert_eq!(d, -1.0e-8),
     other => panic!("expected Regressed, got {other:?}"),
   }
@@ -381,5 +394,47 @@ fn classify_elbo_step_regresses_just_outside_tolerance() {
 #[test]
 fn classify_elbo_step_zero_delta_is_converged() {
   // Exactly zero — flat ELBO, treat as converged.
-  assert_eq!(classify_elbo_step(0.0, 1.0e-4), ElboStep::Converged);
+  assert_eq!(
+    classify_elbo_step(0.0, -1.0, -1.0, 1.0e-4),
+    ElboStep::Converged
+  );
+}
+
+// ── Scale-aware regression band (Codex review MEDIUM round 3 of Phase 2) ─
+//
+// ELBO is an accumulated sum over T * S * D matrix entries plus T
+// per-frame terms; float roundoff scales with the magnitude of the
+// ELBO itself. The previous absolute `-1e-9` regression tolerance
+// (calibrated against the |ELBO|≈2700 captured fixture) errored out
+// on numerically awkward but otherwise valid inputs. The
+// `atol + rtol * max(|prev|, |elbo|)` band absorbs that.
+
+/// Regression for the Codex round-3 reproduction case. Final delta
+/// of `-2.47e-8` at |ELBO| ≈ 2700 — outside an absolute `1e-9` band
+/// but well inside the scale-aware band (1e-9 + 1e-9 * 2700 ≈ 2.7e-6).
+#[test]
+fn classify_elbo_step_absorbs_relative_float_roundoff_at_large_magnitude() {
+  let prev = -2700.0_f64;
+  let delta = -2.47e-8_f64;
+  let elbo = prev + delta;
+  assert_eq!(
+    classify_elbo_step(delta, prev, elbo, 1.0e-4),
+    ElboStep::Converged,
+    "scale-aware band must absorb a delta the absolute tolerance \
+     would have rejected — Codex's round-3 reproduction case"
+  );
+}
+
+/// Even at large magnitude, materially-large negative drops still
+/// surface as `Regressed`. Tests the upper edge of the scale-aware band.
+#[test]
+fn classify_elbo_step_still_rejects_material_regression_at_large_magnitude() {
+  let prev = -2700.0_f64;
+  // Band at this magnitude is ~2.7e-6; a -1e-3 drop is ~370× outside.
+  let delta = -1.0e-3_f64;
+  let elbo = prev + delta;
+  match classify_elbo_step(delta, prev, elbo, 1.0e-4) {
+    ElboStep::Regressed(d) => assert_eq!(d, delta),
+    other => panic!("expected Regressed at large magnitude, got {other:?}"),
+  }
 }

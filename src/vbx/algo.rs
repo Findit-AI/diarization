@@ -14,38 +14,68 @@ pub struct VbxOutput {
   pub elbo_trajectory: Vec<f64>,
 }
 
-/// Per-iteration ELBO regression beyond which the algorithm errors
-/// rather than treating the change as float roundoff. Empirically
-/// the captured Phase-0 trajectory's smallest *positive* delta is
-/// ~1.1e-4 (last meaningful iteration before convergence at
-/// epsilon=1e-4), so any negative delta worse than `-1e-9` is well
-/// outside float-roundoff territory. Codex review MEDIUM round 2.
-const ELBO_REGRESSION_TOLERANCE: f64 = 1.0e-9;
+/// Absolute floor for the ELBO regression tolerance. Caps the band
+/// for tiny ELBOs where the relative term is negligible.
+const ELBO_REGRESSION_ATOL: f64 = 1.0e-9;
+
+/// Relative scaling for the ELBO regression tolerance. ELBO is an
+/// accumulated sum over `T * S * D` matrix entries plus `T` per-frame
+/// terms; float roundoff therefore scales with the working magnitude
+/// of the ELBO itself. Codex round 3 reproduced a final delta of
+/// `~-2.47e-8` for finite community-Fa/Fb inputs at |ELBO| ≈ 2700,
+/// well outside an absolute `1e-9` band but ~9× *inside* the
+/// scale-aware band `1e-9 + 1e-9 * 2700 ≈ 2.7e-6`. The previous
+/// fixture-only calibration would have rejected that as an algorithm
+/// failure.
+const ELBO_REGRESSION_RTOL: f64 = 1.0e-9;
+
+/// Compute the regression tolerance for a given ELBO magnitude.
+/// `band(prev, elbo) = atol + rtol * max(|prev|, |elbo|)`.
+fn regression_tolerance(prev_elbo: f64, elbo: f64) -> f64 {
+  ELBO_REGRESSION_ATOL + ELBO_REGRESSION_RTOL * prev_elbo.abs().max(elbo.abs())
+}
 
 /// Outcome of comparing one EM iteration's ELBO against the previous.
 #[derive(Debug, PartialEq)]
 pub(super) enum ElboStep {
   /// Improvement >= `epsilon` — keep iterating.
   Continue,
-  /// Improvement < `epsilon` (including tiny negative deltas within
-  /// `ELBO_REGRESSION_TOLERANCE`) — converged, exit cleanly.
+  /// Improvement < `epsilon` (including small negative deltas within
+  /// the scale-aware regression-tolerance band) — converged, exit
+  /// cleanly.
   Converged,
-  /// Negative delta beyond `ELBO_REGRESSION_TOLERANCE` — VB EM's
-  /// monotonicity invariant is violated. Carries the offending delta.
+  /// Negative delta beyond the scale-aware regression-tolerance band
+  /// — VB EM's monotonicity invariant is violated. Carries the
+  /// offending delta.
   Regressed(f64),
 }
 
 /// Classify an ELBO step into the three convergence regimes.
 ///
+/// The regression boundary is scale-aware: any delta within
+/// `±(atol + rtol * max(|prev|, |elbo|))` is treated as float
+/// roundoff and routed to `Converged`. Beyond that band on the
+/// negative side: `Regressed`. This matters because ELBO accumulates
+/// over `T * S * D` matrix entries plus `T` per-frame terms; float
+/// roundoff therefore scales with magnitude, and an absolute
+/// tolerance calibrated against a single fixture would error out on
+/// numerically awkward but otherwise valid inputs (Codex review
+/// MEDIUM round 3).
+///
 /// Pyannote's `vbx.py:133-136` uses `if ELBO - prev < epsilon: break`
 /// for both small-positive convergence AND any negative regression,
-/// printing a warning for the regression case. The Rust port treats a
-/// regression beyond `ELBO_REGRESSION_TOLERANCE` as an error instead
-/// (no print mechanism, and downstream clustering should not silently
-/// consume a regressed posterior). Tiny negative deltas inside the
-/// tolerance are float-roundoff and treated as `Converged`.
-pub(super) fn classify_elbo_step(delta: f64, epsilon: f64) -> ElboStep {
-  if delta < -ELBO_REGRESSION_TOLERANCE {
+/// printing a warning for the regression case. The Rust port treats
+/// a regression *beyond the float-roundoff band* as an error (no
+/// print mechanism, and downstream clustering should not silently
+/// consume a materially regressed posterior).
+pub(super) fn classify_elbo_step(
+  delta: f64,
+  prev_elbo: f64,
+  elbo: f64,
+  epsilon: f64,
+) -> ElboStep {
+  let regression_tol = regression_tolerance(prev_elbo, elbo);
+  if delta < -regression_tol {
     ElboStep::Regressed(delta)
   } else if delta < epsilon {
     ElboStep::Converged
@@ -310,7 +340,7 @@ pub fn vbx_iterate(
     if ii > 0 {
       let prev = elbo_trajectory[elbo_trajectory.len() - 2];
       let delta = elbo - prev;
-      match classify_elbo_step(delta, epsilon) {
+      match classify_elbo_step(delta, prev, elbo, epsilon) {
         ElboStep::Continue => {}
         ElboStep::Converged => break,
         ElboStep::Regressed(d) => {
