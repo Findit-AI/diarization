@@ -180,3 +180,146 @@ fn vbx_is_deterministic() {
     assert_eq!(a.pi[c], b.pi[c]);
   }
 }
+
+// ── Input-value validation (Codex review MEDIUM round 1 of Phase 2) ─
+//
+// Round 1 added validation for `qinit` (finite, nonnegative,
+// row-sum ≈ 1) and for `Fa`/`Fb` (positive, finite). Without these,
+// a malformed initializer or hyperparameter silently biases the
+// first speaker-model update and propagates garbage through the rest
+// of the run; pyannote does not validate these, so this is a
+// deliberate divergence to fail-fast at the boundary instead of
+// producing fabricated speaker evidence.
+
+#[test]
+fn vbx_rejects_qinit_with_nan_entry() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  qinit[(2, 1)] = f64::NAN;
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonFinite("qinit"))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_qinit_with_inf_entry() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  qinit[(0, 0)] = f64::INFINITY;
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::NonFinite("qinit"))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_qinit_with_negative_entry() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  // Per-row sum still 1.0 (0.6 + 0.4) so we exercise the negative-
+  // value path, not the row-sum path. Set one entry to -0.1 and
+  // bump its sibling to 1.1 so the row sums to 1.0.
+  let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  qinit[(0, 0)] = -0.1;
+  qinit[(0, 1)] = 1.1;
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_qinit_with_unnormalized_row() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  // Row 3 has entries [0.5, 0.4] — sum = 0.9, fails the 1e-9 tolerance.
+  let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  qinit[(3, 1)] = 0.4;
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_zero_fa() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.0, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_negative_fa() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, -0.1, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_nan_fa() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, f64::NAN, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_zero_fb() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.0, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+#[test]
+fn vbx_rejects_inf_fb() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, f64::INFINITY, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// `max_iters == 0` is a valid edge case (matches pyannote's
+/// `range(0)`): the EM loop never runs, gamma is the (validated)
+/// qinit, pi is uniform `1/S`, elbo_trajectory is empty. The qinit
+/// validation is what makes this safe — without it, the function
+/// would return whatever malformed values the caller passed in as
+/// "responsibilities".
+#[test]
+fn vbx_max_iters_zero_returns_validated_qinit() {
+  let t = 5;
+  let s = 3;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 1.0 / s as f64);
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0).expect("vbx_iterate");
+  assert!(out.elbo_trajectory.is_empty(), "no iterations → empty trajectory");
+  for r in 0..t {
+    for c in 0..s {
+      assert_eq!(out.gamma[(r, c)], qinit[(r, c)]);
+    }
+  }
+  for c in 0..s {
+    assert!((out.pi[c] - 1.0 / s as f64).abs() < 1e-15);
+  }
+}

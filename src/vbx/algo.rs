@@ -75,10 +75,21 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 ///
 /// # Errors
 ///
-/// - [`Error::Shape`] on mismatched dimensions.
+/// - [`Error::Shape`] on mismatched dimensions, or on an `Fa`/`Fb`/
+///   `qinit` value that fails the input contract (non-positive or
+///   non-finite scalar; `qinit` row that doesn't sum to 1; `qinit`
+///   entry that's negative).
+/// - [`Error::NonFinite`] if `qinit` contains a NaN/`±inf` entry,
+///   or if a non-finite value appears in an algorithm intermediate
+///   (the algorithm has no recovery; treat as a hard failure).
 /// - [`Error::NonPositivePhi`] if any `phi[d] <= 0`.
-/// - [`Error::NonFinite`] if a non-finite intermediate appears (the
-///   algorithm has no recovery; treat as a hard failure).
+///
+/// `qinit` row-sum tolerance is `1e-9` — pyannote's caller produces
+/// a softmaxed initializer that is unit-normalized to within float
+/// roundoff, and Phase-0 captured rows are within `~1e-15` of 1.0.
+/// This rejects a degraded or hand-crafted initializer that biases
+/// the first speaker-model update — Codex review MEDIUM (round 1 of
+/// Phase 2).
 pub fn vbx_iterate(
   x: &DMatrix<f64>,
   phi: &DVector<f64>,
@@ -98,9 +109,39 @@ pub fn vbx_iterate(
   if s == 0 {
     return Err(Error::Shape("qinit must have at least one cluster column"));
   }
+  if !fa.is_finite() || fa <= 0.0 {
+    return Err(Error::Shape("Fa must be a positive finite scalar"));
+  }
+  if !fb.is_finite() || fb <= 0.0 {
+    return Err(Error::Shape("Fb must be a positive finite scalar"));
+  }
   for (i, p) in phi.iter().enumerate() {
     if *p <= 0.0 || p.is_nan() {
       return Err(Error::NonPositivePhi(*p, i));
+    }
+  }
+  // qinit value validation: each row must be a discrete probability
+  // distribution over speakers (finite, nonnegative, row-sum ≈ 1).
+  // Without this, a malformed initializer (negative entries, rows
+  // not summing to 1, NaN) produces finite-looking posteriors after
+  // the first update and biases the speaker model silently. Also
+  // matters at `max_iters == 0`, which returns `qinit` directly as
+  // the output `gamma`. Codex review MEDIUM (round 1 of Phase 2).
+  const QINIT_ROW_SUM_TOLERANCE: f64 = 1.0e-9;
+  for tt in 0..t {
+    let mut row_sum = 0.0;
+    for sj in 0..s {
+      let v = qinit[(tt, sj)];
+      if !v.is_finite() {
+        return Err(Error::NonFinite("qinit"));
+      }
+      if v < 0.0 {
+        return Err(Error::Shape("qinit entries must be nonnegative"));
+      }
+      row_sum += v;
+    }
+    if (row_sum - 1.0).abs() > QINIT_ROW_SUM_TOLERANCE {
+      return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
 
