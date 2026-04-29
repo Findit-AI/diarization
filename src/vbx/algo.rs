@@ -68,12 +68,7 @@ pub(super) enum ElboStep {
 /// a regression *beyond the float-roundoff band* as an error (no
 /// print mechanism, and downstream clustering should not silently
 /// consume a materially regressed posterior).
-pub(super) fn classify_elbo_step(
-  delta: f64,
-  prev_elbo: f64,
-  elbo: f64,
-  epsilon: f64,
-) -> ElboStep {
+pub(super) fn classify_elbo_step(delta: f64, prev_elbo: f64, elbo: f64, epsilon: f64) -> ElboStep {
   let regression_tol = regression_tolerance(prev_elbo, elbo);
   if delta < -regression_tol {
     ElboStep::Regressed(delta)
