@@ -167,6 +167,16 @@ pub fn vbx_iterate(
   max_iters: usize,
 ) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
+  if d == 0 {
+    // VBx without feature evidence collapses to "iterate the uniform
+    // prior". With D=0 the per-dimension loops are no-ops, the
+    // likelihood term vanishes, and gamma/pi are driven only by `pi`
+    // and `eps_log` — a finite-but-empty cluster posterior dressed
+    // up as a clustering result. Reject at the boundary so a schema
+    // drift or feature-construction bug doesn't return plausible
+    // garbage. Codex review MEDIUM round 6 of Phase 2.
+    return Err(Error::Shape("X must have at least one feature dimension"));
+  }
   if phi.len() != d {
     return Err(Error::Shape("Phi.len() must equal X.ncols()"));
   }
@@ -230,21 +240,29 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject "dead" speaker columns — column j with zero total initial
-  // mass. Without this, the uniform `pi = 1/S` initialization gives
-  // a non-zero prior to a speaker that no frame is initially assigned
-  // to, and the first EM update can resurrect it (alpha[j] = 0,
-  // log_p[t, j] is constant, gamma[t, j] becomes positive after the
-  // softmax). That fabricates an extra speaker. Pyannote's caller
-  // pre-softmaxes a smoothed one-hot AHC initialization which never
-  // produces a dead column, but our `vbx_iterate` is a direct entry
-  // point for future callers — fail-fast at the boundary. Codex
-  // review MEDIUM round 4.
+  // Reject "dead" or "near-dead" speaker columns. A column whose
+  // total initial mass is below the calibrated `QINIT_COL_SUM_MIN`
+  // floor cannot be a legitimate speaker initialization: pyannote's
+  // softmax-of-smoothed-one-hot caller produces every real-speaker
+  // column with `col_sum ≥ ~1.16` (a single-frame speaker; observed
+  // empirically across the Phase-0 fixture has min `1.158`), while
+  // a column with no real-frame assignment under the same smoothing
+  // sits around `T * exp(0) / (exp(7) + (S-1))` ≈ `0.175` for `S=19,
+  // T=195`. The `0.5` threshold cleanly separates the two regimes
+  // (~2.3× margin to the real minimum, ~2.9× margin above the
+  // residue floor). Without this guard, the uniform `pi = 1/S`
+  // initialization gives a `1/S` prior to a speaker that has only
+  // numerical residue in qinit, and the first EM update can
+  // resurrect it on weak/symmetric features — fabricating an extra
+  // speaker. Round 4 added the exact-zero check; Codex round 6
+  // pointed out that exact-zero is too narrow.
+  const QINIT_COL_SUM_MIN: f64 = 0.5;
   for sj in 0..s {
     let col_sum: f64 = (0..t).map(|tt| qinit[(tt, sj)]).sum();
-    if col_sum <= 0.0 {
+    if col_sum < QINIT_COL_SUM_MIN {
       return Err(Error::Shape(
-        "qinit speaker column has zero total mass (dead column)",
+        "qinit speaker column has below-floor total mass (would be \
+         resurrected by uniform-pi initialization)",
       ));
     }
   }

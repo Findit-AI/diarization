@@ -415,6 +415,87 @@ fn vbx_accepts_qinit_with_unequal_but_nonzero_column_masses() {
   let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("non-dead columns must pass");
 }
 
+// ── Tighter qinit column-mass + zero-D rejection (Codex review MEDIUM round 6 of Phase 2) ─
+//
+// Round 4's exact-zero check let through "near-dead" columns with
+// tiny positive mass (numerical residue or pure smoothing-residue).
+// Round 6 calibrates the threshold to `QINIT_COL_SUM_MIN = 0.5`,
+// which sits between pyannote's pure-residue floor (~0.175 for
+// S=19, T=195 under smoothing 7.0) and a real 1-frame speaker
+// (~1.16). Also rejects `X.ncols() == 0` so a feature-construction
+// bug doesn't return uniform-prior posteriors as a clustering result.
+
+/// Column sum 0.1 — below `QINIT_COL_SUM_MIN = 0.5`, well above the
+/// exact-zero threshold the previous round used. Round 4's check
+/// would have admitted this; round 6 rejects it.
+#[test]
+fn vbx_rejects_qinit_with_tiny_positive_column_mass() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  // Column 0 has all the real mass; column 1 has tiny per-row
+  // residue. Per-row entries: (0.98, 0.02). Column 1 sum = 5*0.02
+  // = 0.1, which is < 0.5 (the new floor) but > 0 (the previous
+  // floor that would have admitted it).
+  for tt in 0..t {
+    qinit[(tt, 0)] = 0.98;
+    qinit[(tt, 1)] = 0.02;
+  }
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// Sanity: a column at the minimum-real threshold (~ pyannote's
+/// 1-frame-speaker case) still passes. Calibration ground truth:
+/// the captured Phase-0 fixture's smallest column sum is 1.158;
+/// 0.6 sits above the new 0.5 floor with 1.2× margin.
+#[test]
+fn vbx_accepts_qinit_at_minimum_real_column_mass() {
+  let t = 10;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.3;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  // Per-row (0.94, 0.06). Column 1 sum = 10*0.06 = 0.6, just above
+  // the 0.5 floor. Real-but-tiny speaker case — must still pass.
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  for tt in 0..t {
+    qinit[(tt, 0)] = 0.94;
+    qinit[(tt, 1)] = 0.06;
+  }
+  let _out =
+    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("near-floor real column must pass");
+}
+
+#[test]
+fn vbx_rejects_zero_feature_dimension() {
+  // D=0: x has 5 rows × 0 columns; phi is empty.
+  let x = DMatrix::<f64>::zeros(5, 0);
+  let phi = DVector::<f64>::zeros(0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// D=0 must be rejected even at `max_iters = 0`, so the boundary
+/// validation runs before the algorithm has a chance to return
+/// uniform-prior gamma/pi as if it had clustered.
+#[test]
+fn vbx_rejects_zero_feature_dimension_even_at_max_iters_zero() {
+  let x = DMatrix::<f64>::zeros(5, 0);
+  let phi = DVector::<f64>::zeros(0);
+  let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
 // ── X / Phi non-finite hardening (Codex review MEDIUM round 5 of Phase 2) ─
 //
 // The previous boundary accepted `+inf` Phi (the check used
