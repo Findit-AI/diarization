@@ -186,7 +186,9 @@ fn centroid_linkage_inversion_matches_scipy() {
   let m = DMatrix::<f64>::from_row_slice(
     4,
     3,
-    &[p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2, p3.0, p3.1, p3.2],
+    &[
+      p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2, p3.0, p3.1, p3.2,
+    ],
   );
 
   let labels = ahc_init(&m, 0.6).expect("ahc_init");

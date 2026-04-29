@@ -165,7 +165,8 @@ fn fcluster_distance_remap(steps: &[Step<f64>], n: usize, threshold: f64) -> Vec
   // Second pass: scan leaves 0..n and assign encounter-order labels.
   let mut canonical = vec![0usize; n];
   let mut next_label = 0usize;
-  let mut label_of_class: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+  let mut label_of_class: std::collections::HashMap<usize, usize> =
+    std::collections::HashMap::new();
   for (i, slot) in canonical.iter_mut().enumerate() {
     *slot = *label_of_class.entry(raw[i]).or_insert_with(|| {
       let l = next_label;
