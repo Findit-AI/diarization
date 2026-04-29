@@ -85,3 +85,7 @@ pub(crate) mod ahc;
 // `centroid` is crate-private for the same reason: Phase 4 ships the
 // post-VBx weighted centroid math, integration lands in Phase 5.
 pub(crate) mod centroid;
+// `pipeline` (Phase 5a) wires PLDA + AHC + VBx + centroid + Hungarian
+// into pyannote's full `assign_embeddings` flow. Crate-private until
+// the public API surface is settled.
+pub(crate) mod pipeline;

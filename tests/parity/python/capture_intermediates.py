@@ -3,6 +3,7 @@
 Outputs (under tests/parity/fixtures/<clip-stem>/):
   - raw_embeddings.npz    (num_chunks, num_slots, 256) pre-PLDA WeSpeaker
   - plda_embeddings.npz   post_xvec + post_plda (num_train, 128) + train indices
+  - segmentations.npz     pyannote per-chunk per-frame speaker probs
   - ahc_init_labels.npy   (num_train,) AHC init labels
   - ahc_state.npz         threshold
   - vbx_state.npz         qinit, q_final, sp_final, elbo_trajectory
@@ -295,6 +296,14 @@ def main() -> None:
         out_dir / "raw_embeddings.npz",
         embeddings=buf.raw_embeddings,
     )
+    # `segmentation` is the per-chunk per-frame per-speaker probability
+    # tensor that drives both `filter_embeddings` (active-frame ratio)
+    # and the constrained_assignment masking inside `cluster_vbx` (zero-
+    # activity speakers get a low-cost sentinel). Captured for Phase 5a.
+    np.savez_compressed(
+        out_dir / "segmentations.npz",
+        segmentations=buf.segmentation,
+    )
     np.savez_compressed(
         out_dir / "plda_embeddings.npz",
         post_xvec=buf.post_xvec,
@@ -354,6 +363,7 @@ def main() -> None:
 
     artifact_files = [
         "raw_embeddings.npz",
+        "segmentations.npz",
         "plda_embeddings.npz",
         "ahc_init_labels.npy",
         "ahc_state.npz",
