@@ -533,6 +533,70 @@ fn vbx_rejects_qinit_with_near_dead_spike_column() {
   );
 }
 
+/// Codex round 12 [HIGH]: round-11's `> 1.5/S` per-row-max
+/// threshold still admits a "single-spike" column where one row
+/// sits just above 1.5/S and everything else is zero — col_sum is
+/// negligible (~ 1.5/S) and the column is barely supported. The
+/// new combined check (per-row-max AND col_sum > 0.5) rejects this.
+///
+/// Note: this is a distinct attack from the round-11 case (which
+/// used 1/S + ε, still below the new 1.5/S threshold). Round-12's
+/// spike sits ABOVE 1.5/S to bypass the per-row-max check; the
+/// col-sum floor catches it.
+#[test]
+fn vbx_rejects_qinit_with_single_spike_above_threshold() {
+  let t = 19;
+  let s = 19;
+  let d = 4;
+  let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
+  let phi = DVector::<f64>::from_element(d, 1.0);
+
+  // First S-1 rows: pyannote-style softmax(7) one-hot peaks
+  // (real assignments for speakers 0..17).
+  let on_mass = (7.0_f64).exp() / ((7.0_f64).exp() + (s - 1) as f64);
+  let off_mass = 1.0 / ((7.0_f64).exp() + (s - 1) as f64);
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  for tt in 0..(s - 1) {
+    for sj in 0..s {
+      qinit[(tt, sj)] = if sj == tt { on_mass } else { off_mass };
+    }
+  }
+  // Last row: speaker S-1 gets a "spike" mass slightly above 1.5/S.
+  // For S=19 this is 1.5/19 + ε ≈ 0.0789 + 0.001 = 0.0799.
+  // The remaining row mass is split among other speakers.
+  let one_over_s = 1.0 / s as f64;
+  let spike_mass = 1.5 * one_over_s + 1.0e-3;
+  let spike_other = (1.0 - spike_mass) / (s - 1) as f64;
+  for sj in 0..s {
+    qinit[(s - 1, sj)] = if sj == s - 1 { spike_mass } else { spike_other };
+  }
+
+  // Test setup invariants:
+  let col_max_spike = (0..t)
+    .map(|tt| qinit[(tt, s - 1)])
+    .fold(f64::NEG_INFINITY, f64::max);
+  let new_floor = 1.5 / s as f64;
+  assert!(
+    col_max_spike > new_floor,
+    "test invariant: spike col_max = {col_max_spike:.4e} must \
+     EXCEED the round-11 per-row-max floor (1.5/S = {new_floor:.4e}) \
+     so this attack is distinct from the round-11 case"
+  );
+  let col_sum_spike: f64 = (0..t).map(|tt| qinit[(tt, s - 1)]).sum();
+  assert!(
+    col_sum_spike < 0.5,
+    "test invariant: spike col_sum = {col_sum_spike:.4e} must be \
+     below the new col-sum floor (0.5) so the round-12 check fires"
+  );
+
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(
+    matches!(result, Err(Error::Shape(_))),
+    "single-spike column above per-row-max threshold but with \
+     negligible total support must be rejected; got {result:?}"
+  );
+}
+
 /// S=1 is a degenerate case (single speaker) — `qinit` is forced to
 /// be all 1.0 by the row-sum invariant, and there is no symmetry to
 /// break with one column. The check skips the per-row-max test for

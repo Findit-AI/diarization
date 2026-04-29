@@ -260,37 +260,47 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
-  // Reject "dead" / "near-dead" / "no-information" / "near-uniform"
-  // speaker columns by per-row maximum. Each column must have at
-  // least one row where its mass exceeds `1.5 / S` (50% above the
-  // uniform baseline).
+  // Reject "dead" / "near-dead" / "near-uniform" / "spike-only"
+  // speaker columns. Each column must satisfy BOTH:
   //
-  // Threshold derivation:
-  //   - `> 1/S`: rejects pure residue (residue per-row max under any
-  //     positive smoothing is `1/(exp(k) + S - 1) < 1/S`) and
-  //     uniform qinit (col_max = 1/S exactly is a symmetry-trap
-  //     fixed point — Codex round 9).
-  //   - But `> 1/S` strictly admits a "near-dead spike": a column
-  //     with a single row at `1/S + ε` and zero elsewhere. That
-  //     column then receives the uniform `pi = 1/S` initialization
-  //     and EM can promote it into a fabricated speaker on
-  //     low-evidence inputs (Codex round 11 — HIGH).
-  //   - `> 1.5 / S`: pyannote softmax(7) on-mass exceeds this at
-  //     all realistic S (1.33× margin at S=2, 12.5× at S=19,
-  //     349× at S=1000). The near-dead spike at `1/S + ε` sits at
-  //     `2/3 × threshold` — rejected.
+  //   1. Per-row max > `1.5 / S` (peak-vs-uniform check)
+  //   2. Total mass > `QINIT_COL_SUM_FLOOR` (peak-with-support check)
   //
-  // Recording-length invariant (T-invariant): per-row max depends
-  // only on the smoothing factor and S, not T (Codex round 8).
+  // Why both: the threshold-based check (1) alone is fundamentally
+  // circumventable — any per-row-max threshold `X` admits a single
+  // spike at `X + ε` with zero elsewhere (a column with only
+  // negligible total support that would still receive the uniform
+  // `pi = 1/S` prior and could be resurrected by EM). The col-sum
+  // floor (2) catches that class. Conversely, long-T residue has
+  // `col_sum = T * off_mass` which scales with T and exceeds any
+  // fixed sum floor (Codex round 8), but residue per-row max stays
+  // below `1/S` regardless of T, so the per-row-max check (1)
+  // catches it. Each check covers a distinct failure mode; together
+  // they close both. Codex review HIGH round 12.
   //
-  // Caveat: at S > ~1000 with smoothing=7, residue/uniform
-  // discrimination weakens and very-low smoothing factors (k < 1)
-  // approach the threshold. VBx use cases assume pyannote's
-  // hardcoded smoothing=7 with S ≤ ~100; this constant must be
-  // re-validated if those assumptions change.
+  // (1) Per-row-max threshold:
+  //   - Rejects pure residue (residue per-row max < 1/S < 1.5/S)
+  //   - Rejects uniform qinit (col_max = 1/S < 1.5/S)
+  //   - Rejects "near-uniform" spikes at 1/S + ε
+  //   - Pyannote softmax(7) on-mass: 0.999 (S=2), 0.984 (S=19),
+  //     0.523 (S=1000) — comfortably above 1.5/S in all cases
+  //
+  // (2) Col-sum threshold (`QINIT_COL_SUM_FLOOR = 0.5`):
+  //   - Pyannote softmax(7) real K=1: col_sum ≈ on_mass + (T-1)*off_mass
+  //     ≥ 0.984 (S=19), 0.523 + tiny (S=1000) — always > 0.5
+  //   - Single-spike at threshold+ε with rest 0: col_sum = threshold+ε
+  //     (= 0.0789+ε for S=19) ≪ 0.5 — rejected
+  //   - Long-T residue at S=19, T=1000: col_sum ≈ 0.897 > 0.5 — but
+  //     per-row max check already catches this case
+  //
+  // Recording-length invariant (T-invariant): per-row max ✓
+  //   col-sum is NOT T-invariant for residue, which is why we need
+  //   per-row-max as the primary check.
   //
   // S=1 is degenerate (single speaker, no symmetry to break); skip
-  // the check there since per-row max = 1.0 ≯ 1.5/S = 1.5.
+  // both checks since per-row max = 1.0 ≯ 1.5/S = 1.5 and col_sum
+  // = T trivially exceeds any reasonable floor.
+  const QINIT_COL_SUM_FLOOR: f64 = 0.5;
   if s > 1 {
     let qinit_col_max_floor = 1.5 / s as f64;
     for sj in 0..s {
@@ -302,6 +312,14 @@ pub fn vbx_iterate(
           "qinit speaker column lacks any row substantially above the \
            uniform 1/S baseline (would be resurrected by uniform-pi \
            initialization)",
+        ));
+      }
+      let col_sum: f64 = (0..t).map(|tt| qinit[(tt, sj)]).sum();
+      if col_sum <= QINIT_COL_SUM_FLOOR {
+        return Err(Error::Shape(
+          "qinit speaker column has insufficient total support \
+           (single-spike attack: barely-supported column would be \
+           resurrected by uniform-pi initialization)",
         ));
       }
     }
