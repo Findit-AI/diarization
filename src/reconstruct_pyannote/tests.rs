@@ -1,8 +1,10 @@
 //! Model-free unit tests for `dia::reconstruct_pyannote`.
 
-use crate::hungarian::UNMATCHED;
-use crate::reconstruct_pyannote::{
-  Error, MAX_CLUSTER_ID, ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct,
+use crate::{
+  hungarian::UNMATCHED,
+  reconstruct_pyannote::{
+    Error, MAX_CLUSTER_ID, ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct,
+  },
 };
 
 fn default_swins() -> (SlidingWindow, SlidingWindow) {
