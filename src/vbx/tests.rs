@@ -333,6 +333,88 @@ fn vbx_max_iters_zero_returns_validated_qinit() {
   }
 }
 
+// ── Allocation + dead-column hardening (Codex review MEDIUM round 4 of Phase 2) ─
+
+/// Regression for the OOM concern: an enormous `max_iters` no longer
+/// preallocates an `elbo_trajectory` of that capacity. The loop body
+/// converges quickly on the small input here, so this exercises the
+/// fix without actually running for billions of iterations.
+///
+/// Pre-fix: `Vec::with_capacity(usize::MAX)` panics at "capacity
+/// overflow" before the loop runs.
+/// Post-fix: `Vec::new()` allocates lazily; the algorithm converges
+/// in 1-3 iterations on this small input and returns successfully.
+#[test]
+fn vbx_does_not_oom_on_huge_max_iters() {
+  let t = 5;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.5;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
+  // usize::MAX would have triggered a capacity-overflow panic in
+  // the pre-fix code's `Vec::with_capacity(max_iters)`.
+  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, usize::MAX).expect("vbx_iterate");
+  // Convergence should be extremely fast on this trivial input.
+  assert!(
+    out.elbo_trajectory.len() < 100,
+    "expected fast convergence, got {} iterations",
+    out.elbo_trajectory.len()
+  );
+}
+
+/// Regression for the dead-column concern: a `qinit` with a speaker
+/// column whose total mass is zero must be rejected at the entry,
+/// not silently resurrected by the uniform-pi initialization.
+///
+/// Pre-fix: column 1 has zero mass but `pi[1] = 1/S = 0.5`, and the
+/// first EM update gives gamma[*, 1] non-zero values, fabricating a
+/// second speaker that wasn't in the initialization.
+#[test]
+fn vbx_rejects_qinit_with_dead_speaker_column() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  // All mass on column 0; column 1 is dead. Each row sums to 1.0,
+  // so the row-validation passes — only the new column-validation
+  // catches it.
+  for tt in 0..t {
+    qinit[(tt, 0)] = 1.0;
+  }
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// Sanity: a qinit with both columns having some mass passes (rules
+/// out a too-strict column-sum threshold). 60/40 split per row
+/// → column sums are 3.0 and 2.0 across 5 rows.
+#[test]
+fn vbx_accepts_qinit_with_unequal_but_nonzero_column_masses() {
+  let t = 5;
+  let s = 2;
+  let d = 4;
+  let mut x = DMatrix::<f64>::zeros(t, d);
+  for i in 0..t {
+    for j in 0..d {
+      x[(i, j)] = ((i + j) as f64) * 0.3;
+    }
+  }
+  let phi = DVector::<f64>::from_element(d, 1.0);
+  let mut qinit = DMatrix::<f64>::zeros(t, s);
+  for tt in 0..t {
+    qinit[(tt, 0)] = 0.6;
+    qinit[(tt, 1)] = 0.4;
+  }
+  let _out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("non-dead columns must pass");
+}
+
 // ── ELBO step classification (Codex review MEDIUM round 2 of Phase 2) ─
 //
 // VB EM's monotonicity is a fundamental invariant. The previous

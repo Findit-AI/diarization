@@ -209,6 +209,24 @@ pub fn vbx_iterate(
       return Err(Error::Shape("qinit rows must sum to 1"));
     }
   }
+  // Reject "dead" speaker columns — column j with zero total initial
+  // mass. Without this, the uniform `pi = 1/S` initialization gives
+  // a non-zero prior to a speaker that no frame is initially assigned
+  // to, and the first EM update can resurrect it (alpha[j] = 0,
+  // log_p[t, j] is constant, gamma[t, j] becomes positive after the
+  // softmax). That fabricates an extra speaker. Pyannote's caller
+  // pre-softmaxes a smoothed one-hot AHC initialization which never
+  // produces a dead column, but our `vbx_iterate` is a direct entry
+  // point for future callers — fail-fast at the boundary. Codex
+  // review MEDIUM round 4.
+  for sj in 0..s {
+    let col_sum: f64 = (0..t).map(|tt| qinit[(tt, sj)]).sum();
+    if col_sum <= 0.0 {
+      return Err(Error::Shape(
+        "qinit speaker column has zero total mass (dead column)",
+      ));
+    }
+  }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))
   let log_2pi = (2.0_f64 * std::f64::consts::PI).ln();
@@ -231,7 +249,15 @@ pub fn vbx_iterate(
   // `if type(pi) is int: pi = ones(pi)/pi` for the integer-pi path).
   let mut pi = DVector::<f64>::from_element(s, 1.0 / s as f64);
 
-  let mut elbo_trajectory: Vec<f64> = Vec::with_capacity(max_iters);
+  // `Vec::new()` rather than `Vec::with_capacity(max_iters)` —
+  // `max_iters` is caller-controlled, and `with_capacity` would
+  // allocate `max_iters * size_of::<f64>()` bytes up front. A
+  // misconfigured caller passing `usize::MAX` would crash with
+  // "capacity overflow" or OOM before the loop ran. The iteration
+  // count is bounded in practice (the captured trajectory converges
+  // in 16 of 20 iterations); amortized push cost is O(1). Codex
+  // review MEDIUM round 4.
+  let mut elbo_trajectory: Vec<f64> = Vec::new();
   let epsilon = 1e-4_f64;
   let eps_log = 1e-8_f64;
   let fa_over_fb = fa / fb;
