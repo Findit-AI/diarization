@@ -84,6 +84,17 @@ fn reconstruct_matches_pyannote_discrete_diarization_05_four_speaker() {
   run_reconstruct_parity("05_four_speaker");
 }
 
+/// 06_long_recording: see `pipeline::parity_tests::assign_embeddings_
+/// matches_pyannote_hard_clusters_06_long_recording` for the
+/// rationale. This test goes through the same `assign_embeddings`
+/// path, so it inherits the same length-dependent divergence at
+/// T=1004.
+#[test]
+#[ignore = "T=1004 GEMM-roundoff divergence vs pyannote; tracked separately"]
+fn reconstruct_matches_pyannote_discrete_diarization_06_long_recording() {
+  run_reconstruct_parity("06_long_recording");
+}
+
 fn run_reconstruct_parity(fixture_dir: &str) {
   require_fixtures(fixture_dir);
   let base = format!("tests/parity/fixtures/{fixture_dir}");

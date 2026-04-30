@@ -61,6 +61,16 @@ fn rttm_matches_pyannote_reference_05_four_speaker() {
   run_rttm_parity("05_four_speaker", "clip_16k");
 }
 
+/// 06_long_recording: see `pipeline::parity_tests::assign_embeddings_
+/// matches_pyannote_hard_clusters_06_long_recording` for the
+/// rationale. This test runs `assign_embeddings` first, so it
+/// inherits the same length-dependent divergence at T=1004.
+#[test]
+#[ignore = "T=1004 GEMM-roundoff divergence vs pyannote; tracked separately"]
+fn rttm_matches_pyannote_reference_06_long_recording() {
+  run_rttm_parity("06_long_recording", "clip_16k");
+}
+
 fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 

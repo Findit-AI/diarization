@@ -30,6 +30,7 @@ const FIXTURES: &[&str] = &[
   "03_dual_speaker",
   "04_three_speaker",
   "05_four_speaker",
+  "06_long_recording",
 ];
 
 fn fixture(name: &str, file: &str) -> PathBuf {

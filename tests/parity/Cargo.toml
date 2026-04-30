@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-dia = { path = "../..", features = ["ort"] }
+diarization = { path = "../..", features = ["ort"] }
 hound = "3"
 anyhow = "1"
