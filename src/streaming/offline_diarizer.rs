@@ -252,8 +252,8 @@ impl StreamingOfflineDiarizer {
         let mut frame_mask = [false; FRAMES_PER_WINDOW];
         let mut any_active = false;
         for f in 0..FRAMES_PER_WINDOW {
-          let active = segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s]
-            >= cfg.onset as f64;
+          let active =
+            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset as f64;
           frame_mask[f] = active;
           any_active |= active;
         }

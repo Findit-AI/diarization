@@ -141,7 +141,8 @@ fn run_ahc_parity(fixture_dir: &str) {
   let got_canon = canonicalize_to_encounter_order(&got);
   let want_canon = canonicalize_to_encounter_order(&want);
   assert_eq!(
-    got_canon, want_canon,
+    got_canon,
+    want_canon,
     "{fixture_dir}: ahc_init partition diverged from pyannote (first 20 got vs want canonicalized: {:?} vs {:?}; threshold={threshold})",
     &got_canon[..20.min(got_canon.len())],
     &want_canon[..20.min(want_canon.len())],
