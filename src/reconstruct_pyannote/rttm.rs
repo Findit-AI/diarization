@@ -116,26 +116,38 @@ pub fn discrete_to_spans(
 /// Times are formatted to 3 decimal places (millisecond resolution),
 /// matching pyannote's `Annotation.write_rttm` default.
 ///
-/// Cluster ids are remapped to `SPEAKER_NN` in **first-appearance
-/// order** (pyannote's `Annotation.labels()` + `rename_labels(...)`
-/// sequence in `speaker_diarization.py:721-740`): the first cluster
-/// id encountered when walking `spans` in time order becomes
-/// `SPEAKER_00`, the second new id `SPEAKER_01`, etc. Without this,
-/// raw cluster ids that don't start at 0 (or have gaps) would emit
-/// labels like `SPEAKER_01` before `SPEAKER_00`, diverging from
-/// pyannote's RTTM. Codex review MEDIUM round 5 of Phase 5.
+/// Cluster ids are remapped to `SPEAKER_NN` matching pyannote's
+/// `Annotation.labels()` + `rename_labels(...)` (in
+/// `speaker_diarization.py:721-740`). `Annotation.labels()` returns
+/// `sorted(self._labels, key=str)`
+/// (`pyannote.core.annotation.Annotation:920-932`) — i.e. unique
+/// cluster ids sorted **lexicographically by string representation**.
+/// The first label in that sorted order becomes `SPEAKER_00`, the
+/// second `SPEAKER_01`, etc.
+///
+/// For small integer cluster ids (< 10) string and numeric ordering
+/// agree, so this matches the captured fixtures. For ≥ 10 they
+/// diverge (e.g. `["10", "2"]` lex-sorts to `["10", "2"]`). The
+/// str-key ordering is what the captured pyannote runs use, so we
+/// use it here for bit-exact RTTM parity. Codex review MEDIUM
+/// round 6 of Phase 5.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   use std::collections::HashMap;
-  let mut next_label = 0usize;
-  let mut id_to_label: HashMap<usize, usize> = HashMap::new();
+  // Collect distinct cluster ids, sort by string representation to
+  // mirror pyannote's `sorted(_labels, key=str)`.
+  let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster).collect();
+  unique_ids.sort_by_key(|id| id.to_string());
+  unique_ids.dedup();
+  // Map cluster_id → SPEAKER_NN index in that sorted order.
+  let id_to_label: HashMap<usize, usize> = unique_ids
+    .into_iter()
+    .enumerate()
+    .map(|(i, id)| (id, i))
+    .collect();
   spans
     .iter()
     .map(|s| {
-      let label = *id_to_label.entry(s.cluster).or_insert_with(|| {
-        let l = next_label;
-        next_label += 1;
-        l
-      });
+      let label = id_to_label[&s.cluster];
       format!(
         "SPEAKER {uri} 1 {:.3} {:.3} <NA> <NA> SPEAKER_{:02} <NA> <NA>",
         s.start, s.duration, label

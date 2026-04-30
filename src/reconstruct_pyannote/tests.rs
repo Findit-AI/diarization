@@ -228,15 +228,13 @@ fn rejects_count_above_max_cluster_id() {
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
-/// RTTM speaker labels are remapped in first-appearance order.
-/// Pyannote's `Annotation.labels()` + `rename_labels` sequence
-/// renumbers clusters by encounter time so the first-emitted span
-/// is always `SPEAKER_00`. Without the remap, a span with cluster_id=1
-/// emitted before cluster_id=0 would produce `SPEAKER_01` first,
-/// diverging from pyannote's RTTM. Codex review MEDIUM round 5 of
-/// Phase 5.
+/// RTTM speaker labels are remapped in **string-sorted** cluster-id
+/// order, matching pyannote's `Annotation.labels()` =
+/// `sorted(_labels, key=str)`. Even when cluster id 1 appears in the
+/// timeline BEFORE cluster id 0, the lower str-sorted id ("0") still
+/// becomes `SPEAKER_00`. Codex review MEDIUM round 6 of Phase 5.
 #[test]
-fn rttm_relabels_clusters_in_encounter_order() {
+fn rttm_relabels_by_str_sorted_cluster_id() {
   let spans = vec![
     RttmSpan {
       cluster: 1,
@@ -255,30 +253,29 @@ fn rttm_relabels_clusters_in_encounter_order() {
     },
   ];
   let lines = spans_to_rttm_lines(&spans, "uri");
-  // First-encountered cluster id (1) → SPEAKER_00.
-  // Second new (0) → SPEAKER_01.
+  // Sorted by str: "0" < "1", so cluster 0 → SPEAKER_00, cluster 1 → SPEAKER_01.
+  // The cluster-1 span emitted first gets SPEAKER_01 (NOT SPEAKER_00).
   assert!(
-    lines[0].contains("SPEAKER_00"),
-    "first span should be SPEAKER_00 (got: {})",
+    lines[0].contains("SPEAKER_01"),
+    "cluster 1 emitted first must still be SPEAKER_01 by sorted-id remap (got: {})",
     lines[0]
   );
   assert!(
-    lines[1].contains("SPEAKER_01"),
-    "second new cluster should be SPEAKER_01 (got: {})",
+    lines[1].contains("SPEAKER_00"),
+    "cluster 0 must be SPEAKER_00 (got: {})",
     lines[1]
   );
-  // Reused cluster_id (1) keeps the SPEAKER_00 label.
   assert!(
-    lines[2].contains("SPEAKER_00"),
-    "reused cluster should keep its first-encounter label (got: {})",
+    lines[2].contains("SPEAKER_01"),
+    "reused cluster 1 keeps SPEAKER_01 (got: {})",
     lines[2]
   );
 }
 
-/// Sanity: when cluster ids are encounter-ordered (pyannote-equivalent
-/// hard_clusters output), the remap is identity.
+/// Sanity: identity case where cluster ids match the sorted label
+/// ordering directly.
 #[test]
-fn rttm_relabel_is_identity_when_already_encounter_ordered() {
+fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
   let spans = vec![
     RttmSpan {
       cluster: 0,
@@ -294,6 +291,37 @@ fn rttm_relabel_is_identity_when_already_encounter_ordered() {
   let lines = spans_to_rttm_lines(&spans, "uri");
   assert!(lines[0].contains("SPEAKER_00"));
   assert!(lines[1].contains("SPEAKER_01"));
+}
+
+/// String-sort edge case: cluster id 10 sorts BEFORE cluster id 2
+/// lexicographically ("10" < "2"). Confirms the str-key ordering
+/// matches `pyannote.core.Annotation.labels()` exactly.
+#[test]
+fn rttm_relabel_str_sort_orders_10_before_2() {
+  let spans = vec![
+    RttmSpan {
+      cluster: 2,
+      start: 0.0,
+      duration: 1.0,
+    },
+    RttmSpan {
+      cluster: 10,
+      start: 1.0,
+      duration: 1.0,
+    },
+  ];
+  let lines = spans_to_rttm_lines(&spans, "uri");
+  // Str-sort: "10" < "2", so cluster 10 → SPEAKER_00, cluster 2 → SPEAKER_01.
+  assert!(
+    lines[0].contains("SPEAKER_01"),
+    "cluster 2 must sort AFTER cluster 10 by str-key (got: {})",
+    lines[0]
+  );
+  assert!(
+    lines[1].contains("SPEAKER_00"),
+    "cluster 10 must sort BEFORE cluster 2 by str-key (got: {})",
+    lines[1]
+  );
 }
 
 #[test]
