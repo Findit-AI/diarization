@@ -228,13 +228,13 @@ fn rejects_count_above_max_cluster_id() {
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
-/// RTTM speaker labels are remapped in **string-sorted** cluster-id
-/// order, matching pyannote's `Annotation.labels()` =
-/// `sorted(_labels, key=str)`. Even when cluster id 1 appears in the
-/// timeline BEFORE cluster id 0, the lower str-sorted id ("0") still
-/// becomes `SPEAKER_00`. Codex review MEDIUM round 6 of Phase 5.
+/// RTTM speaker labels are remapped in **numeric sort order** of
+/// distinct cluster ids: smallest id → `SPEAKER_00`, next →
+/// `SPEAKER_01`, etc. Even when cluster id 1 appears in the timeline
+/// BEFORE cluster id 0, the numerically-smaller id (0) still becomes
+/// `SPEAKER_00`.
 #[test]
-fn rttm_relabels_by_str_sorted_cluster_id() {
+fn rttm_relabels_by_numeric_sorted_cluster_id() {
   let spans = vec![
     RttmSpan {
       cluster: 1,
@@ -293,11 +293,13 @@ fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
   assert!(lines[1].contains("SPEAKER_01"));
 }
 
-/// String-sort edge case: cluster id 10 sorts BEFORE cluster id 2
-/// lexicographically ("10" < "2"). Confirms the str-key ordering
-/// matches `pyannote.core.Annotation.labels()` exactly.
+/// Numeric vs str-sort divergence at ≥ 10. With numeric sort
+/// (intentional scope choice), cluster 2 → SPEAKER_00 and cluster 10
+/// → SPEAKER_01. Pyannote with `sorted(_, key=str)` would order them
+/// the other way. None of the captured fixtures have ≥ 10 alive
+/// clusters, so this is a documented divergence on edge cases only.
 #[test]
-fn rttm_relabel_str_sort_orders_10_before_2() {
+fn rttm_relabel_numeric_sort_orders_2_before_10() {
   let spans = vec![
     RttmSpan {
       cluster: 2,
@@ -311,15 +313,15 @@ fn rttm_relabel_str_sort_orders_10_before_2() {
     },
   ];
   let lines = spans_to_rttm_lines(&spans, "uri");
-  // Str-sort: "10" < "2", so cluster 10 → SPEAKER_00, cluster 2 → SPEAKER_01.
+  // Numeric sort: 2 < 10, so cluster 2 → SPEAKER_00, cluster 10 → SPEAKER_01.
   assert!(
-    lines[0].contains("SPEAKER_01"),
-    "cluster 2 must sort AFTER cluster 10 by str-key (got: {})",
+    lines[0].contains("SPEAKER_00"),
+    "cluster 2 must sort BEFORE cluster 10 numerically (got: {})",
     lines[0]
   );
   assert!(
-    lines[1].contains("SPEAKER_00"),
-    "cluster 10 must sort BEFORE cluster 2 by str-key (got: {})",
+    lines[1].contains("SPEAKER_01"),
+    "cluster 10 must sort AFTER cluster 2 numerically (got: {})",
     lines[1]
   );
 }

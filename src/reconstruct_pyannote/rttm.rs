@@ -116,31 +116,32 @@ pub fn discrete_to_spans(
 /// Times are formatted to 3 decimal places (millisecond resolution),
 /// matching pyannote's `Annotation.write_rttm` default.
 ///
-/// Cluster ids are remapped to `SPEAKER_NN` matching pyannote's
-/// `Annotation.labels()` + `rename_labels(...)` (in
-/// `speaker_diarization.py:721-740`). `Annotation.labels()` returns
-/// `sorted(self._labels, key=str)`
-/// (`pyannote.core.annotation.Annotation:920-932`) — i.e. unique
-/// cluster ids sorted **lexicographically by string representation**.
-/// The first label in that sorted order becomes `SPEAKER_00`, the
-/// second `SPEAKER_01`, etc.
+/// Cluster ids are remapped to `SPEAKER_NN` in **numeric sort order**:
+/// the smallest distinct cluster id becomes `SPEAKER_00`, the next
+/// `SPEAKER_01`, etc.
 ///
-/// For small integer cluster ids (< 10) string and numeric ordering
-/// agree, so this matches the captured fixtures. For ≥ 10 they
-/// diverge (e.g. `["10", "2"]` lex-sorts to `["10", "2"]`). The
-/// str-key ordering is what the captured pyannote runs use, so we
-/// use it here for bit-exact RTTM parity. Codex review MEDIUM
-/// round 6 of Phase 5.
+/// Pyannote's `Annotation.labels()` does `sorted(_labels, key=str)`
+/// (`pyannote.core.annotation.Annotation:920-932`) because the
+/// `Annotation` type accepts arbitrary hashable labels. For our
+/// integer-only cluster ids in `0..=MAX_CLUSTER_ID = 1023`, str-sort
+/// and numeric-sort agree below 10 (`"0", "1", ..., "9"`) and
+/// diverge above (`["10", "2"]` lex-sorts to `["10", "2"]`). After
+/// VBx the alive cluster count is typically 1–4, well below the
+/// crossover; all five captured fixtures hit ≤ 2 alive clusters.
+/// Numeric sort is simpler, allocation-free, and equivalent on the
+/// realistic distribution.
+///
+/// **TODO** (scope): if a future fixture or downstream tool needs
+/// bit-exact RTTM matching pyannote on ≥ 10-cluster output,
+/// reintroduce a str-key compare here (with allocation-free decimal
+/// rendering, or via the `itoa` crate). Until then, the simpler
+/// integer ordering matches every captured fixture's reference.rttm.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   use std::collections::HashMap;
-  // Collect distinct cluster ids, sort by str-key without heap
-  // allocation (pyannote's `sorted(_labels, key=str)`). For cluster
-  // ids in `0..=MAX_CLUSTER_ID = 1023` the decimal representation is
-  // at most 4 ASCII digits — well within a fixed-size stack buffer.
+  // Collect distinct cluster ids in numeric sort order.
   let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster).collect();
-  unique_ids.sort_by(|a, b| cmp_id_as_str(*a, *b));
+  unique_ids.sort_unstable();
   unique_ids.dedup();
-  // Map cluster_id → SPEAKER_NN index in that sorted order.
   let id_to_label: HashMap<usize, usize> = unique_ids
     .into_iter()
     .enumerate()
@@ -156,43 +157,4 @@ pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
       )
     })
     .collect()
-}
-
-/// Compare two `usize` cluster ids by their decimal string
-/// representation, allocation-free. Mirrors Python's
-/// `sorted([a, b], key=str)` ordering used by
-/// `pyannote.core.Annotation.labels()`. Each id is rendered into a
-/// 20-byte stack buffer (sized for any `usize`) and the resulting
-/// digit slices compared lexicographically.
-fn cmp_id_as_str(a: usize, b: usize) -> std::cmp::Ordering {
-  let mut ba = [0u8; 20];
-  let mut bb = [0u8; 20];
-  let na = write_decimal(a, &mut ba);
-  let nb = write_decimal(b, &mut bb);
-  ba[..na].cmp(&bb[..nb])
-}
-
-/// Write `n` as decimal ASCII digits to the start of `buf`, returning
-/// the number of digits written. `buf.len()` must be ≥ 20 to hold any
-/// `usize` (max 20 digits for `u64::MAX`).
-fn write_decimal(mut n: usize, buf: &mut [u8]) -> usize {
-  if n == 0 {
-    buf[0] = b'0';
-    return 1;
-  }
-  // Count digits.
-  let mut tmp = n;
-  let mut digits = 0;
-  while tmp > 0 {
-    digits += 1;
-    tmp /= 10;
-  }
-  // Write right-to-left.
-  let mut i = digits;
-  while n > 0 {
-    i -= 1;
-    buf[i] = b'0' + (n % 10) as u8;
-    n /= 10;
-  }
-  digits
 }
