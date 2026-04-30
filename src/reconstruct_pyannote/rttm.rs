@@ -133,10 +133,12 @@ pub fn discrete_to_spans(
 /// round 6 of Phase 5.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   use std::collections::HashMap;
-  // Collect distinct cluster ids, sort by string representation to
-  // mirror pyannote's `sorted(_labels, key=str)`.
+  // Collect distinct cluster ids, sort by str-key without heap
+  // allocation (pyannote's `sorted(_labels, key=str)`). For cluster
+  // ids in `0..=MAX_CLUSTER_ID = 1023` the decimal representation is
+  // at most 4 ASCII digits — well within a fixed-size stack buffer.
   let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster).collect();
-  unique_ids.sort_by_key(|id| id.to_string());
+  unique_ids.sort_by(|a, b| cmp_id_as_str(*a, *b));
   unique_ids.dedup();
   // Map cluster_id → SPEAKER_NN index in that sorted order.
   let id_to_label: HashMap<usize, usize> = unique_ids
@@ -154,4 +156,43 @@ pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
       )
     })
     .collect()
+}
+
+/// Compare two `usize` cluster ids by their decimal string
+/// representation, allocation-free. Mirrors Python's
+/// `sorted([a, b], key=str)` ordering used by
+/// `pyannote.core.Annotation.labels()`. Each id is rendered into a
+/// 20-byte stack buffer (sized for any `usize`) and the resulting
+/// digit slices compared lexicographically.
+fn cmp_id_as_str(a: usize, b: usize) -> std::cmp::Ordering {
+  let mut ba = [0u8; 20];
+  let mut bb = [0u8; 20];
+  let na = write_decimal(a, &mut ba);
+  let nb = write_decimal(b, &mut bb);
+  ba[..na].cmp(&bb[..nb])
+}
+
+/// Write `n` as decimal ASCII digits to the start of `buf`, returning
+/// the number of digits written. `buf.len()` must be ≥ 20 to hold any
+/// `usize` (max 20 digits for `u64::MAX`).
+fn write_decimal(mut n: usize, buf: &mut [u8]) -> usize {
+  if n == 0 {
+    buf[0] = b'0';
+    return 1;
+  }
+  // Count digits.
+  let mut tmp = n;
+  let mut digits = 0;
+  while tmp > 0 {
+    digits += 1;
+    tmp /= 10;
+  }
+  // Write right-to-left.
+  let mut i = digits;
+  while n > 0 {
+    i -= 1;
+    buf[i] = b'0' + (n % 10) as u8;
+    n /= 10;
+  }
+  digits
 }
