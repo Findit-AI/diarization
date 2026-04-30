@@ -93,6 +93,8 @@ pub mod pipeline;
 
 pub mod reconstruct;
 
+pub mod aggregate;
+
 pub mod offline;
 
 #[cfg(feature = "ort")]

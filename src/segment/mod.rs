@@ -17,8 +17,8 @@ mod model;
 
 pub use error::Error;
 pub use options::{
-  FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS, POWERSET_CLASSES, SAMPLE_RATE_HZ, SAMPLE_RATE_TB,
-  SegmentOptions, WINDOW_SAMPLES,
+  FRAMES_PER_WINDOW, MAX_SPEAKER_SLOTS, POWERSET_CLASSES, PYANNOTE_FRAME_DURATION_S,
+  PYANNOTE_FRAME_STEP_S, SAMPLE_RATE_HZ, SAMPLE_RATE_TB, SegmentOptions, WINDOW_SAMPLES,
 };
 pub use segmenter::Segmenter;
 pub use types::{Action, Event, SpeakerActivity, WindowId};

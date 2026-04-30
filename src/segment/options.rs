@@ -20,6 +20,22 @@ pub const WINDOW_SAMPLES: u32 = 160_000;
 /// Output frames produced per window by the segmentation model.
 pub const FRAMES_PER_WINDOW: usize = 589;
 
+/// Output-frame stride in seconds for pyannote community-1's
+/// segmentation model — the time between successive frame *centers*
+/// in the model's output sliding window. This is **NOT** the same as
+/// `WINDOW_SAMPLES / FRAMES_PER_WINDOW` (which is the *naive* per-
+/// chunk frame spacing); pyannote sets it to a model-specific value
+/// captured from `Inference.aggregate(frames=...)`.
+///
+/// `0.016875 = 270 / 16_000`. Drives the `count` tensor and
+/// `discrete_diarization` output sliding-window grid.
+pub const PYANNOTE_FRAME_STEP_S: f64 = 0.016875;
+
+/// Output-frame receptive-field duration in seconds for pyannote
+/// community-1's segmentation model. Used by `closest_frame` and the
+/// reconstruction-side aggregation. `0.0619375 ≈ 991 / 16_000`.
+pub const PYANNOTE_FRAME_DURATION_S: f64 = 0.0619375;
+
 /// Powerset class count: silence, A, B, C, A+B, A+C, B+C.
 pub const POWERSET_CLASSES: usize = 7;
 
