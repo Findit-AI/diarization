@@ -135,9 +135,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   // round 5 of Phase 5.
   for &c in count {
     if c > MAX_COUNT_PER_FRAME {
-      return Err(Error::Shape(
-        "count entry exceeds MAX_COUNT_PER_FRAME (64)",
-      ));
+      return Err(Error::Shape("count entry exceeds MAX_COUNT_PER_FRAME (64)"));
     }
   }
   for w in [chunks_sw, frames_sw] {
