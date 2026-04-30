@@ -1,0 +1,43 @@
+//! AXPY dispatcher.
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use crate::ops::arch;
+#[cfg(target_arch = "aarch64")]
+use crate::ops::neon_available;
+use crate::ops::scalar;
+#[cfg(target_arch = "x86_64")]
+use crate::ops::{avx2_available, avx512_available};
+
+/// `y[i] += alpha * x[i]`.
+///
+/// `use_simd = false` forces the scalar reference. Otherwise routes
+/// to the best available SIMD backend per arch + runtime detection.
+#[inline]
+#[allow(dead_code)] // Step 3: scaffolded; centroid wiring lands in a future commit.
+pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
+  if use_simd {
+    cfg_select! {
+      target_arch = "aarch64" => {
+        if neon_available() {
+          // SAFETY: `neon_available()` confirmed NEON is on this CPU.
+          unsafe { arch::neon::axpy(y, alpha, x); }
+          return;
+        }
+      },
+      target_arch = "x86_64" => {
+        if avx512_available() {
+          // SAFETY: `avx512_available()` confirmed AVX-512F.
+          unsafe { arch::x86_avx512::axpy(y, alpha, x); }
+          return;
+        }
+        if avx2_available() {
+          // SAFETY: `avx2_available()` confirmed AVX2 + FMA.
+          unsafe { arch::x86_avx2::axpy(y, alpha, x); }
+          return;
+        }
+      },
+      _ => {}
+    }
+  }
+  scalar::axpy(y, alpha, x);
+}

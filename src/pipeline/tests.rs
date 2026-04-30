@@ -82,7 +82,10 @@ fn rejects_zero_column_post_plda() {
     max_iters: 20,
   };
   let result = assign_embeddings(&input);
-  assert!(matches!(result, Err(crate::pipeline::Error::Shape(_))), "got {result:?}");
+  assert!(
+    matches!(result, Err(crate::pipeline::Error::Shape(_))),
+    "got {result:?}"
+  );
 }
 
 /// Zero active embeddings (`num_train == 0`) also takes the fast path —

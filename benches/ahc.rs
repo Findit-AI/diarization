@@ -89,8 +89,8 @@ fn bench(c: &mut Criterion) {
     let inputs = load(name);
     group.bench_with_input(BenchmarkId::from_parameter(name), &inputs, |b, inp| {
       b.iter(|| {
-        let labels = ahc_init(black_box(&inp.train_embeddings), black_box(inp.threshold))
-          .expect("ahc_init");
+        let labels =
+          ahc_init(black_box(&inp.train_embeddings), black_box(inp.threshold)).expect("ahc_init");
         black_box(labels);
       });
     });

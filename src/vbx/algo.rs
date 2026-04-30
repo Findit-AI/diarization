@@ -114,26 +114,16 @@ pub(super) fn classify_elbo_step(delta: f64, prev_elbo: f64, elbo: f64, epsilon:
 pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
   let (rows, cols) = m.shape();
   let mut out = DVector::<f64>::zeros(rows);
+  // Per-row stack buffer for the contiguous slice ops::logsumexp_row
+  // expects. nalgebra is column-major so `m.row(r)` is strided; we
+  // copy into `row_buf` once per row and dispatch.
+  let mut row_buf: Vec<f64> = Vec::with_capacity(cols);
   for r in 0..rows {
-    let row = m.row(r);
-    // Find max for stability shift.
-    let mut max = f64::NEG_INFINITY;
+    row_buf.clear();
     for c in 0..cols {
-      let v = row[c];
-      if v > max {
-        max = v;
-      }
+      row_buf.push(m[(r, c)]);
     }
-    if max == f64::NEG_INFINITY {
-      // All -inf row → result is -inf (matches scipy).
-      out[r] = f64::NEG_INFINITY;
-      continue;
-    }
-    let mut sum_exp = 0.0;
-    for c in 0..cols {
-      sum_exp += (row[c] - max).exp();
-    }
-    out[r] = sum_exp.ln() + max;
+    out[r] = crate::ops::logsumexp_row(&row_buf, true);
   }
   out
 }

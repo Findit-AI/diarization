@@ -87,6 +87,12 @@ name = "segment"
 harness = false
 
 [[bench]]
+path = "benches/ops.rs"
+name = "ops"
+harness = false
+required-features = ["_bench"]
+
+[[bench]]
 path = "benches/vbx.rs"
 name = "vbx"
 harness = false
@@ -130,4 +136,7 @@ single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(all_tests)',
   'cfg(tarpaulin)',
+  'cfg(diarization_force_scalar)',
+  'cfg(diarization_disable_avx2)',
+  'cfg(diarization_disable_avx512)',
 ] }

@@ -63,40 +63,32 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
     return Ok(vec![0]);
   }
 
-  let normed = l2_normalize_rows(embeddings);
-  let mut cond = pdist_euclidean(&normed);
+  let normed_row_major = l2_normalize_to_row_major(embeddings);
+  let mut cond = crate::ops::pdist_euclidean(&normed_row_major, n, d, true);
   let dend = linkage(&mut cond, n, Method::Centroid);
 
   Ok(fcluster_distance_remap(dend.steps(), n, threshold))
 }
 
-/// Row-wise L2 normalization. Each row is divided by its L2 norm.
+/// Pack the row-wise L2-normalized embeddings into a row-major flat
+/// buffer in a single pass. nalgebra's `DMatrix` is column-major, and
+/// [`crate::ops::pdist_euclidean`] (and its eventual SIMD backend)
+/// wants a contiguous row-major slice — so we fuse the normalize +
+/// transpose into one allocation.
+///
 /// Caller has already rejected zero-norm rows.
-fn l2_normalize_rows(m: &DMatrix<f64>) -> DMatrix<f64> {
-  let mut out = m.clone();
-  for r in 0..out.nrows() {
-    let norm = out.row(r).iter().map(|v| v * v).sum::<f64>().sqrt();
-    for c in 0..out.ncols() {
-      out[(r, c)] /= norm;
+fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
+  let (n, d) = m.shape();
+  let mut out = Vec::with_capacity(n * d);
+  for r in 0..n {
+    let mut sq = 0.0;
+    for c in 0..d {
+      let v = m[(r, c)];
+      sq += v * v;
     }
-  }
-  out
-}
-
-/// Condensed pairwise euclidean distance vector — `pdist`-style ordering:
-/// `[d(0,1), d(0,2), ..., d(0,n-1), d(1,2), ..., d(n-2,n-1)]` of length
-/// `n * (n - 1) / 2`. This is the format `kodama::linkage` expects.
-fn pdist_euclidean(rows: &DMatrix<f64>) -> Vec<f64> {
-  let (n, d) = rows.shape();
-  let mut out = Vec::with_capacity(n * (n - 1) / 2);
-  for i in 0..n {
-    for j in (i + 1)..n {
-      let mut sq = 0.0;
-      for c in 0..d {
-        let diff = rows[(i, c)] - rows[(j, c)];
-        sq += diff * diff;
-      }
-      out.push(sq.sqrt());
+    let inv_norm = sq.sqrt().recip();
+    for c in 0..d {
+      out.push(m[(r, c)] * inv_norm);
     }
   }
   out

@@ -220,12 +220,40 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
 
   // ── Stage 6: cdist(embeddings, centroids, metric="cosine") ─────
   // Then `soft_clusters = 2 - e2k_distance`. Per pyannote.
+  //
+  // nalgebra is column-major so `embeddings.row(r)` and
+  // `centroids.row(k)` are strided. `ops::dot` (and its eventual SIMD
+  // backend) wants contiguous slices. We pack all centroid rows into
+  // one flat row-major buffer (`centroid_buf`, length
+  // `num_alive * embed_dim`, single heap alloc) and reuse one
+  // `emb_row` scratch buffer across the inner k-loop.
+  //
+  // `norm_sq` factors are hoisted: `centroid_norm_sq[k]` is a stage-6
+  // constant, `emb_norm_sq` is constant across the inner k-loop.
+  // Without this hoist the triple loop pays for `ops::dot` three times
+  // per (c, s, k) and recomputes the same `||row||²` num_alive times
+  // for embeddings and num_chunks·num_speakers times per centroid.
   let mut soft = vec![DMatrix::<f64>::zeros(num_speakers, num_alive); num_chunks];
+  let mut centroid_buf: Vec<f64> = Vec::with_capacity(num_alive * embed_dim);
+  for k in 0..num_alive {
+    for d in 0..embed_dim {
+      centroid_buf.push(centroids[(k, d)]);
+    }
+  }
+  let centroid_norm_sq: Vec<f64> = centroid_buf
+    .chunks_exact(embed_dim)
+    .map(|row| crate::ops::dot(row, row, true))
+    .collect();
+  let mut emb_row: Vec<f64> = vec![0.0; embed_dim];
   for (c, soft_c) in soft.iter_mut().enumerate() {
     for s in 0..num_speakers {
       let row = c * num_speakers + s;
-      for k in 0..num_alive {
-        let dist = cosine_distance_rows(embeddings, row, &centroids, k);
+      for d in 0..embed_dim {
+        emb_row[d] = embeddings[(row, d)];
+      }
+      let emb_norm_sq = crate::ops::dot(&emb_row, &emb_row, true);
+      for (k, c_row) in centroid_buf.chunks_exact(embed_dim).enumerate() {
+        let dist = cosine_distance_pre_norm(&emb_row, emb_norm_sq, c_row, centroid_norm_sq[k]);
         soft_c[(s, k)] = 2.0 - dist;
       }
     }
@@ -303,20 +331,19 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 /// previous version did — would have let a corrupt zero-vector
 /// embedding tie or beat a real low-similarity match. Codex review
 /// HIGH round 3 of Phase 5.
-fn cosine_distance_rows(a: &DMatrix<f64>, ra: usize, b: &DMatrix<f64>, rb: usize) -> f64 {
-  let cols = a.ncols();
-  debug_assert_eq!(b.ncols(), cols);
-  let mut dot = 0.0;
-  let mut na = 0.0;
-  let mut nb = 0.0;
-  for i in 0..cols {
-    let av = a[(ra, i)];
-    let bv = b[(rb, i)];
-    dot += av * bv;
-    na += av * av;
-    nb += bv * bv;
-  }
-  let denom = na.sqrt() * nb.sqrt();
+///
+/// Cosine distance variant that takes pre-computed `||row||²` for
+/// both inputs. Used by stage 6's hot inner loop where `norm_sq_b` is
+/// constant across the k-iteration and `norm_sq_a` is constant across
+/// the cluster loop — so the caller hoists both out and only pays for
+/// one `ops::dot` per (c, s, k).
+///
+/// Operates on contiguous f64 slices (`row_a`, `row_b`) — the layout
+/// `ops::dot` expects.
+fn cosine_distance_pre_norm(row_a: &[f64], norm_sq_a: f64, row_b: &[f64], norm_sq_b: f64) -> f64 {
+  debug_assert_eq!(row_a.len(), row_b.len());
+  let dot = crate::ops::dot(row_a, row_b, true);
+  let denom = norm_sq_a.sqrt() * norm_sq_b.sqrt();
   if denom == 0.0 {
     return f64::NAN;
   }

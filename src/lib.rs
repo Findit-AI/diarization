@@ -67,6 +67,18 @@ pub mod embed;
 // directly without going through the still-WIP integration.
 pub mod segment;
 
+// Numerical primitives shared across the algorithm modules. Three-tier
+// backend layout (scalar/arch/dispatch) modeled on the colconv crate.
+// Crate-private — algorithm modules call into `ops::*`; downstream
+// callers don't see this layer. `_bench` flips it to `pub` so external
+// benches in `benches/ops.rs` can A/B scalar vs SIMD on the primitives
+// directly.
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod ops;
+#[cfg(not(feature = "_bench"))]
+pub(crate) mod ops;
+
 #[cfg_attr(feature = "_bench", doc(hidden))]
 #[cfg(feature = "_bench")]
 pub mod plda;
