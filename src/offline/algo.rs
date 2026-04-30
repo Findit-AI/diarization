@@ -243,14 +243,28 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   let _ = SP_ALIVE_THRESHOLD; // doc reference
 
   // ── Stage 5: reconstruct → frame-level diarization ──────────────
-  let mut num_clusters = 0;
+  //
+  // Match `reconstruct`'s internal `num_clusters` computation
+  // exactly: it pads up to `max(count)` so the top-K binarization
+  // has enough cluster slots. If we under-count here, the
+  // `discrete_to_spans` assertion `grid.len() == num_frames *
+  // num_clusters` panics for fixtures where `count` peaks higher
+  // than the number of distinct hard-cluster ids.
+  let mut max_cluster_id = -1i32;
   for row in &hard_clusters {
     for &k in row {
-      if k >= 0 && (k as usize) + 1 > num_clusters {
-        num_clusters = (k as usize) + 1;
+      if k > max_cluster_id {
+        max_cluster_id = k;
       }
     }
   }
+  let num_clusters_from_hard = if max_cluster_id < 0 {
+    0
+  } else {
+    (max_cluster_id + 1) as usize
+  };
+  let max_count = count.iter().copied().max().unwrap_or(0) as usize;
+  let num_clusters = num_clusters_from_hard.max(max_count.max(1));
   let recon_input = ReconstructInput {
     segmentations,
     num_chunks,

@@ -70,6 +70,13 @@ kodama = "0.3"
 # buffer — allocation-free.
 itoa = "1"
 
+# Phase 5e: silero VAD for streaming voice-range detection.
+# Production flow: silero gates the heavy diarizer pipeline so we
+# don't run segmentation/embedding on silence. The crate is sister-
+# project at `findit-studio/silero` (path dep until both publish to
+# the same registry).
+silero = { path = "../silero" }
+
 
 [dev-dependencies]
 anyhow = "1"
