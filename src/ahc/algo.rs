@@ -1,4 +1,29 @@
 //! AHC initialization: L2-normalize → centroid linkage → fcluster + remap.
+//!
+//! ## Precision contract w.r.t. SIMD `pdist_euclidean`
+//!
+//! Pairwise distances flow through [`crate::ops::pdist_euclidean`]
+//! with `use_simd = true`. The SIMD backends use FMA + parallel-lane
+//! reduction (see `crate::ops::scalar` module docs) and *do* differ
+//! from the scalar serial sum by O(1e-12) relative on well-conditioned
+//! inputs. Since the threshold cut here is hard `<= threshold`, a
+//! distance landing within ~1e-12 of `threshold` could in principle
+//! flip an AHC merge between scalar and SIMD — Codex adversarial
+//! review MEDIUM (this commit).
+//!
+//! The differential tests in [`crate::ahc::tests`] empirically verify
+//! that scalar-vs-SIMD partition stability holds for:
+//! - random embeddings (50 seeds × N=20, D=128) at the production
+//!   pyannote-community-1 threshold of 0.6;
+//! - constructed embeddings with pairwise distances designed to land
+//!   on the threshold boundary (within ulp-level windows);
+//! - all 5 captured pyannote fixtures (parity tests).
+//!
+//! Callers needing strict cross-architecture bit-identical
+//! partitioning (e.g., golden-RTTM regression diffs across CPUs) must
+//! build with `RUSTFLAGS="--cfg diarization_force_scalar"` to bypass
+//! every SIMD backend. The performance cost on aarch64 is ~25% of the
+//! pipeline (AHC `pdist_euclidean` is the dominant hot path).
 
 use crate::ahc::error::Error;
 use kodama::{Method, Step, linkage};
@@ -32,6 +57,28 @@ use nalgebra::DMatrix;
 /// drive `diarization::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
+  ahc_init_inner(embeddings, threshold, true)
+}
+
+/// Test-only entrypoint: identical to [`ahc_init`] but with the
+/// `use_simd` flag exposed so the differential tests in
+/// [`crate::ahc::tests`] can run scalar-vs-SIMD pdist on identical
+/// inputs and compare the resulting partitions. Production code goes
+/// through [`ahc_init`] which always passes `true`.
+#[cfg(test)]
+pub(super) fn ahc_init_with_simd(
+  embeddings: &DMatrix<f64>,
+  threshold: f64,
+  use_simd: bool,
+) -> Result<Vec<usize>, Error> {
+  ahc_init_inner(embeddings, threshold, use_simd)
+}
+
+fn ahc_init_inner(
+  embeddings: &DMatrix<f64>,
+  threshold: f64,
+  use_simd: bool,
+) -> Result<Vec<usize>, Error> {
   let (n, d) = embeddings.shape();
   if n == 0 {
     return Err(Error::Shape("embeddings must have at least one row"));
@@ -64,7 +111,7 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
   }
 
   let normed_row_major = l2_normalize_to_row_major(embeddings);
-  let mut cond = crate::ops::pdist_euclidean(&normed_row_major, n, d, true);
+  let mut cond = crate::ops::pdist_euclidean(&normed_row_major, n, d, use_simd);
   let dend = linkage(&mut cond, n, Method::Centroid);
 
   Ok(fcluster_distance_remap(dend.steps(), n, threshold))
