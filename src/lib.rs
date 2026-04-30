@@ -89,8 +89,9 @@ pub(crate) mod centroid;
 // into pyannote's full `assign_embeddings` flow. Crate-private until
 // the public API surface is settled.
 pub(crate) mod pipeline;
-// `reconstruct_pyannote` (Phase 5b) ports pyannote's reconstruct +
+// `reconstruct` (Phase 5b) ports pyannote's reconstruct +
 // to_diarization into a per-output-frame discrete-diarization grid.
-// Distinct from the streaming `dia::diarizer::reconstruct` used by
-// the online clusterer. Crate-private until Phase 5c.
-pub(crate) mod reconstruct_pyannote;
+// Distinct from the streaming `dia::diarizer::reconstruct` (a
+// sub-module of `diarizer`) used by the online clusterer. Crate-
+// private until Phase 5c.
+pub(crate) mod reconstruct;

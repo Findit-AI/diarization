@@ -1,6 +1,6 @@
 //! Convert per-frame discrete diarization grid → RTTM-style spans.
 
-use crate::reconstruct_pyannote::algo::SlidingWindow;
+use crate::reconstruct::algo::SlidingWindow;
 
 /// One contiguous turn from the discrete diarization grid.
 #[derive(Debug, Clone, PartialEq)]

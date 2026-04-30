@@ -1,4 +1,4 @@
-//! End-to-end parity test: `dia::reconstruct_pyannote::reconstruct`
+//! End-to-end parity test: `dia::reconstruct::reconstruct`
 //! against pyannote's captured `discrete_diarization` (Phase-0 fixture).
 
 use std::{fs::File, io::BufReader, path::PathBuf};
@@ -8,7 +8,7 @@ use npyz::npz::NpzArchive;
 
 use crate::{
   pipeline::{AssignEmbeddingsInput, assign_embeddings},
-  reconstruct_pyannote::{ReconstructInput, SlidingWindow, reconstruct},
+  reconstruct::{ReconstructInput, SlidingWindow, reconstruct},
 };
 
 fn repo_root() -> PathBuf {
@@ -39,7 +39,7 @@ fn require_fixtures(fixture_dir: &str) {
     .collect();
   assert!(
     missing.is_empty(),
-    "reconstruct_pyannote parity fixtures missing: {missing:?}. \
+    "reconstruct parity fixtures missing: {missing:?}. \
      Re-run `tests/parity/python/capture_intermediates.py` to regenerate."
   );
 }

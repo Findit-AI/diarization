@@ -1,4 +1,4 @@
-//! Errors for `dia::reconstruct_pyannote`.
+//! Errors for `dia::reconstruct`.
 
 use thiserror::Error;
 

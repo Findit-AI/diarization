@@ -1,8 +1,8 @@
-//! Model-free unit tests for `dia::reconstruct_pyannote`.
+//! Model-free unit tests for `dia::reconstruct`.
 
 use crate::{
   hungarian::UNMATCHED,
-  reconstruct_pyannote::{
+  reconstruct::{
     Error, MAX_CLUSTER_ID, ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans,
     reconstruct, spans_to_rttm_lines,
   },

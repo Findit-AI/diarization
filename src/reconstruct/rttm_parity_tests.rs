@@ -8,7 +8,7 @@ use npyz::npz::NpzArchive;
 
 use crate::{
   pipeline::{AssignEmbeddingsInput, assign_embeddings},
-  reconstruct_pyannote::{
+  reconstruct::{
     ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct, spans_to_rttm_lines,
   },
 };

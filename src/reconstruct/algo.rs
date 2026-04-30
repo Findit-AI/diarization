@@ -1,7 +1,7 @@
 //! Reconstruction math: clustered_segmentations + overlap-add aggregate
 //! + top-K binarize.
 
-use crate::{hungarian::UNMATCHED, reconstruct_pyannote::error::Error};
+use crate::{hungarian::UNMATCHED, reconstruct::error::Error};
 
 /// Hard upper bound on the cluster-id range accepted in `hard_clusters`.
 /// Pyannote's diarization pipeline emits ids bounded by the alive
