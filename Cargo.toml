@@ -19,6 +19,13 @@ readme = "README.md"
 [features]
 default = ["ort"]
 ort = ["dep:ort"]
+# Internal feature for benchmarks. Exposes pub(crate) modules
+# (`vbx`, `ahc`, `centroid`, `pipeline`, `reconstruct`, `hungarian`,
+# `plda`) as `pub` so external benches in `benches/*.rs` can call the
+# inner kernels directly. Not part of the public API contract — the
+# `_` prefix marks it as private; downstream callers should reach the
+# pipeline via `Diarizer` once Phase 5c integration lands.
+_bench = []
 # An earlier revision exposed `diarization::plda::RawEmbedding::from_raw_array`
 # and `diarization::plda::PostXvecEmbedding::from_pyannote_capture` behind a
 # public `plda-fixtures` feature, intending it to act as the gate that
@@ -78,6 +85,30 @@ npyz = { version = "0.9", features = ["npz"] }
 path = "benches/segment.rs"
 name = "segment"
 harness = false
+
+[[bench]]
+path = "benches/vbx.rs"
+name = "vbx"
+harness = false
+required-features = ["_bench"]
+
+[[bench]]
+path = "benches/ahc.rs"
+name = "ahc"
+harness = false
+required-features = ["_bench"]
+
+[[bench]]
+path = "benches/centroid.rs"
+name = "centroid"
+harness = false
+required-features = ["_bench"]
+
+[[bench]]
+path = "benches/pipeline.rs"
+name = "pipeline"
+harness = false
+required-features = ["_bench"]
 
 [profile.bench]
 opt-level = 3

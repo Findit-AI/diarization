@@ -60,38 +60,51 @@
 pub mod cluster;
 pub mod diarizer;
 pub mod embed;
-// `plda` is intentionally crate-private in v0.1.0. Phase 1 ships
-// the math (xvec_tf + plda_tf, parity-validated against pyannote)
-// but `RawEmbedding`'s only constructor is `#[cfg(test)]` because
-// any public constructor would have to admit arbitrary `[f32; 256]`
-// — and admitting an L2-normalized vector there silently corrupts
-// downstream VBx (Codex review HIGH, rounds 2–5). The Phase-5
-// integration will own a single typed entry from `EmbedModel`'s
-// raw-output path; that's when `plda` flips back to `pub`.
-pub(crate) mod plda;
-// `vbx` is intentionally crate-private in v0.1.0 for the same
-// reason as `plda`: the math ships here but the public-API
-// integration with `EmbedModel` + `Diarizer` lands in Phase 5.
+// `plda` etc. are intentionally crate-private in v0.1.0. The math
+// ships here but the public-API integration via `Diarizer` lands in
+// Phase 5c. Bench infrastructure (the `_bench` feature) flips them
+// to `pub` so external `benches/*.rs` can call the inner kernels
+// directly without going through the still-WIP integration.
 pub mod segment;
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod plda;
+#[cfg(not(feature = "_bench"))]
+pub(crate) mod plda;
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod vbx;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod vbx;
-// `hungarian` is crate-private for the same reason as `plda`/`vbx`:
-// Phase 3 ships per-chunk constrained Hungarian assignment math,
-// integration lands in Phase 5.
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod hungarian;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod hungarian;
-// `ahc` is crate-private for the same reason as `plda`/`vbx`/`hungarian`:
-// Phase 4 ships AHC initialization (centroid-method linkage + distance
-// fcluster + label remap), integration lands in Phase 5.
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod ahc;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod ahc;
-// `centroid` is crate-private for the same reason: Phase 4 ships the
-// post-VBx weighted centroid math, integration lands in Phase 5.
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod centroid;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod centroid;
-// `pipeline` (Phase 5a) wires PLDA + AHC + VBx + centroid + Hungarian
-// into pyannote's full `assign_embeddings` flow. Crate-private until
-// the public API surface is settled.
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod pipeline;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod pipeline;
-// `reconstruct` (Phase 5b) ports pyannote's reconstruct +
-// to_diarization into a per-output-frame discrete-diarization grid.
-// Distinct from the streaming `diarization::diarizer::reconstruct` (a
-// sub-module of `diarizer`) used by the online clusterer. Crate-
-// private until Phase 5c.
+
+#[cfg_attr(feature = "_bench", doc(hidden))]
+#[cfg(feature = "_bench")]
+pub mod reconstruct;
+#[cfg(not(feature = "_bench"))]
 pub(crate) mod reconstruct;
