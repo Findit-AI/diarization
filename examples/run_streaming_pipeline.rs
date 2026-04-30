@@ -8,9 +8,7 @@
 //! ```
 
 use diarization::{
-  embed::EmbedModel,
-  plda::PldaTransform,
-  segment::SegmentModel,
+  embed::EmbedModel, plda::PldaTransform, segment::SegmentModel,
   streaming::StreamingDiarizationPipeline,
 };
 use silero::Session as VadSession;

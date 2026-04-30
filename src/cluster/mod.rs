@@ -1,5 +1,6 @@
-//! Online streaming speaker clustering ([`Clusterer`]) plus offline batch
-//! clustering ([`cluster_offline`]).
+//! Speaker clustering — online streaming ([`Clusterer`]), offline batch
+//! ([`cluster_offline`]), and the pyannote `cluster_vbx`-pipeline
+//! primitives ([`ahc`], [`vbx`], [`centroid`], [`hungarian`]).
 //!
 //! # Online path
 //! [`Clusterer`] accepts one embedding at a time and maintains a set of
@@ -14,6 +15,19 @@
 //! Average linkage) or [`spectral`](OfflineMethod::Spectral) (default;
 //! eigengap-K detection + K-means++ + Lloyd refinement, byte-deterministic
 //! via [`ChaCha8Rng`](rand_chacha::ChaCha8Rng)).
+//!
+//! # Pyannote `cluster_vbx` primitives
+//! The [`ahc`], [`vbx`], [`centroid`], and [`hungarian`] submodules are
+//! the algorithm-level building blocks of the pyannote
+//! `clustering.VBxClustering` pipeline. They're orchestrated by
+//! [`crate::pipeline::assign_embeddings`] and
+//! [`crate::offline::diarize_offline`]. Direct use is uncommon — the
+//! pipeline / offline entrypoints are the supported API surface.
+
+pub mod ahc;
+pub mod centroid;
+pub mod hungarian;
+pub mod vbx;
 
 mod error;
 mod options;

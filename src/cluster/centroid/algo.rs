@@ -1,7 +1,7 @@
 //! Weighted centroid computation: `W.T @ X / W.sum(0).T`, where
 //! `W = q[:, sp > sp_threshold]`.
 
-use crate::centroid::error::Error;
+use crate::cluster::centroid::error::Error;
 use nalgebra::{DMatrix, DVector};
 
 /// Pyannote's hardcoded `sp > 1e-7` filter (clustering.py:619). Speakers

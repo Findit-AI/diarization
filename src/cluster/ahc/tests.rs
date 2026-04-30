@@ -1,10 +1,10 @@
-//! Model-free unit tests for `diarization::ahc`.
+//! Model-free unit tests for `diarization::cluster::ahc`.
 //!
 //! Heavy parity against pyannote's captured `ahc_init_labels.npy` lives
 //! in `src/ahc/parity_tests.rs`. This module covers smaller invariants
 //! that should hold for any input.
 
-use crate::ahc::{Error, ahc_init};
+use crate::cluster::ahc::{Error, ahc_init};
 use nalgebra::DMatrix;
 
 #[test]
@@ -222,7 +222,7 @@ fn deterministic_on_repeated_calls() {
 /// `threshold` could flip a merge. These tests empirically check the
 /// risk for production-shaped inputs.
 mod simd_partition_stability {
-  use crate::ahc::algo::ahc_init_with_simd;
+  use crate::cluster::ahc::algo::ahc_init_with_simd;
   use nalgebra::DMatrix;
   use rand::{SeedableRng, prelude::*};
   use rand_chacha::ChaCha20Rng;

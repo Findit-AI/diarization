@@ -25,7 +25,7 @@ use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
 use crate::{
-  hungarian::UNMATCHED,
+  cluster::hungarian::UNMATCHED,
   pipeline::{AssignEmbeddingsInput, assign_embeddings},
 };
 

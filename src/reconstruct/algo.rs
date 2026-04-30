@@ -1,7 +1,7 @@
 //! Reconstruction math: clustered_segmentations + overlap-add aggregate
 //! + top-K binarize.
 
-use crate::{hungarian::UNMATCHED, reconstruct::error::Error};
+use crate::{cluster::hungarian::UNMATCHED, reconstruct::error::Error};
 
 /// Hard upper bound on the cluster-id range accepted in `hard_clusters`.
 /// Pyannote's diarization pipeline emits ids bounded by the alive
@@ -170,7 +170,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   // upstream model corruption (torch nan-prop), and a silent fallback
   // here lets a degraded inference dependency produce plausible-but-
   // wrong RTTM output. Surfacing it as a clear typed error matches the
-  // Phase 3 round-2 decision for `diarization::hungarian` (±inf rejection at the
+  // Phase 3 round-2 decision for `diarization::cluster::hungarian` (±inf rejection at the
   // solver boundary). Codex review MEDIUM round 2 of Phase 5.
   for &v in segmentations {
     if !v.is_finite() {

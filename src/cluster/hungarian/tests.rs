@@ -1,10 +1,10 @@
-//! Model-free unit tests for `diarization::hungarian`.
+//! Model-free unit tests for `diarization::cluster::hungarian`.
 //!
 //! Heavy parity against pyannote's captured `hard_clusters` lives in
 //! `src/hungarian/parity_tests.rs`. This module covers smaller invariants
 //! that should hold for any input.
 
-use crate::hungarian::{Error, UNMATCHED, constrained_argmax};
+use crate::cluster::hungarian::{Error, UNMATCHED, constrained_argmax};
 use nalgebra::DMatrix;
 
 /// Run a single chunk through the batched API. Most unit tests work on

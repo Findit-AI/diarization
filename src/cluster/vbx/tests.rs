@@ -1,4 +1,4 @@
-//! Model-free unit tests for `diarization::vbx`.
+//! Model-free unit tests for `diarization::cluster::vbx`.
 //!
 //! Heavy parity tests against pyannote's captured outputs live in
 //! `src/vbx/parity_tests.rs`. This module covers smaller, model-free
@@ -44,7 +44,7 @@ fn logsumexp_rows_all_neg_inf_returns_neg_inf() {
   assert!(lse[0].is_infinite() && lse[0] < 0.0, "got {}", lse[0]);
 }
 
-use crate::vbx::{Error, vbx_iterate};
+use crate::cluster::vbx::{Error, vbx_iterate};
 use nalgebra::DVector;
 
 /// Deterministic non-uniform qinit for tests. Each row `tt` is peaked
@@ -614,7 +614,7 @@ fn classify_elbo_step_still_rejects_material_regression_at_large_magnitude() {
 // assignment. `VbxOutput::stop_reason` makes the distinction
 // observable at the type level.
 
-use crate::vbx::StopReason;
+use crate::cluster::vbx::StopReason;
 
 /// `max_iters = 1`: the convergence check requires `ii > 0`, so a
 /// 1-iter run can never fire the `Converged` branch. The loop ends

@@ -21,12 +21,12 @@
 //! [`crate::ops::differential_tests`] enforces the bit-identical
 //! contract on aarch64 and a 1e-14 relative bound elsewhere.
 //!
-//! [`crate::ahc::tests::simd_partition_stability`] additionally
+//! [`crate::cluster::ahc::tests::simd_partition_stability`] additionally
 //! verifies that for 50 random seeds (N=20, D=128) and constructed
 //! threshold-adjacent inputs, the AHC partition is identical between
 //! scalar and SIMD even at threshold offsets of ±1e-13.
 
-use crate::ahc::error::Error;
+use crate::cluster::ahc::error::Error;
 use kodama::{Method, Step, linkage};
 use nalgebra::DMatrix;
 
@@ -55,7 +55,7 @@ use nalgebra::DMatrix;
 /// Pyannote short-circuits AHC entirely when `train_embeddings.shape[0]
 /// < 2` (`clustering.py:588-594`). This module-level boundary allows
 /// `N=1` and returns `vec![0]` (one cluster, one member) so callers can
-/// drive `diarization::ahc::ahc_init` uniformly without the special case
+/// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
   // Production: SIMD on. Scalar and NEON now produce bit-identical
@@ -68,7 +68,7 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
 
 /// Test-only entrypoint: identical to [`ahc_init`] but with the
 /// `use_simd` flag exposed so the differential tests in
-/// [`crate::ahc::tests`] can run scalar-vs-SIMD pdist on identical
+/// [`crate::cluster::ahc::tests`] can run scalar-vs-SIMD pdist on identical
 /// inputs and compare the resulting partitions. Production code goes
 /// through [`ahc_init`] which always passes `true`.
 #[cfg(test)]

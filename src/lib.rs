@@ -81,14 +81,6 @@ pub(crate) mod ops;
 
 pub mod plda;
 
-pub mod vbx;
-
-pub mod hungarian;
-
-pub mod ahc;
-
-pub mod centroid;
-
 pub mod pipeline;
 
 pub mod reconstruct;

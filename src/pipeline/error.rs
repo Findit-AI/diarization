@@ -13,18 +13,18 @@ pub enum Error {
   /// `min_active_ratio` falls outside `(0.0, 1.0]`.
   #[error("pipeline: invalid min_active_ratio (must be in (0, 1]): {0}")]
   InvalidActiveRatio(f64),
-  /// Propagated from `diarization::ahc`.
+  /// Propagated from `diarization::cluster::ahc`.
   #[error("pipeline: ahc: {0}")]
-  Ahc(#[from] crate::ahc::Error),
-  /// Propagated from `diarization::vbx`.
+  Ahc(#[from] crate::cluster::ahc::Error),
+  /// Propagated from `diarization::cluster::vbx`.
   #[error("pipeline: vbx: {0}")]
-  Vbx(#[from] crate::vbx::Error),
-  /// Propagated from `diarization::centroid`.
+  Vbx(#[from] crate::cluster::vbx::Error),
+  /// Propagated from `diarization::cluster::centroid`.
   #[error("pipeline: centroid: {0}")]
-  Centroid(#[from] crate::centroid::Error),
-  /// Propagated from `diarization::hungarian`.
+  Centroid(#[from] crate::cluster::centroid::Error),
+  /// Propagated from `diarization::cluster::hungarian`.
   #[error("pipeline: hungarian: {0}")]
-  Hungarian(#[from] crate::hungarian::Error),
+  Hungarian(#[from] crate::cluster::hungarian::Error),
   /// Propagated from `diarization::plda`.
   #[error("pipeline: plda: {0}")]
   Plda(#[from] crate::plda::Error),

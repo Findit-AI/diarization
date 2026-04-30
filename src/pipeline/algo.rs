@@ -1,11 +1,13 @@
 //! Pyannote `cluster_vbx` flow stages 2–7 wired end-to-end.
 
 use crate::{
-  ahc::ahc_init,
-  centroid::{SP_ALIVE_THRESHOLD, weighted_centroids},
-  hungarian::{UNMATCHED, constrained_argmax},
+  cluster::{
+    ahc::ahc_init,
+    centroid::{SP_ALIVE_THRESHOLD, weighted_centroids},
+    hungarian::{UNMATCHED, constrained_argmax},
+    vbx::{StopReason, vbx_iterate},
+  },
   pipeline::error::Error,
-  vbx::{StopReason, vbx_iterate},
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -60,7 +62,7 @@ pub struct AssignEmbeddingsInput<'a> {
 /// Returns `Vec<Vec<i32>>` of length `num_chunks`; each inner vector is
 /// length `num_speakers`. Entries are alive-cluster indices in the
 /// reduced (`sp > SP_ALIVE_THRESHOLD`) cluster space, or
-/// [`crate::hungarian::UNMATCHED`] = `-2` for speakers with no
+/// [`crate::cluster::hungarian::UNMATCHED`] = `-2` for speakers with no
 /// surviving cluster.
 ///
 /// # Speaker-count constraints (currently unsupported)
@@ -243,7 +245,8 @@ fn assign_embeddings_inner(
   // through the `true` path; the cfg branch compiles to the same
   // call.
   #[cfg(test)]
-  let ahc_clusters = crate::ahc::algo::ahc_init_with_simd(&train_embeddings, threshold, use_simd)?;
+  let ahc_clusters =
+    crate::cluster::ahc::algo::ahc_init_with_simd(&train_embeddings, threshold, use_simd)?;
   #[cfg(not(test))]
   let ahc_clusters = {
     let _ = use_simd;
@@ -255,8 +258,9 @@ fn assign_embeddings_inner(
   let num_init = ahc_clusters.iter().copied().max().expect("num_train >= 2") + 1;
   let qinit = build_qinit(&ahc_clusters, num_init);
   #[cfg(test)]
-  let vbx_out =
-    crate::vbx::algo::vbx_iterate_with_simd(post_plda, phi, &qinit, fa, fb, max_iters, use_simd)?;
+  let vbx_out = crate::cluster::vbx::algo::vbx_iterate_with_simd(
+    post_plda, phi, &qinit, fa, fb, max_iters, use_simd,
+  )?;
   #[cfg(not(test))]
   let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason == StopReason::MaxIterationsReached {
@@ -268,7 +272,7 @@ fn assign_embeddings_inner(
 
   // ── Stage 5: drop sp-squashed clusters, compute centroids ───────
   #[cfg(test)]
-  let centroids = crate::centroid::algo::weighted_centroids_with_simd(
+  let centroids = crate::cluster::centroid::algo::weighted_centroids_with_simd(
     &vbx_out.gamma,
     &vbx_out.pi,
     &train_embeddings,
@@ -392,7 +396,7 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 /// finite vectors.
 ///
 /// Zero-norm rows return `NaN` (matching scipy's 0/0 behavior). Stage
-/// 7's `diarization::hungarian::constrained_argmax` rewrites NaN to the global
+/// 7's `diarization::cluster::hungarian::constrained_argmax` rewrites NaN to the global
 /// nanmin via `np.nan_to_num`, so a zero-norm active row gets the
 /// worst possible cost and is NOT preferred over genuinely-similar
 /// embeddings. Returning `1.0` (mid-similarity) instead — as the

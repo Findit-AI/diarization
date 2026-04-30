@@ -1,7 +1,7 @@
 //! Phase 5c offline diarization orchestrator.
 
 use crate::{
-  centroid::SP_ALIVE_THRESHOLD,
+  cluster::centroid::SP_ALIVE_THRESHOLD,
   embed::EMBEDDING_DIM,
   pipeline::{AssignEmbeddingsInput, assign_embeddings},
   plda::{PldaTransform, RawEmbedding},

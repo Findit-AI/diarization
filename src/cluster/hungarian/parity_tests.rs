@@ -1,4 +1,4 @@
-//! Parity test for `diarization::hungarian::constrained_argmax` against pyannote's
+//! Parity test for `diarization::cluster::hungarian::constrained_argmax` against pyannote's
 //! captured `hard_clusters` (Phase-0 fixture).
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/clustering.npz` and asserts that
@@ -12,7 +12,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 
-use crate::hungarian::constrained_argmax;
+use crate::cluster::hungarian::constrained_argmax;
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1,9 +1,9 @@
-//! Model-free unit tests for `diarization::centroid`.
+//! Model-free unit tests for `diarization::cluster::centroid`.
 //!
 //! Heavy parity against pyannote's captured `centroids` lives in
 //! `src/centroid/parity_tests.rs`.
 
-use crate::centroid::{Error, SP_ALIVE_THRESHOLD, weighted_centroids};
+use crate::cluster::centroid::{Error, SP_ALIVE_THRESHOLD, weighted_centroids};
 use nalgebra::{DMatrix, DVector};
 
 #[test]

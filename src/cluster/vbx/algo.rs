@@ -1,6 +1,6 @@
 //! VBx variational EM iterations.
 
-use crate::vbx::error::Error;
+use crate::cluster::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
 /// Why the EM loop stopped. Lets callers distinguish a converged

@@ -27,7 +27,9 @@ fn read_npz<T: npyz::Deserialize>(
 ) -> Result<(Vec<T>, Vec<u64>), Box<dyn std::error::Error>> {
   let f = File::open(path)?;
   let mut z = NpzArchive::new(BufReader::new(f))?;
-  let npy = z.by_name(key)?.ok_or_else(|| format!("missing key {key}"))?;
+  let npy = z
+    .by_name(key)?
+    .ok_or_else(|| format!("missing key {key}"))?;
   let shape = npy.shape().to_vec();
   let data: Vec<T> = npy.into_vec()?;
   Ok((data, shape))
@@ -58,8 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let (frame_start, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "frame_start")?;
   let (frame_dur, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "frame_duration")?;
   let (frame_step, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "frame_step")?;
-  let (min_dur_off, _) =
-    read_npz::<f64>(&base.join("reconstruction.npz"), "min_duration_off")?;
+  let (min_dur_off, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "min_duration_off")?;
   let chunks_sw = SlidingWindow {
     start: chunk_start[0],
     duration: chunk_dur[0],

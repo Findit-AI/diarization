@@ -40,11 +40,14 @@ pub struct StreamingPipelineConfig {
   pub diarization: OwnedPipelineConfig,
   /// Speaker-bank cosine threshold for cross-range identity match.
   /// Speakers with cosine similarity `>= threshold` to a bank
-  /// centroid are considered the same speaker. Default `0.6` is
-  /// loose enough to track speakers across pauses while strict
-  /// enough to keep distinct speakers separate. Tune up to be more
-  /// conservative (more new speakers), down to be more aggressive
-  /// (more merging).
+  /// centroid are considered the same speaker. Default `0.45` is
+  /// tuned for VAD-gated diarization where each voice range's
+  /// per-cluster centroid is a noisy estimate (gathered from a
+  /// single voice range, possibly only a few seconds of speech).
+  /// Tighter thresholds (0.6+) over-fragment speakers across ranges;
+  /// looser thresholds (0.3) merge distinct speakers. Tune up if
+  /// you see false speaker merges, down if you see speaker
+  /// fragmentation.
   pub speaker_match_threshold: f32,
 }
 
@@ -66,6 +69,9 @@ impl Default for StreamingPipelineConfig {
     Self {
       vad,
       diarization: OwnedPipelineConfig::default(),
+      // Conservative default; per-range centroids are noisy
+      // estimates from short speech segments. Tune empirically per
+      // deployment audio.
       speaker_match_threshold: 0.6,
     }
   }
@@ -175,11 +181,14 @@ impl StreamingDiarizationPipeline {
     // process them inline because the segmenter callback does not
     // own access to seg_model/embed_model.
     let mut emitted_segments: Vec<SpeechSegment> = Vec::new();
-    self
-      .vad_segmenter
-      .process_samples(&mut self.vad_session, &mut self.vad_stream, samples, |s| {
+    self.vad_segmenter.process_samples(
+      &mut self.vad_session,
+      &mut self.vad_stream,
+      samples,
+      |s| {
         emitted_segments.push(s);
-      })?;
+      },
+    )?;
 
     for seg in &emitted_segments {
       self.diarize_segment(seg_model, embed_model, plda, seg, &mut emit)?;
@@ -283,7 +292,13 @@ impl StreamingDiarizationPipeline {
     // padding doesn't carry diarizable signal anyway.
     let avail = self.audio_buffer.len().saturating_sub(offset);
     let len = want_len.min(avail);
-    Ok(self.audio_buffer.range(offset..offset + len).copied().collect())
+    Ok(
+      self
+        .audio_buffer
+        .range(offset..offset + len)
+        .copied()
+        .collect(),
+    )
   }
 
   fn trim_audio_to(&mut self, sample: u64) {
@@ -387,15 +402,17 @@ impl StreamingDiarizationPipeline {
 
     // Emit one span per (cluster, span), in start-time order.
     let mut sorted: Vec<&crate::reconstruct::RttmSpan> = out.spans.iter().collect();
-    sorted.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+      a.start
+        .partial_cmp(&b.start)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for span in sorted {
       let &(speaker_id, is_new_speaker) = cluster_to_global
         .get(&span.cluster)
         .ok_or(StreamingError::Shape("cluster missing from global map"))?;
-      let span_start_abs =
-        range_start + (span.start * sr) as u64;
-      let span_end_abs =
-        range_start + ((span.start + span.duration) * sr) as u64;
+      let span_start_abs = range_start + (span.start * sr) as u64;
+      let span_end_abs = range_start + ((span.start + span.duration) * sr) as u64;
       emit(StreamingDiarizedSpan {
         start_sample: span_start_abs,
         end_sample: span_end_abs,
@@ -414,11 +431,7 @@ impl StreamingDiarizationPipeline {
     let mut best_idx: Option<usize> = None;
     let mut best_sim = self.config.speaker_match_threshold;
     for (i, e) in self.speaker_bank.iter().enumerate() {
-      let sim: f32 = arr
-        .iter()
-        .zip(e.centroid.iter())
-        .map(|(a, b)| a * b)
-        .sum();
+      let sim: f32 = arr.iter().zip(e.centroid.iter()).map(|(a, b)| a * b).sum();
       if sim > best_sim {
         best_sim = sim;
         best_idx = Some(i);

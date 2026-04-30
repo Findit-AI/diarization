@@ -1,4 +1,4 @@
-//! Parity test for `diarization::ahc::ahc_init` against pyannote's captured
+//! Parity test for `diarization::cluster::ahc::ahc_init` against pyannote's captured
 //! `ahc_init_labels.npy` (Phase-0 fixture).
 //!
 //! Loads:
@@ -20,7 +20,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 
-use crate::ahc::ahc_init;
+use crate::cluster::ahc::ahc_init;
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -23,8 +23,10 @@ fn read_npz_array<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, V
 
 fn run_count_parity(fixture_dir: &str) {
   let base = format!("tests/parity/fixtures/{fixture_dir}");
-  let (seg_flat_f32, seg_shape) =
-    read_npz_array::<f32>(&fixture(&format!("{base}/segmentations.npz")), "segmentations");
+  let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(
+    &fixture(&format!("{base}/segmentations.npz")),
+    "segmentations",
+  );
   let num_chunks = seg_shape[0] as usize;
   let num_frames_per_chunk = seg_shape[1] as usize;
   let num_speakers = seg_shape[2] as usize;
@@ -70,7 +72,8 @@ fn run_count_parity(fixture_dir: &str) {
     }
   }
   assert_eq!(
-    mismatched, 0,
+    mismatched,
+    0,
     "{fixture_dir}: {mismatched}/{n} count entries diverge from captured pyannote — \
      bit-exact match expected. First mismatch at index {first:?}",
     n = computed.len(),

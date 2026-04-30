@@ -36,7 +36,7 @@
 //! optimal matching is returned without locking in a specific label
 //! permutation.
 
-use crate::hungarian::error::Error;
+use crate::cluster::hungarian::error::Error;
 use nalgebra::DMatrix;
 use ordered_float::NotNan;
 use pathfinding::prelude::{Matrix, kuhn_munkres};

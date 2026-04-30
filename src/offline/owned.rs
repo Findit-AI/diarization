@@ -2,7 +2,7 @@
 #![allow(
   clippy::manual_div_ceil,
   clippy::needless_range_loop,
-  clippy::useless_vec,
+  clippy::useless_vec
 )]
 //!
 //! `OwnedDiarizationPipeline` is the speakrs-comparable batch

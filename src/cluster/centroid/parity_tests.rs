@@ -1,4 +1,4 @@
-//! Parity test for `diarization::centroid::weighted_centroids` against
+//! Parity test for `diarization::cluster::centroid::weighted_centroids` against
 //! pyannote's captured `clustering.npz['centroids']` (Phase-0 fixture).
 //!
 //! Loads:
@@ -16,7 +16,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::centroid::{SP_ALIVE_THRESHOLD, weighted_centroids};
+use crate::cluster::centroid::{SP_ALIVE_THRESHOLD, weighted_centroids};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

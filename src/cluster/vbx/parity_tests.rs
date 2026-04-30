@@ -1,4 +1,4 @@
-//! Parity tests for `diarization::vbx` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::cluster::vbx` against the Phase-0 captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{plda_embeddings, vbx_state}.npz`
 //! and asserts that `vbx_iterate(post_plda, phi, qinit, fa, fb, max_iters)`
@@ -15,7 +15,7 @@ use std::{fs::File, io::BufReader, path::PathBuf};
 use nalgebra::{DMatrix, DVector};
 use npyz::npz::NpzArchive;
 
-use crate::vbx::{StopReason, vbx_iterate};
+use crate::cluster::vbx::{StopReason, vbx_iterate};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))

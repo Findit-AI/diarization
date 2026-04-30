@@ -1,7 +1,7 @@
 //! Model-free unit tests for `diarization::reconstruct`.
 
 use crate::{
-  hungarian::UNMATCHED,
+  cluster::hungarian::UNMATCHED,
   reconstruct::{
     Error, MAX_CLUSTER_ID, ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans,
     reconstruct, spans_to_rttm_lines,
