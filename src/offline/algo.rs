@@ -153,8 +153,16 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   }
 
   // ── Stage 1: filter active (chunk, speaker) pairs ──────────────
-  // Pyannote's filter_embeddings: a (chunk, speaker) pair is active
-  // iff its segmentation column has any non-zero entry.
+  //
+  // Pyannote 4.0.4's `clustering.VBxClustering.filter_embeddings`
+  // keeps every (chunk, speaker) pair whose segmentation column has
+  // any non-zero entry; it primarily rejects NaN embeddings (which
+  // we already validate at the boundary). We mirror that contract.
+  //
+  // (Speakrs's `pipeline/tests.rs:46-75` shows a stricter binarize
+  // + clean-frames criterion, but that's a test helper for an older
+  // pyannote version. Captured pyannote-4.0.4 fixtures' train
+  // indices match the simple `sum > 0` rule exactly.)
   let mut train_chunk_idx: Vec<usize> = Vec::new();
   let mut train_speaker_idx: Vec<usize> = Vec::new();
   for c in 0..num_chunks {
