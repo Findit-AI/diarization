@@ -75,12 +75,13 @@ where
   (data, shape)
 }
 
-#[test]
-fn ahc_init_matches_pyannote_ahc_init_labels() {
+fn run_ahc_parity(fixture_dir: &str) {
   require_fixtures();
 
+  let base = format!("tests/parity/fixtures/{fixture_dir}");
+
   // Load raw embeddings (3D: chunks × speakers × dim).
-  let raw_path = fixture("tests/parity/fixtures/01_dialogue/raw_embeddings.npz");
+  let raw_path = fixture(&format!("{base}/raw_embeddings.npz"));
   let (raw_flat, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
   assert_eq!(raw_shape.len(), 3, "raw embeddings must be 3D");
   let num_chunks = raw_shape[0] as usize;
@@ -91,7 +92,7 @@ fn ahc_init_matches_pyannote_ahc_init_labels() {
   // `train_chunk_idx[i]` and `train_speaker_idx[i]` together pick a row
   // out of the (chunks × speakers, dim) flattened raw embedding tensor —
   // matching pyannote's `filter_embeddings` projection.
-  let plda_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
+  let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (chunk_idx, _) = read_npz_array::<i64>(&plda_path, "train_chunk_idx");
   let (speaker_idx, _) = read_npz_array::<i64>(&plda_path, "train_speaker_idx");
   assert_eq!(
@@ -117,11 +118,11 @@ fn ahc_init_matches_pyannote_ahc_init_labels() {
   }
 
   // Load threshold + ground-truth labels.
-  let state_path = fixture("tests/parity/fixtures/01_dialogue/ahc_state.npz");
+  let state_path = fixture(&format!("{base}/ahc_state.npz"));
   let (threshold_data, _) = read_npz_array::<f64>(&state_path, "threshold");
   let threshold = threshold_data[0];
 
-  let labels_path = fixture("tests/parity/fixtures/01_dialogue/ahc_init_labels.npy");
+  let labels_path = fixture(&format!("{base}/ahc_init_labels.npy"));
   let (want_labels_i64, want_shape) = read_npy_array::<i64>(&labels_path);
   assert_eq!(want_shape.len(), 1);
   assert_eq!(want_shape[0] as usize, num_train);
@@ -137,26 +138,49 @@ fn ahc_init_matches_pyannote_ahc_init_labels() {
   // canonicalize the order. Partition equality (which two leaves end
   // up in the same cluster) is the correctness invariant that matters
   // for downstream VBx + Diarizer.
-  //
-  // Note: Phase 5 will need to either match scipy's exact label order
-  // (for bit-exact qinit parity) or accept column-permuted qinit. For
-  // Phase 4 standalone, canonicalizing both via encounter-order makes
-  // the comparison rigorous on the partition without locking in
-  // scipy's traversal order.
   let got_canon = canonicalize_to_encounter_order(&got);
   let want_canon = canonicalize_to_encounter_order(&want);
   assert_eq!(
-    got_canon,
-    want_canon,
-    "ahc_init partition diverged from pyannote (first 20 got vs want canonicalized: {:?} vs {:?}; threshold={threshold})",
+    got_canon, want_canon,
+    "{fixture_dir}: ahc_init partition diverged from pyannote (first 20 got vs want canonicalized: {:?} vs {:?}; threshold={threshold})",
     &got_canon[..20.min(got_canon.len())],
     &want_canon[..20.min(want_canon.len())],
   );
 
   let unique_count = want_canon.iter().copied().max().unwrap() + 1;
   eprintln!(
-    "[parity_ahc] {num_train} labels: partition matches pyannote (k={unique_count}, threshold={threshold})"
+    "[parity_ahc] {fixture_dir}: {num_train} labels match pyannote (k={unique_count}, threshold={threshold})"
   );
+}
+
+#[test]
+fn ahc_init_matches_pyannote_01_dialogue() {
+  run_ahc_parity("01_dialogue");
+}
+
+#[test]
+fn ahc_init_matches_pyannote_02_pyannote_sample() {
+  run_ahc_parity("02_pyannote_sample");
+}
+
+#[test]
+fn ahc_init_matches_pyannote_03_dual_speaker() {
+  run_ahc_parity("03_dual_speaker");
+}
+
+#[test]
+fn ahc_init_matches_pyannote_04_three_speaker() {
+  run_ahc_parity("04_three_speaker");
+}
+
+#[test]
+fn ahc_init_matches_pyannote_05_four_speaker() {
+  run_ahc_parity("05_four_speaker");
+}
+
+#[test]
+fn ahc_init_matches_pyannote_06_long_recording() {
+  run_ahc_parity("06_long_recording");
 }
 
 /// Remap labels to encounter-order: the first label seen becomes 0,
