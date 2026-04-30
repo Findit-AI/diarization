@@ -154,7 +154,59 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run test
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features loom
+      run: cargo hack test --feature-powerset --exclude-no-default-features
+
+  # AVX2 + FMA correctness via Intel SDE. GH free runners may have AVX2
+  # natively, but our dispatcher prefers AVX-512F on hosts that have it
+  # — which would skip the AVX2 backend entirely. SDE pinned to a
+  # Haswell CPU model emulates AVX2 + FMA without AVX-512, forcing the
+  # AVX2 branch under emulation. Codex CI sweep.
+  avx2-sde:
+    name: AVX2 (Intel SDE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sde-avx2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sde-avx2-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Run AVX2 SIMD tests under SDE
+        run: bash ci/sde_avx2.sh
+
+  # AVX-512F correctness via Intel SDE. Free GitHub runners are AMD
+  # EPYC Milan (no AVX-512) or older Intel Xeons — neither has AVX-512
+  # reliably. Without this job, a reduction-or-load mistake in the
+  # unsafe AVX-512 path would only surface on production AVX-512 hosts
+  # (Sapphire Rapids, Zen 4, etc.). SDE emulates AVX-512 in software
+  # so the dispatcher picks the AVX-512 path under emulation and the
+  # differential tests in `ops::` exercise it. Codex CI sweep.
+  avx512-sde:
+    name: AVX-512 (Intel SDE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sde-avx512-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sde-avx512-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Run AVX-512 SIMD tests under SDE
+        run: bash ci/sde_avx512.sh
 
   sanitizer:
     name: sanitizer
@@ -250,31 +302,11 @@ jobs:
         run: |
           bash ci/miri_sb.sh "${{ matrix.target }}"
 
-  loom:
-    name: loom
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-loom-
-      - name: Install Rust
-        run: rustup update nightly --no-self-update && rustup default nightly
-      - name: Loom tests
-        run: cargo test --tests --features loom
+  # The previous `loom` job was carried over from the colconv ci.yml
+  # template but never wired — diarization has no concurrency primitives
+  # to verify with `loom`. Cargo would have rejected `--features loom`
+  # on every run because no such feature exists in `Cargo.toml`. Removed
+  # rather than adding a placeholder feature with no actual loom tests.
 
   # valgrind:
   #   name: valgrind
@@ -315,7 +347,10 @@ jobs:
       - cross
       - test
       - sanitizer
-      - loom
+      - miri-tb
+      - miri-sb
+      - avx2-sde
+      - avx512-sde
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
