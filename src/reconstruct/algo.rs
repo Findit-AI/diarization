@@ -121,6 +121,14 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
       ));
     }
   }
+  if num_output_frames == 0 {
+    // Zero output frames with nonempty chunks/segmentations is a
+    // schema/timing drift signal, not a valid input. Returning an
+    // empty grid would make a downstream caller computing
+    // `grid.len() / num_output_frames` divide by zero. Codex review
+    // MEDIUM round 7 of Phase 5.
+    return Err(Error::Shape("num_output_frames must be at least 1"));
+  }
   if count.len() != num_output_frames {
     return Err(Error::Shape("count.len() != num_output_frames"));
   }

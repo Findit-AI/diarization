@@ -324,6 +324,30 @@ fn rttm_relabel_str_sort_orders_10_before_2() {
   );
 }
 
+/// `num_output_frames == 0` with nonempty chunks is rejected — a
+/// schema/timing drift would otherwise return an empty grid and
+/// silently mislead downstream callers (especially those computing
+/// `grid.len() / num_output_frames`). Codex review MEDIUM round 7
+/// of Phase 5.
+#[test]
+fn rejects_zero_output_frames() {
+  let (chunks_sw, frames_sw) = default_swins();
+  let segmentations = vec![0.5_f64; 8];
+  let hard_clusters = vec![vec![0i32, 1i32]];
+  let input = ReconstructInput {
+    segmentations: &segmentations,
+    num_chunks: 1,
+    num_frames_per_chunk: 4,
+    num_speakers: 2,
+    hard_clusters: &hard_clusters,
+    count: &[],
+    num_output_frames: 0,
+    chunks_sw,
+    frames_sw,
+  };
+  assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
+}
+
 #[test]
 fn rejects_neg_inf_segmentation() {
   let (chunks_sw, frames_sw) = default_swins();

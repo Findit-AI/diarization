@@ -139,6 +139,18 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
     return Err(Error::Shape("post_plda.nrows() must equal num_train"));
   }
   let plda_dim = post_plda.ncols();
+  if plda_dim == 0 {
+    // Zero-column post_plda would let VBx iterate on no PLDA evidence
+    // — `inv_l`, `alpha`, `log_p` all degenerate to empty/zero. The
+    // resulting posterior is independent of the input embeddings,
+    // producing plausible hard_clusters from pure prior. A schema
+    // drift in PLDA capture or downstream feeding the wrong array
+    // would silently yield wrong diarization. Codex review MEDIUM
+    // round 7 of Phase 5.
+    return Err(Error::Shape(
+      "post_plda must have at least one column (PLDA dimension)",
+    ));
+  }
   if phi.len() != plda_dim {
     return Err(Error::Shape("phi.len() must equal post_plda.ncols()"));
   }
