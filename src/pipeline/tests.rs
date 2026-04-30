@@ -208,9 +208,8 @@ fn assign_embeddings_scalar_and_simd_produce_identical_hard_clusters() {
     let segmentations: Vec<f64> = (0..num_chunks * num_frames * num_speakers)
       .map(|_| rng.random::<f64>())
       .collect();
-    let post_plda = DMatrix::<f64>::from_fn(num_train, plda_dim, |_, _| {
-      rng.random::<f64>() * 2.0 - 1.0
-    });
+    let post_plda =
+      DMatrix::<f64>::from_fn(num_train, plda_dim, |_, _| rng.random::<f64>() * 2.0 - 1.0);
     let phi = DVector::<f64>::from_fn(plda_dim, |_, _| rng.random::<f64>() + 0.1);
     let input = AssignEmbeddingsInput {
       embeddings: &embeddings,

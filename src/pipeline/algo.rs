@@ -255,9 +255,8 @@ fn assign_embeddings_inner(
   let num_init = ahc_clusters.iter().copied().max().expect("num_train >= 2") + 1;
   let qinit = build_qinit(&ahc_clusters, num_init);
   #[cfg(test)]
-  let vbx_out = crate::vbx::algo::vbx_iterate_with_simd(
-    post_plda, phi, &qinit, fa, fb, max_iters, use_simd,
-  )?;
+  let vbx_out =
+    crate::vbx::algo::vbx_iterate_with_simd(post_plda, phi, &qinit, fa, fb, max_iters, use_simd)?;
   #[cfg(not(test))]
   let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason == StopReason::MaxIterationsReached {
