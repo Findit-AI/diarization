@@ -1,5 +1,5 @@
-//! Run [`dia::diarizer::Diarizer`] on a 16 kHz mono WAV file and print
-//! emitted [`DiarizedSpan`](dia::diarizer::DiarizedSpan)s.
+//! Run [`diarization::diarizer::Diarizer`] on a 16 kHz mono WAV file and print
+//! emitted [`DiarizedSpan`](diarization::diarizer::DiarizedSpan)s.
 //!
 //! ```sh
 //! ./scripts/download-model.sh        # pyannote/segmentation-3.0
@@ -22,7 +22,7 @@ fn main() {
 use std::{env, error::Error, path::PathBuf};
 
 #[cfg(feature = "ort")]
-use dia::{
+use diarization::{
   diarizer::{Diarizer, DiarizerOptions},
   embed::EmbedModel,
   segment::SegmentModel,
@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(feature = "ort")]
-fn print_span(span: dia::diarizer::DiarizedSpan, flushed: bool) {
+fn print_span(span: diarization::diarizer::DiarizedSpan, flushed: bool) {
   let suffix = if flushed { " [flushed]" } else { "" };
   println!(
     "[{:.3}s — {:.3}s] speaker {} (avg_act={:.3}, n_act={}, clean={:.2}){}",

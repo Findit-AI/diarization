@@ -7,7 +7,7 @@
 
 #![cfg(feature = "ort")]
 
-use dia::segment::{SegmentModel, SegmentOptions, Segmenter};
+use diarization::segment::{SegmentModel, SegmentOptions, Segmenter};
 
 #[test]
 #[ignore = "requires model file at models/segmentation-3.0.onnx"]

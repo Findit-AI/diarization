@@ -1,4 +1,4 @@
-//! Errors for `dia::reconstruct`.
+//! Errors for `diarization::reconstruct`.
 
 use thiserror::Error;
 

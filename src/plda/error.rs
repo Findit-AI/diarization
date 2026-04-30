@@ -1,4 +1,4 @@
-//! Error type for `dia::plda`.
+//! Error type for `diarization::plda`.
 
 use thiserror::Error;
 
@@ -31,7 +31,7 @@ pub enum Error {
   /// vector inside a transform stage produced a non-finite value
   /// (e.g. division-by-zero in L2 normalization fed by Inf input).
   /// Almost always indicates a degraded upstream embedder rather
-  /// than an algorithmic bug in `dia::plda`.
+  /// than an algorithmic bug in `diarization::plda`.
   #[error("PLDA: input or intermediate vector contains NaN or ±inf")]
   NonFiniteInput,
 

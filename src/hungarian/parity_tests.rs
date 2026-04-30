@@ -1,4 +1,4 @@
-//! Parity test for `dia::hungarian::constrained_argmax` against pyannote's
+//! Parity test for `diarization::hungarian::constrained_argmax` against pyannote's
 //! captured `hard_clusters` (Phase-0 fixture).
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/clustering.npz` and asserts that

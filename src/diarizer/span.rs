@@ -26,7 +26,7 @@ pub struct CollectedEmbedding {
   pub embedding: Embedding,
   /// Online speaker id assigned by `Clusterer::submit` during streaming.
   pub online_speaker_id: u64,
-  /// Window-local slot from `dia::segment::SpeakerActivity` (`0..MAX_SPEAKER_SLOTS`).
+  /// Window-local slot from `diarization::segment::SpeakerActivity` (`0..MAX_SPEAKER_SLOTS`).
   pub speaker_slot: u8,
   /// Whether the embedding used the `exclude_overlap` clean mask
   /// (`true`) or fell back to the speaker-only mask (`false`).

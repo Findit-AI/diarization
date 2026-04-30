@@ -34,7 +34,7 @@ pub(crate) const SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT: u32 = 59;
 
 /// Re-export of the canonical [`crate::segment::stitch::frame_to_sample_u64`]
 /// helper. The function previously lived here as a parallel
-/// implementation; it now resides in `dia::segment::stitch` so the
+/// implementation; it now resides in `diarization::segment::stitch` so the
 /// segmenter can use it for absolute-frame conversions on long
 /// streams (Codex review MEDIUM). Spec §15 #54 (resolved).
 pub(crate) use crate::segment::stitch::frame_to_sample_u64;
@@ -1081,7 +1081,7 @@ mod tests {
   #[test]
   fn frame_to_sample_u64_matches_segment_u32_over_full_range() {
     // Bit-exact equivalence over the entire u32 input range that
-    // dia::segment uses (one window = 2356 frames over the typical
+    // diarization::segment uses (one window = 2356 frames over the typical
     // streaming session lookback).
     for frame_idx in 0u32..=2356 {
       let u32_result = crate::segment::stitch::frame_to_sample(frame_idx) as u64;

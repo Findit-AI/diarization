@@ -1,8 +1,8 @@
-# dia::segment Implementation Plan
+# diarization::segment Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `dia::segment` Sans-I/O speaker-segmentation module — a pure-CPU state machine that ingests 16 kHz mono PCM frame-by-frame and emits `SpeakerActivity` and voice-span events, with an optional `ort`-feature convenience layer that drives ONNX inference.
+**Goal:** Build the `diarization::segment` Sans-I/O speaker-segmentation module — a pure-CPU state machine that ingests 16 kHz mono PCM frame-by-frame and emits `SpeakerActivity` and voice-span events, with an optional `ort`-feature convenience layer that drives ONNX inference.
 
 **Architecture:** Two layers. Layer 1 is a Sans-I/O `Segmenter` with no `ort` dependency: caller pumps samples in via `push_samples`, drains `Action`s from `poll`, runs inference externally, and pushes scores back via `push_inference`. Layer 2 (gated on `ort` feature, default-on) pairs Layer 1 with a `SegmentModel` ONNX wrapper and provides silero-shaped `process_samples` / `finish_stream` streaming methods.
 
@@ -162,12 +162,12 @@ Sans-I/O speaker diarization for streaming audio.
 
 `dia` is a Rust port of two findit-studio Python projects: `findit-pyannote-seg`
 (speaker segmentation) and `findit-speaker-embedding` (speaker embedding). The
-v0.1.0 release ships **segmentation only** (`dia::segment`); embedding and
+v0.1.0 release ships **segmentation only** (`diarization::segment`); embedding and
 cross-window clustering will follow in subsequent releases.
 
 ## Design
 
-The core (`dia::segment::Segmenter`) is a Sans-I/O state machine: it never
+The core (`diarization::segment::Segmenter`) is a Sans-I/O state machine: it never
 opens a file, runs a model, or spawns a thread. Callers push 16 kHz mono PCM
 in, drain `Action`s out, run ONNX inference themselves, and push scores back.
 This makes the segmenter testable with synthetic scores (no model file
@@ -181,7 +181,7 @@ A convenience layer (gated on the default `ort` feature) provides
 ## Quickstart
 
 ```rust
-use dia::segment::{Segmenter, SegmentModel, SegmentOptions, Event};
+use diarization::segment::{Segmenter, SegmentModel, SegmentOptions, Event};
 
 let mut model = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
 let mut seg   = Segmenter::new(SegmentOptions::default());
@@ -193,7 +193,7 @@ while let Some(frame) = audio_in.next() {
     })?;
 }
 seg.finish_stream(&mut model, |_| {})?;
-# Ok::<(), dia::segment::Error>(())
+# Ok::<(), diarization::segment::Error>(())
 ```
 
 For Sans-I/O usage (no `ort` dependency), see `examples/stream_layer1.rs`.
@@ -212,7 +212,7 @@ Replace `/Users/user/Develop/findit-studio/dia/CHANGELOG.md` with:
 
 FEATURES
 
-- `dia::segment` module: Sans-I/O speaker segmentation backed by
+- `diarization::segment` module: Sans-I/O speaker segmentation backed by
   pyannote/segmentation-3.0 ONNX. Two layers: a pure state-machine `Segmenter`
   with no `ort` dependency, plus a default-on `ort` feature exposing a
   `SegmentModel` ONNX wrapper and `process_samples` / `finish_stream`
@@ -300,7 +300,7 @@ pub use model::SegmentModel;
 Create `/Users/user/Develop/findit-studio/dia/src/segment/options.rs`:
 
 ```rust
-//! Configuration constants and tunables for `dia::segment`.
+//! Configuration constants and tunables for `diarization::segment`.
 
 use core::num::NonZeroU32;
 use core::time::Duration;
@@ -444,12 +444,12 @@ Each of these gets one line so `mod.rs` doesn't break the build. We'll fill them
 
 ```rust
 // src/segment/error.rs
-//! Error types for `dia::segment` (filled in Task 4).
+//! Error types for `diarization::segment` (filled in Task 4).
 ```
 
 ```rust
 // src/segment/types.rs
-//! Public types for `dia::segment` (filled in Task 5).
+//! Public types for `diarization::segment` (filled in Task 5).
 ```
 
 ```rust
@@ -719,7 +719,7 @@ use std::path::PathBuf;
 
 use crate::segment::types::WindowId;
 
-/// All errors produced by `dia::segment`.
+/// All errors produced by `diarization::segment`.
 #[derive(Debug)]
 pub enum Error {
     /// Construction-time validation failure for `SegmentOptions`.
@@ -2404,7 +2404,7 @@ Create `/Users/user/Develop/findit-studio/dia/examples/stream_layer1.rs`:
 //!
 //! No model file required.
 
-use dia::segment::{
+use diarization::segment::{
     Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter, WINDOW_SAMPLES,
 };
 
@@ -2416,7 +2416,7 @@ fn synth_scores_voiced() -> Vec<f32> {
     out
 }
 
-fn main() -> Result<(), dia::segment::Error> {
+fn main() -> Result<(), diarization::segment::Error> {
     let mut seg = Segmenter::new(SegmentOptions::default());
 
     // Simulate a streaming source: 25 chunks of 10 000 samples (250 000 total).
@@ -2498,7 +2498,7 @@ Create `/Users/user/Develop/findit-studio/dia/examples/stream_from_wav.rs`:
 
 #[cfg(feature = "ort")]
 fn main() -> anyhow::Result<()> {
-    use dia::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
+    use diarization::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
 
     let path = std::env::args().nth(1).expect("usage: stream_from_wav <file.wav>");
     let pcm = read_wav_mono_16k(&path)?;
@@ -2600,7 +2600,7 @@ Create `/Users/user/Develop/findit-studio/dia/tests/integration_segment.rs`:
 
 #![cfg(feature = "ort")]
 
-use dia::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
+use diarization::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
 
 #[test]
 #[ignore = "requires model file at models/segmentation-3.0.onnx"]
@@ -2658,7 +2658,7 @@ Create `/Users/user/Develop/findit-studio/dia/benches/segment.rs`:
 //! measure state-machine cost only (no ort).
 
 use criterion::{Criterion, criterion_group, criterion_main, BatchSize};
-use dia::segment::{Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter};
+use diarization::segment::{Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter};
 
 fn synth_scores() -> Vec<f32> {
     let mut out = vec![-10.0f32; FRAMES_PER_WINDOW * POWERSET_CLASSES];

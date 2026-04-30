@@ -15,7 +15,7 @@
 //! ## Standalone — no `Diarizer` integration yet
 //!
 //! Phase 4 ships this as a pure-math module. Integration with the full
-//! diarization pipeline lands in Phase 5. Until then `dia::centroid` is
+//! diarization pipeline lands in Phase 5. Until then `diarization::centroid` is
 //! crate-private (see `src/lib.rs`).
 
 #![allow(dead_code, unused_imports)]

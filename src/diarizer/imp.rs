@@ -54,7 +54,7 @@ pub struct Diarizer {
   pub(crate) clusterer: Clusterer,
   /// Rolling audio buffer indexed by absolute samples. Element 0
   /// corresponds to absolute sample [`audio_base`](Self::audio_base).
-  /// Trim policy: keep the last `dia::segment::WINDOW_SAMPLES` samples
+  /// Trim policy: keep the last `diarization::segment::WINDOW_SAMPLES` samples
   /// (§5.7 / §11.5).
   pub(crate) audio_buffer: VecDeque<f32>,
   pub(crate) audio_base: u64,

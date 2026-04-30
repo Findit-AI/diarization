@@ -29,7 +29,7 @@ use nalgebra::DMatrix;
 /// Pyannote short-circuits AHC entirely when `train_embeddings.shape[0]
 /// < 2` (`clustering.py:588-594`). This module-level boundary allows
 /// `N=1` and returns `vec![0]` (one cluster, one member) so callers can
-/// drive `dia::ahc::ahc_init` uniformly without the special case
+/// drive `diarization::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
   let (n, d) = embeddings.shape();

@@ -1,4 +1,4 @@
-//! Parity tests for `dia::plda` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::plda` against the Phase-0 captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{raw_embeddings, plda_embeddings}.npz`
 //! and asserts that the Rust transforms reproduce the captured pyannote

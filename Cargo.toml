@@ -1,5 +1,5 @@
 [package]
-name = "dia"
+name = "diarization"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -10,17 +10,17 @@ rust-version = "1.95"
 # `models/plda/SOURCE.md`). Downstream redistributors of any binary
 # linking `dia` MUST reproduce the CC-BY-4.0 attribution.
 license = "(MIT OR Apache-2.0) AND CC-BY-4.0"
-repository = "https://github.com/al8n/dia"
-homepage = "https://github.com/al8n/dia"
-documentation = "https://docs.rs/dia"
+repository = "https://github.com/al8n/diarization"
+homepage = "https://github.com/al8n/diarization"
+documentation = "https://docs.rs/diarization"
 description = "Sans-I/O speaker diarization for streaming audio (segmentation; embedding to follow)."
 readme = "README.md"
 
 [features]
 default = ["ort"]
 ort = ["dep:ort"]
-# An earlier revision exposed `dia::plda::RawEmbedding::from_raw_array`
-# and `dia::plda::PostXvecEmbedding::from_pyannote_capture` behind a
+# An earlier revision exposed `diarization::plda::RawEmbedding::from_raw_array`
+# and `diarization::plda::PostXvecEmbedding::from_pyannote_capture` behind a
 # public `plda-fixtures` feature, intending it to act as the gate that
 # kept distribution-invariant constructors out of production code.
 # Cargo features are unified across the dep graph though, so any crate
@@ -69,7 +69,7 @@ anyhow = "1"
 criterion = "0.8"
 hound = "3"
 tempfile = "3"
-# `dia::plda` parity tests load Phase-0 captured `.npz` artifacts.
+# `diarization::plda` parity tests load Phase-0 captured `.npz` artifacts.
 # Production code embeds the PLDA weights via `include_bytes!` and
 # does not depend on npyz.
 npyz = { version = "0.9", features = ["npz"] }

@@ -1,9 +1,9 @@
-//! Constants for `dia::embed`. All values match spec §4.2 / §5.
+//! Constants for `diarization::embed`. All values match spec §4.2 / §5.
 
 /// 2 s @ 16 kHz; the WeSpeaker model's fixed input length.
 ///
 /// Named with the `EMBED_` prefix to avoid collision with
-/// `dia::segment::WINDOW_SAMPLES` (160 000 = 10 s at the same rate).
+/// `diarization::segment::WINDOW_SAMPLES` (160 000 = 10 s at the same rate).
 pub const EMBED_WINDOW_SAMPLES: u32 = 32_000;
 
 /// 1 s @ 16 kHz; sliding-window hop for the long-clip path (§5.1).
@@ -30,7 +30,7 @@ pub const EMBEDDING_DIM: usize = 256;
 pub const NORM_EPSILON: f32 = 1e-12;
 
 /// 16 kHz mono — the WeSpeaker ResNet34 expected sample rate.
-/// Matches [`dia::segment::SAMPLE_RATE_HZ`](crate::segment::SAMPLE_RATE_HZ).
+/// Matches [`diarization::segment::SAMPLE_RATE_HZ`](crate::segment::SAMPLE_RATE_HZ).
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
 // ── EmbedModelOptions ─────────────────────────────────────────────────────

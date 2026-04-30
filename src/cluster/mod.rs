@@ -4,7 +4,7 @@
 //! # Online path
 //! [`Clusterer`] accepts one embedding at a time and maintains a set of
 //! per-speaker centroids.  Call [`Clusterer::submit`] for each embedding
-//! produced by `dia::embed`; it returns a [`ClusterAssignment`] that carries
+//! produced by `diarization::embed`; it returns a [`ClusterAssignment`] that carries
 //! the globally-unique speaker id and whether a new speaker was opened.
 //!
 //! # Offline path

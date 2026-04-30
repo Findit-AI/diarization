@@ -1,6 +1,6 @@
 //! Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
 //!
-//! `dia` is the Rust port of [`pyannote.audio`](https://github.com/pyannote/pyannote-audio)'s
+//! `diarization` is the Rust port of [`pyannote.audio`](https://github.com/pyannote/pyannote-audio)'s
 //! speaker-diarization pipeline, restructured around incremental push-based
 //! state machines so it can run live on streaming audio. Inputs are arbitrary-
 //! length pushes (e.g., per VAD speech region); outputs are emitted per closed
@@ -27,9 +27,9 @@
 //! ```no_run
 //! # #[cfg(feature = "ort")]
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! use dia::diarizer::{Diarizer, DiarizerOptions};
-//! use dia::embed::EmbedModel;
-//! use dia::segment::SegmentModel;
+//! use diarization::diarizer::{Diarizer, DiarizerOptions};
+//! use diarization::embed::EmbedModel;
+//! use diarization::segment::SegmentModel;
 //!
 //! let mut seg = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
 //! let mut emb = EmbedModel::from_file("models/wespeaker_resnet34_lm.onnx")?;
@@ -91,7 +91,7 @@ pub(crate) mod centroid;
 pub(crate) mod pipeline;
 // `reconstruct` (Phase 5b) ports pyannote's reconstruct +
 // to_diarization into a per-output-frame discrete-diarization grid.
-// Distinct from the streaming `dia::diarizer::reconstruct` (a
+// Distinct from the streaming `diarization::diarizer::reconstruct` (a
 // sub-module of `diarizer`) used by the online clusterer. Crate-
 // private until Phase 5c.
 pub(crate) mod reconstruct;

@@ -19,7 +19,7 @@
 //! ## Standalone — no `Diarizer` integration yet
 //!
 //! Phase 4 ships this as a pure-math module. Integration with the full
-//! diarization pipeline lands in Phase 5. Until then `dia::ahc` is
+//! diarization pipeline lands in Phase 5. Until then `diarization::ahc` is
 //! crate-private (see `src/lib.rs`).
 
 #![allow(dead_code, unused_imports)]

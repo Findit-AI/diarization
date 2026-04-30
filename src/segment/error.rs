@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::segment::types::WindowId;
 
-/// All errors produced by `dia::segment`.
+/// All errors produced by `diarization::segment`.
 #[derive(Debug, Error)]
 pub enum Error {
   /// Construction-time validation failure for [`SegmentOptions`].
@@ -61,7 +61,7 @@ pub enum Error {
   },
 
   /// A loaded ONNX model's input or output dimensions don't match what
-  /// `dia::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
+  /// `diarization::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
   /// output, where `*` is a free batch dimension).
   #[cfg(feature = "ort")]
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]

@@ -1,4 +1,4 @@
-//! Output types for `dia::cluster`.
+//! Output types for `diarization::cluster`.
 
 use crate::embed::Embedding;
 

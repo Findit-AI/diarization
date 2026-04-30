@@ -7,7 +7,7 @@
 
 #[cfg(feature = "ort")]
 fn main() -> anyhow::Result<()> {
-  use dia::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
+  use diarization::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
 
   let path = std::env::args()
     .nth(1)

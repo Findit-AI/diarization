@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL — use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Port `pyannote.audio.utils.vbx.VBx` (`utils/vbx.py:27-137`) to Rust as a standalone `dia::vbx` module. Verify byte-for-byte (within float-cast tolerance) parity against the Phase-0 captured `vbx_state.npz` artifacts.
+**Goal:** Port `pyannote.audio.utils.vbx.VBx` (`utils/vbx.py:27-137`) to Rust as a standalone `diarization::vbx` module. Verify byte-for-byte (within float-cast tolerance) parity against the Phase-0 captured `vbx_state.npz` artifacts.
 
-**Architecture:** New top-level module `dia::vbx`, crate-private (`pub(crate) mod vbx;` in `src/lib.rs`, mirroring `dia::plda`'s pattern from Phase 1). Single function `vbx_iterate(x, phi, qinit, fa, fb, max_iters) -> (gamma, pi, elbo)` plus a small set of types. Uses existing `nalgebra` for matrices; no new dependencies.
+**Architecture:** New top-level module `diarization::vbx`, crate-private (`pub(crate) mod vbx;` in `src/lib.rs`, mirroring `diarization::plda`'s pattern from Phase 1). Single function `vbx_iterate(x, phi, qinit, fa, fb, max_iters) -> (gamma, pi, elbo)` plus a small set of types. Uses existing `nalgebra` for matrices; no new dependencies.
 
 **Tech Stack:** Rust + `nalgebra` 0.34 (already a dep). f64 throughout. `logsumexp` implemented as a small helper (numpy/scipy version is `log(sum(exp(x - max))) + max`).
 
@@ -78,7 +78,7 @@ src/vbx/
   parity_tests.rs       # tests against tests/parity/fixtures/01_dialogue/vbx_state.npz
 ```
 
-`src/lib.rs` adds `pub(crate) mod vbx;` (matches `dia::plda`'s gating).
+`src/lib.rs` adds `pub(crate) mod vbx;` (matches `diarization::plda`'s gating).
 
 No new dependencies. No fixture changes (Phase-0 already captured everything VBx needs, except Fa/Fb which we hardcode as constants pinned to community-1).
 
@@ -160,7 +160,7 @@ git commit -m "vbx-fixture: capture Fa/Fb/max_iters alongside VBx outputs"
 - [ ] **Step 1: Write `src/vbx/error.rs`**
 
 ```rust
-//! Error variants for `dia::vbx`.
+//! Error variants for `diarization::vbx`.
 
 use thiserror::Error;
 
@@ -192,8 +192,8 @@ pub enum Error {
 //!
 //! Ports `pyannote.audio.utils.vbx.VBx` (`utils/vbx.py:27-137` in
 //! pyannote.audio 4.0.4) to Rust. Consumes the post-PLDA features
-//! produced by `dia::plda::PldaTransform::project()` plus the
-//! eigenvalue diagonal `dia::plda::PldaTransform::phi()`, runs
+//! produced by `diarization::plda::PldaTransform::project()` plus the
+//! eigenvalue diagonal `diarization::plda::PldaTransform::phi()`, runs
 //! variational EM iterations, and returns final speaker
 //! responsibilities + priors + ELBO trajectory.
 //!
@@ -201,7 +201,7 @@ pub enum Error {
 //!
 //! Phase 2 ships VBx as a pure-math module. The integration
 //! (`Diarizer` consuming VBx output → cluster centroids → per-frame
-//! diarization) lands in Phase 5. Until then `dia::vbx` is
+//! diarization) lands in Phase 5. Until then `diarization::vbx` is
 //! crate-private (see `src/lib.rs:62-72`).
 
 #![allow(dead_code, unused_imports)]
@@ -261,7 +261,7 @@ Expected: clean build with the new module.
 
 ```bash
 git add src/vbx/ src/lib.rs
-git commit -m "vbx: scaffold dia::vbx module with crate-private gating"
+git commit -m "vbx: scaffold diarization::vbx module with crate-private gating"
 ```
 
 ---
@@ -597,7 +597,7 @@ git commit -m "vbx: implement vbx_iterate (variational EM core)"
 - [ ] **Step 1: Write the parity test**
 
 ```rust
-//! Parity tests for `dia::vbx` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::vbx` against the Phase-0 captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{plda_embeddings, vbx_state}.npz`
 //! and asserts that `vbx_iterate(post_plda, phi, qinit, Fa=0.07, Fb=0.8,

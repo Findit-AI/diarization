@@ -1,4 +1,4 @@
-//! End-to-end integration tests for `dia::Diarizer`.
+//! End-to-end integration tests for `diarization::Diarizer`.
 //!
 //! All tests are `#[ignore]` because they require:
 //! - The pyannote/segmentation-3.0 ONNX model at
@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use dia::{
+use diarization::{
   diarizer::{Diarizer, DiarizerOptions},
   embed::EmbedModel,
   segment::SegmentModel,

@@ -1,4 +1,4 @@
-//! End-to-end integration tests for `dia::embed`.
+//! End-to-end integration tests for `diarization::embed`.
 //!
 //! Exercises only the **public** API surface — no `pub(crate)` access.
 //! These tests are `#[ignore]`-d because they require the WeSpeaker
@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use dia::embed::{EMBED_WINDOW_SAMPLES, EmbedModel};
+use diarization::embed::{EMBED_WINDOW_SAMPLES, EmbedModel};
 
 fn model_path() -> PathBuf {
   if let Ok(p) = std::env::var("DIA_EMBED_MODEL_PATH") {

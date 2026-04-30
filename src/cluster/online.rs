@@ -36,7 +36,7 @@ struct SpeakerEntry {
 /// Online streaming speaker clusterer.
 ///
 /// Maintains a set of per-speaker centroids.  Call [`submit`](Clusterer::submit)
-/// for each `Embedding` produced by `dia::embed`; it returns a
+/// for each `Embedding` produced by `diarization::embed`; it returns a
 /// [`ClusterAssignment`] containing the globally-unique speaker id and whether
 /// a new speaker slot was opened.
 ///

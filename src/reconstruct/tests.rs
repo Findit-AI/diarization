@@ -1,4 +1,4 @@
-//! Model-free unit tests for `dia::reconstruct`.
+//! Model-free unit tests for `diarization::reconstruct`.
 
 use crate::{
   hungarian::UNMATCHED,

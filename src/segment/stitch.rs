@@ -40,7 +40,7 @@ pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
 /// would silently wrap public timestamps.
 ///
 /// Codex review MEDIUM. Spec §15 #54 — folded back from the parallel
-/// helper that previously lived in `dia::diarizer::reconstruct`.
+/// helper that previously lived in `diarization::diarizer::reconstruct`.
 #[inline]
 pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
   let n = frame_idx * WINDOW_SAMPLES as u64;

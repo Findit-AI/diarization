@@ -1,4 +1,4 @@
-//! Model-free unit tests for `dia::ahc`.
+//! Model-free unit tests for `diarization::ahc`.
 //!
 //! Heavy parity against pyannote's captured `ahc_init_labels.npy` lives
 //! in `src/ahc/parity_tests.rs`. This module covers smaller invariants

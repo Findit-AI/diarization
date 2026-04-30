@@ -10,17 +10,17 @@ Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
 
 v0.1.0 ships:
 
-- `dia::segment` — speaker segmentation (pyannote/segmentation-3.0 ONNX)
-- `dia::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX + kaldi fbank)
-- `dia::cluster` — online streaming + offline (spectral + agglomerative)
-- `dia::Diarizer` — top-level orchestrator with pyannote-style per-frame
+- `diarization::segment` — speaker segmentation (pyannote/segmentation-3.0 ONNX)
+- `diarization::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX + kaldi fbank)
+- `diarization::cluster` — online streaming + offline (spectral + agglomerative)
+- `diarization::Diarizer` — top-level orchestrator with pyannote-style per-frame
   reconstruction (overlap-add cluster activations, count-bounded argmax,
   per-cluster RLE-to-spans)
 
 ## Pipeline
 
 ```
-audio decoder → resample to 16 kHz → VAD → dia::Diarizer → downstream services
+audio decoder → resample to 16 kHz → VAD → diarization::Diarizer → downstream services
 ```
 
 VAD-filtered, variable-length pushes are first-class. See
@@ -59,7 +59,7 @@ provenance, including the upstream snapshot revision and the
 `models/plda/*.bin` layout, lives in
 [`models/plda/SOURCE.md`](models/plda/SOURCE.md).
 
-Note: in v0.1.0 the `dia::plda` module is crate-private (no
+Note: in v0.1.0 the `diarization::plda` module is crate-private (no
 public-API caller can construct a `RawEmbedding`, by design — see
 `src/lib.rs:62-72`), but `include_bytes!` still embeds the
 weights into every linked binary, so the attribution requirement

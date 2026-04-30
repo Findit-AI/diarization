@@ -1,4 +1,4 @@
-//! Parity test for `dia::ahc::ahc_init` against pyannote's captured
+//! Parity test for `diarization::ahc::ahc_init` against pyannote's captured
 //! `ahc_init_labels.npy` (Phase-0 fixture).
 //!
 //! Loads:

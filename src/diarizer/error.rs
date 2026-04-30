@@ -78,7 +78,7 @@ pub enum Error {
 /// segment-contract verification. Defense-in-depth.
 ///
 /// `#[non_exhaustive]` — a v0.X bump may add new variants. Match
-/// exhaustively only inside `dia::diarizer`; downstream callers
+/// exhaustively only inside `diarization::diarizer`; downstream callers
 /// should use a catch-all `_` arm.
 #[derive(Debug, Error)]
 #[non_exhaustive]

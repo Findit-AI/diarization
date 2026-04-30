@@ -1,4 +1,4 @@
-//! Model-free unit tests for `dia::centroid`.
+//! Model-free unit tests for `diarization::centroid`.
 //!
 //! Heavy parity against pyannote's captured `centroids` lives in
 //! `src/centroid/parity_tests.rs`.

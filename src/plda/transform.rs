@@ -75,7 +75,7 @@ pub(crate) const RAW_EMBEDDING_MIN_NORM: f64 = 0.01;
 /// Raw, **unnormalized** WeSpeaker output destined for the PLDA
 /// transform. Wrapping the `[f32; 256]` in a distinct type prevents
 /// the most likely API misuse: feeding
-/// [`dia::embed::Embedding::as_array`](crate::embed::Embedding::as_array),
+/// [`diarization::embed::Embedding::as_array`](crate::embed::Embedding::as_array),
 /// which is L2-normalized.
 ///
 /// Pyannote's `xvec_tf` operates on **raw** WeSpeaker outputs
@@ -96,7 +96,7 @@ pub(crate) const RAW_EMBEDDING_MIN_NORM: f64 = 0.01;
 /// cannot construct a `RawEmbedding` at all. The only production
 /// path from a raw WeSpeaker vector to PLDA features will be via
 /// `EmbedModel::embed_raw` once Phase 5 lands; that path will own
-/// its own typed entry inside `dia::plda` so the boundary stays
+/// its own typed entry inside `diarization::plda` so the boundary stays
 /// sealed. (Codex review MEDIUM: a public `plda-fixtures` Cargo
 /// feature was previously used as the gate, but additive features
 /// are globally unified, so any downstream crate enabling it would
@@ -385,7 +385,7 @@ impl PldaTransform {
   /// not re-normalize this output.
   ///
   /// `input` is a [`RawEmbedding`] — a raw, **unnormalized** WeSpeaker
-  /// vector — not [`dia::embed::Embedding`](crate::embed::Embedding)
+  /// vector — not [`diarization::embed::Embedding`](crate::embed::Embedding)
   /// (L2-normalized) which is the wrong distribution for PLDA.
   ///
   /// # Errors

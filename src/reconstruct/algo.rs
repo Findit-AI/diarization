@@ -50,7 +50,7 @@ pub struct ReconstructInput<'a> {
   pub num_chunks: usize,
   pub num_frames_per_chunk: usize,
   pub num_speakers: usize,
-  /// Per-chunk hard cluster assignment (output of `dia::pipeline`).
+  /// Per-chunk hard cluster assignment (output of `diarization::pipeline`).
   /// Length `num_chunks`; each inner vector has length `num_speakers`
   /// with `-2` indicating an unmatched speaker.
   pub hard_clusters: &'a [Vec<i32>],
@@ -152,7 +152,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   // upstream model corruption (torch nan-prop), and a silent fallback
   // here lets a degraded inference dependency produce plausible-but-
   // wrong RTTM output. Surfacing it as a clear typed error matches the
-  // Phase 3 round-2 decision for `dia::hungarian` (±inf rejection at the
+  // Phase 3 round-2 decision for `diarization::hungarian` (±inf rejection at the
   // solver boundary). Codex review MEDIUM round 2 of Phase 5.
   for &v in segmentations {
     if !v.is_finite() {

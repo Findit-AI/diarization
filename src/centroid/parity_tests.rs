@@ -1,4 +1,4 @@
-//! Parity test for `dia::centroid::weighted_centroids` against
+//! Parity test for `diarization::centroid::weighted_centroids` against
 //! pyannote's captured `clustering.npz['centroids']` (Phase-0 fixture).
 //!
 //! Loads:

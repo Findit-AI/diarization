@@ -1,4 +1,4 @@
-//! Errors for `dia::ahc`.
+//! Errors for `diarization::ahc`.
 
 use thiserror::Error;
 

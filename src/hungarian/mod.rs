@@ -12,7 +12,7 @@
 //!
 //! Phase 3 ships this as a pure-math module. Integration (`Diarizer`
 //! consuming VBx + Hungarian → centroid AHC → per-frame diarization) lands
-//! in Phase 5. Until then `dia::hungarian` is crate-private (see
+//! in Phase 5. Until then `diarization::hungarian` is crate-private (see
 //! `src/lib.rs`).
 
 #![allow(dead_code, unused_imports)]

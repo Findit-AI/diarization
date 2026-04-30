@@ -34,7 +34,7 @@ reference output.
 The six raw little-endian f64 blobs alongside the `.npz` files
 (`mean1.bin`, `mean2.bin`, `lda.bin`, `mu.bin`, `tr.bin`, `psi.bin`)
 are extracted by `scripts/extract-plda-blobs.sh`. They are the actual
-runtime data — `dia::plda` embeds them via `include_bytes!`, so the
+runtime data — `diarization::plda` embeds them via `include_bytes!`, so the
 production Rust path needs no `.npz` reader and no file I/O. Total
 size on disk ~390 KB; binary delta the same.
 
@@ -61,5 +61,5 @@ Two-step refresh:
    `.npz` files in this directory.
 2. Run `scripts/extract-plda-blobs.sh` to regenerate the six `.bin`
    files from the new `.npz` files. Re-run `cargo test` to confirm
-   `dia::plda`'s parity tests still pass against the refreshed
+   `diarization::plda`'s parity tests still pass against the refreshed
    captures.

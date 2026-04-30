@@ -1,4 +1,4 @@
-//! End-to-end parity test: `dia::pipeline::assign_embeddings` against
+//! End-to-end parity test: `diarization::pipeline::assign_embeddings` against
 //! pyannote's captured `clustering.npz['hard_clusters']` (Phase-0 fixture).
 //!
 //! Inputs (all from the captured fixtures):

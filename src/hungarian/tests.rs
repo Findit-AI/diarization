@@ -1,4 +1,4 @@
-//! Model-free unit tests for `dia::hungarian`.
+//! Model-free unit tests for `diarization::hungarian`.
 //!
 //! Heavy parity against pyannote's captured `hard_clusters` lives in
 //! `src/hungarian/parity_tests.rs`. This module covers smaller invariants

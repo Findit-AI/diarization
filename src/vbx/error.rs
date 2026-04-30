@@ -1,4 +1,4 @@
-//! Error variants for `dia::vbx`.
+//! Error variants for `diarization::vbx`.
 
 use thiserror::Error;
 

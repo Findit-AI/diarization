@@ -1,4 +1,4 @@
-//! Error type for `dia::cluster`. Matches spec §4.3.
+//! Error type for `diarization::cluster`. Matches spec §4.3.
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

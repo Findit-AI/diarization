@@ -82,7 +82,7 @@ Expected: dependencies fetched and compiled, no errors.
 - [ ] **Step 3: Create src/hungarian/error.rs**
 
 ```rust
-//! Errors for `dia::hungarian`.
+//! Errors for `diarization::hungarian`.
 
 use thiserror::Error;
 
@@ -113,7 +113,7 @@ pub enum Error {
 //!
 //! Phase 3 ships this as a pure-math module. The integration
 //! (`Diarizer` consuming VBx + Hungarian → centroid AHC → per-frame diarization)
-//! lands in Phase 5. Until then `dia::hungarian` is crate-private.
+//! lands in Phase 5. Until then `diarization::hungarian` is crate-private.
 
 #![allow(dead_code, unused_imports)]
 
@@ -181,7 +181,7 @@ These tests exercise the boundary contract before the implementation lands. They
 - [ ] **Step 1: Write the model-free test module**
 
 ```rust
-//! Model-free unit tests for `dia::hungarian`.
+//! Model-free unit tests for `diarization::hungarian`.
 //!
 //! Heavy parity against pyannote's captured `hard_clusters` lives in
 //! `src/hungarian/parity_tests.rs`. This module covers smaller invariants
@@ -508,7 +508,7 @@ git commit -m "hungarian: constrained_argmax (per-chunk Kuhn-Munkres)"
 - [ ] **Step 1: Write parity test loading captured fixture**
 
 ```rust
-//! Parity test: `dia::hungarian::constrained_argmax` against pyannote's
+//! Parity test: `diarization::hungarian::constrained_argmax` against pyannote's
 //! captured `hard_clusters` (Phase-0 fixture).
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/clustering.npz` and asserts that

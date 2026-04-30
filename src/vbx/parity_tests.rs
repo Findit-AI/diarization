@@ -1,4 +1,4 @@
-//! Parity tests for `dia::vbx` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::vbx` against the Phase-0 captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{plda_embeddings, vbx_state}.npz`
 //! and asserts that `vbx_iterate(post_plda, phi, qinit, fa, fb, max_iters)`

@@ -1,4 +1,4 @@
-//! End-to-end parity test: `dia::reconstruct::reconstruct`
+//! End-to-end parity test: `diarization::reconstruct::reconstruct`
 //! against pyannote's captured `discrete_diarization` (Phase-0 fixture).
 
 use std::{fs::File, io::BufReader, path::PathBuf};

@@ -5,7 +5,7 @@
 //!
 //! No model file required.
 
-use dia::segment::{
+use diarization::segment::{
   Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter, WINDOW_SAMPLES,
 };
 
@@ -17,7 +17,7 @@ fn synth_scores_voiced() -> Vec<f32> {
   out
 }
 
-fn main() -> Result<(), dia::segment::Error> {
+fn main() -> Result<(), diarization::segment::Error> {
   let mut seg = Segmenter::new(SegmentOptions::default());
 
   // Simulate a streaming source: 25 chunks of 10 000 samples (250 000 total).

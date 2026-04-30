@@ -113,7 +113,7 @@ pub struct Segmenter {
   /// failure (the `WindowId` stayed in `pending`, but no caller-
   /// reachable handle remained to retry it). Codex review HIGH.
   ///
-  /// Mirrors `dia::diarizer::Diarizer::pending_seg_inference` for the
+  /// Mirrors `diarization::diarizer::Diarizer::pending_seg_inference` for the
   /// Layer-2 path. `cfg`-gated because it is only consumed by the
   /// `ort`-feature streaming helpers; the fields stay always-present
   /// to keep `Segmenter` layout stable across feature builds.
@@ -631,7 +631,7 @@ impl Segmenter {
   /// [`Diarizer`](crate::diarizer)'s reconstruction state machine
   /// (spec §5.9 frame-finalization boundary). Expose as `pub` if a
   /// real external use case materializes.
-  #[allow(dead_code)] // Consumer (`dia::Diarizer`) lands in a later phase.
+  #[allow(dead_code)] // Consumer (`diarization::Diarizer`) lands in a later phase.
   pub(crate) fn peek_next_window_start(&self) -> u64 {
     if self.finished {
       return u64::MAX;

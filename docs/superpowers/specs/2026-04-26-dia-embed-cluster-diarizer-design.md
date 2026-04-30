@@ -2,13 +2,13 @@
 
 **Revision 9** (2026-04-27, post-sixth-adversarial-review pseudocode-consistency patch).
 **Status:** ready for implementation (pending §15 #43 pre-impl spike + §15 #52 ChaCha keystream stability).
-**Scope:** Three new modules to ship in dia v0.1.0 alongside `dia::segment`,
-**plus a v0.X bump of `dia::segment` to expose per-window per-speaker per-frame
+**Scope:** Three new modules to ship in dia v0.1.0 alongside `diarization::segment`,
+**plus a v0.X bump of `diarization::segment` to expose per-window per-speaker per-frame
 raw probabilities** (required for reconstruction):
-- `dia::segment` v0.X — adds `Action::SpeakerScores` variant + marks `Action` as `#[non_exhaustive]`
-- `dia::embed` — speaker fingerprint generation with **`embed_masked` (rev-8) and `embed_weighted` primitives**
-- `dia::cluster` — cross-window speaker linking (online streaming + offline batch)
-- `dia::Diarizer` — top-level orchestrator with **pyannote-style per-frame
+- `diarization::segment` v0.X — adds `Action::SpeakerScores` variant + marks `Action` as `#[non_exhaustive]`
+- `diarization::embed` — speaker fingerprint generation with **`embed_masked` (rev-8) and `embed_weighted` primitives**
+- `diarization::cluster` — cross-window speaker linking (online streaming + offline batch)
+- `diarization::Diarizer` — top-level orchestrator with **pyannote-style per-frame
   reconstruction** (overlap-add cluster-activation stitching, count-bounded
   argmax, per-cluster RLE-to-spans). Output is one `DiarizedSpan` per closed
   speaker turn — not per-(window, speaker).
@@ -31,7 +31,7 @@ raw probabilities** (required for reconstruction):
 > - **T1-C (HIGH):** the per-frame rate was wrong throughout §5.8 /
 >   §4.4 / §5.10. `pyannote/segmentation-3.0` produces 589 frames per
 >   `WINDOW_SAMPLES = 160 000`, i.e. ≈ 271.65 samples/frame ≈ 16.97 ms/frame
->   ≈ 58.9 fps — verified by reading `dia::segment::stitch::frame_to_sample`
+>   ≈ 58.9 fps — verified by reading `diarization::segment::stitch::frame_to_sample`
 >   (the live constant `WINDOW_SAMPLES * frame_idx / FRAMES_PER_WINDOW`).
 >   Rev-7 said "100 fps / 160 samples / 10 ms" repeatedly, which is
 >   wrong. Rev-8 corrects: `MIN_CLEAN_FRAMES = ceil(MIN_CLIP_SAMPLES /
@@ -79,16 +79,16 @@ raw probabilities** (required for reconstruction):
 > mapping, and adds §9 tests covering the variable-length VAD scenarios.
 >
 > **Revision 6 expands scope** to include pyannote-audio-style reconstruction
-> in `dia::Diarizer`. Per the user, the `pyannote.audio` clustering pipeline
+> in `diarization::Diarizer`. Per the user, the `pyannote.audio` clustering pipeline
 > "has been verified in prod," so we match its algorithm as closely as is
 > practical given streaming constraints. Specifically:
-> - `dia::segment` gains `Action::SpeakerScores { id, window_start, raw_probs
+> - `diarization::segment` gains `Action::SpeakerScores { id, window_start, raw_probs
 >   }`, emitted alongside `Action::Activity` from `push_inference`.
-> - `dia::embed` adds an `exclude_overlap` mask path: when extracting the
+> - `diarization::embed` adds an `exclude_overlap` mask path: when extracting the
 >   embedding for speaker S in a window, mask out samples where another
 >   speaker is also active (matches `pyannote/pipelines/speaker_diarization
 >   .py:375-425`).
-> - `dia::Diarizer` runs per-frame per-cluster overlap-add stitching
+> - `diarization::Diarizer` runs per-frame per-cluster overlap-add stitching
 >   (matches `Inference.aggregate(..., skip_average=True)` on
 >   cluster-collapsed-by-max scores) plus per-frame speaker-count tracking
 >   (matches `speaker_count(..., warm_up=(0.1, 0.1))`) plus per-frame
@@ -98,10 +98,10 @@ raw probabilities** (required for reconstruction):
 >   Drops `similarity` and `speaker_slot` (those are window-local concepts;
 >   a stitched span spans multiple windows). Per-activity context still
 >   accessible via `Diarizer::collected_embeddings()`.
-> - **`Action` becomes `#[non_exhaustive]`** in `dia::segment` v0.X. This
->   is technically a breaking change but `dia::segment` is workspace-only
+> - **`Action` becomes `#[non_exhaustive]`** in `diarization::segment` v0.X. This
+>   is technically a breaking change but `diarization::segment` is workspace-only
 >   and never published to crates.io, so external impact is zero.
-> - New parity test (§9) compares `dia::Diarizer` output against
+> - New parity test (§9) compares `diarization::Diarizer` output against
 >   `pyannote.audio` on a held-out 5-minute multi-speaker clip; target
 >   diarization-error-rate (DER) < 5% absolute vs the reference.
 >
@@ -116,7 +116,7 @@ raw probabilities** (required for reconstruction):
 > accessor `impl` block; `ClusterAssignment` converted from `pub`
 > fields to private + accessors for visibility consistency. §5.7 /
 > §11.5 audio-buffer reach-back claim now backed by line-number
-> code-trace verification into shipped `dia::segment::segmenter.rs`
+> code-trace verification into shipped `diarization::segment::segmenter.rs`
 > (rejecting the reviewer's hypothetical "200 000" but accepting the
 > meta-point that the assertion needed justification). `Diarizer::
 > Error::Internal(AudioBufferUnderflow / AudioBufferOverrun)` variant
@@ -152,9 +152,9 @@ raw probabilities** (required for reconstruction):
 > (`Option<u64>` with `None` → constant `0`); explicit K-means
 > convergence criterion; lazy-cached-centroid semantics on degenerate
 > updates; expanded `clear()` rustdoc; `set_*` mutating builder methods
-> for parity with `dia::segment`; explicit method enumeration on
+> for parity with `diarization::segment`; explicit method enumeration on
 > `EmbedModelOptions`; new `DegenerateEmbedding` error variant in both
-> `dia::embed::Error` and `dia::cluster::Error` for zero-norm cases
+> `diarization::embed::Error` and `diarization::cluster::Error` for zero-norm cases
 > (rev 2 misnamed these as `NonFiniteInput`).
 >
 > **Revision 2 changes** (preserved from prior review): renamed
@@ -177,7 +177,7 @@ raw probabilities** (required for reconstruction):
 
 ## 1. Context
 
-`dia::segment` answers "who speaks when, within a window" but only with
+`diarization::segment` answers "who speaks when, within a window" but only with
 window-local speaker slot IDs (slot 0 in window 5 may or may not be the
 same person as slot 0 in window 6). For real-world diarization output —
 "speaker A spoke at 1.2 s and 8.7 s, speaker B at 3.4 s" — we need
@@ -185,9 +185,9 @@ same person as slot 0 in window 6). For real-world diarization output —
 
 1. **A fingerprint per speech segment** — a 256-d vector that's similar
    for the same speaker and dissimilar for different speakers. This is
-   `dia::embed` (M2).
+   `diarization::embed` (M2).
 2. **Cluster the fingerprints** — group segments by speaker, assign
-   global IDs. This is `dia::cluster` (M3).
+   global IDs. This is `diarization::cluster` (M3).
 3. **Wire it together** — feed segment outputs through embedding and
    clustering, emit globally-labeled spans. This is the `Diarizer`
    orchestrator.
@@ -219,7 +219,7 @@ fingerprints and leaves cross-window linking to its caller.
 User-facing pipeline this spec assumes:
 
 ```
-audio decoder → resample to 16 kHz → VAD → dia::Diarizer → downstream services
+audio decoder → resample to 16 kHz → VAD → diarization::Diarizer → downstream services
                                       │
                                       └─ ranges of human speech, variable-length,
                                          fed to dia incrementally as `process_samples`
@@ -269,7 +269,7 @@ This gives one merged span per speaker turn (matching pyannote's
 
 ### 2.1 What we kept and what we changed vs siblings
 
-| Pattern                                        | scenesdetect       | silero                               | soundevents                    | dia::segment (rev 5)                              | dia::embed / cluster / Diarizer (this spec)                                              |
+| Pattern                                        | scenesdetect       | silero                               | soundevents                    | diarization::segment (rev 5)                              | diarization::embed / cluster / Diarizer (this spec)                                              |
 | ---------------------------------------------- | ------------------ | ------------------------------------ | ------------------------------ | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | Owns model session?                            | n/a                | yes                                  | yes                            | no (`SegmentModel` is separate)                   | **no** — `EmbedModel` separate; `Diarizer` borrows both `SegmentModel` + `EmbedModel`    |
 | State machine and session in one type?         | n/a                | yes                                  | n/a                            | no                                                | **no** — `Segmenter`, `Clusterer`, `Diarizer` are state machines; ort wrappers separate  |
@@ -290,27 +290,27 @@ orchestration pattern in `Diarizer` (segment + embed + cluster).
 ### 2.2 Module relationships
 
 ```
-dia::embed       ←─── borrows nothing from siblings (uses mediatime + kaldi fbank)
+diarization::embed       ←─── borrows nothing from siblings (uses mediatime + kaldi fbank)
    ↓ (Embedding)
-dia::cluster     ←─── re-exports Embedding from dia::embed; otherwise self-contained
+diarization::cluster     ←─── re-exports Embedding from diarization::embed; otherwise self-contained
    ↑
-dia::segment     ←─── needs v0.X bump for Action::SpeakerScores (rev-6 scope expansion)
+diarization::segment     ←─── needs v0.X bump for Action::SpeakerScores (rev-6 scope expansion)
    ↓ (Segmenter, SpeakerActivity, SegmentModel, TimeRange, Action::SpeakerScores)
-dia::Diarizer    ←─── orchestrates all three above; runs reconstruction
+diarization::Diarizer    ←─── orchestrates all three above; runs reconstruction
 ```
 
 | Module          | Depends on                              | Pulls in `ort` | Pulls in `nalgebra` |
 | --------------- | --------------------------------------- | -------------- | ------------------- |
-| `dia::segment`  | mediatime                               | yes (gated)    | no                  |
-| `dia::embed`    | mediatime, kaldi-native-fbank           | yes (gated)    | no                  |
-| `dia::cluster`  | dia::embed (Embedding type)             | no             | yes                 |
-| `dia::Diarizer` | all of the above                        | yes (gated)    | yes                 |
+| `diarization::segment`  | mediatime                               | yes (gated)    | no                  |
+| `diarization::embed`    | mediatime, kaldi-native-fbank           | yes (gated)    | no                  |
+| `diarization::cluster`  | diarization::embed (Embedding type)             | no             | yes                 |
+| `diarization::Diarizer` | all of the above                        | yes (gated)    | yes                 |
 
 ### 2.3 Three layers of API
 
-Following `dia::segment`'s precedent of giving callers escape hatches:
+Following `diarization::segment`'s precedent of giving callers escape hatches:
 
-- **High-level (most users):** `dia::Diarizer::process_samples(samples, |span| ...)`. Push audio in, get `DiarizedSpan`s with global speaker IDs out.
+- **High-level (most users):** `diarization::Diarizer::process_samples(samples, |span| ...)`. Push audio in, get `DiarizedSpan`s with global speaker IDs out.
 - **Mid-level (custom orchestration):** Compose `Segmenter` + `EmbedModel` + `Clusterer` yourself. ~30 lines of glue; needed when you want a custom audio-buffer strategy, custom span filtering, or to feed in pre-segmented activities.
 - **Low-level (custom inference):** `compute_fbank` + `EmbedModel::embed_features` + `cluster_offline`. Pure functions and ONNX hooks; needed when you want to batch inference across thousands of clips, apply non-default aggregation, or run offline-only on saved embeddings.
 
@@ -318,12 +318,12 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 
 ### In scope
 
-**`dia::segment` v0.X bump (rev-6 scope expansion):**
+**`diarization::segment` v0.X bump (rev-6 scope expansion):**
 - New `Action::SpeakerScores { id: WindowId, window_start: u64, raw_probs: Box<[[f32; FRAMES_PER_WINDOW]; MAX_SPEAKER_SLOTS as usize]> }` variant. Emitted from `push_inference(id, scores)` immediately before `Action::Activity` events for the same window. Carries the per-frame per-speaker raw probabilities used for downstream stitching.
 - Mark `Action` as `#[non_exhaustive]` so future variants are non-breaking.
 - No other public API changes; existing `Activity`, `VoiceSpan`, `NeedsInference` semantics unchanged.
 
-**`dia::embed`:**
+**`diarization::embed`:**
 - `EmbedModel` ort wrapper for WeSpeaker ResNet34
 - `EmbedModelOptions` mirroring `SegmentModelOptions`
 - Pure-Rust `kaldi-native-fbank` for feature extraction
@@ -336,7 +336,7 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 - Generic `EmbeddingMeta<A, T>` with `()` defaults
 - `EmbeddingResult` carries observability fields (`windows_used`, `total_weight`, `source_duration`)
 
-**`dia::cluster`:**
+**`diarization::cluster`:**
 - Online streaming `Clusterer` (threshold + EMA centroid update via unnormalized accumulator)
 - Offline `cluster_offline` with two methods:
   - **Spectral** (default): cosine affinity → normalized Laplacian → eigendecomposition → seeded K-means
@@ -344,11 +344,11 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 - Auto-K via eigengap (capped) or explicit `target_speakers`
 - Deterministic K-means seed (`OfflineClusterOptions::seed`)
 - All-zero-affinity precondition check
-- Re-uses `dia::embed::Embedding`
+- Re-uses `diarization::embed::Embedding`
 
-**`dia::Diarizer` (rev-6: pyannote-style reconstruction):**
+**`diarization::Diarizer` (rev-6: pyannote-style reconstruction):**
 - Builder API: `Diarizer::builder()` with `with_*` setters only (no `options()` setter)
-- Internal audio buffer with bounded retention (`dia::segment::WINDOW_SAMPLES` worth = 640 KB; see §5.7)
+- Internal audio buffer with bounded retention (`diarization::segment::WINDOW_SAMPLES` worth = 640 KB; see §5.7)
 - `process_samples(seg_model, embed_model, samples, emit)` — synchronous: push → segment → embed (`exclude_overlap`-masked) → cluster → reconstruct → emit
 - `finish_stream(seg_model, embed_model, emit)` — flush; closes any open per-cluster runs
 - **`exclude_overlap` embedding**: when extracting an embedding for speaker `S` in window `W`, the per-sample mask zeroes out frames where any other speaker in `W` is also active. Falls back to the speaker-only mask if the clean mask is too short to embed. Matches `pyannote.audio/pipelines/speaker_diarization.py:375-425`. See §5.8.
@@ -393,12 +393,12 @@ Following `dia::segment`'s precedent of giving callers escape hatches:
 ### 4.1 Crate-level constants and re-exports
 
 ```rust
-// Already exposed by dia::segment; canonical home stays in dia::segment.
+// Already exposed by diarization::segment; canonical home stays in diarization::segment.
 // Both modules re-export to avoid forcing callers to import from segment.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 ```
 
-### 4.2 `dia::embed`
+### 4.2 `diarization::embed`
 
 #### Constants
 
@@ -406,7 +406,7 @@ pub const SAMPLE_RATE_HZ: u32 = 16_000;
 /// 2 s @ 16 kHz; the WeSpeaker model's fixed input.
 ///
 /// Named with the `EMBED_` prefix to avoid collision with
-/// `dia::segment::WINDOW_SAMPLES` (which is 160_000 = 10 s at the same
+/// `diarization::segment::WINDOW_SAMPLES` (which is 160_000 = 10 s at the same
 /// rate). Same crate, different module — same short name would be a
 /// footgun.
 pub const EMBED_WINDOW_SAMPLES: u32 = 32_000;
@@ -583,7 +583,7 @@ impl EmbedModelOptions {
     pub fn with_providers(self, providers: Vec<ExecutionProviderDispatch>) -> Self;
     pub fn with_intra_op_num_threads(self, n: usize) -> Self;
     pub fn with_inter_op_num_threads(self, n: usize) -> Self;
-    // Mutating variants for parity with silero / dia::segment.
+    // Mutating variants for parity with silero / diarization::segment.
     pub fn set_optimization_level(&mut self, level: GraphOptimizationLevel) -> &mut Self;
     pub fn set_providers(&mut self, providers: Vec<ExecutionProviderDispatch>) -> &mut Self;
     pub fn set_intra_op_num_threads(&mut self, n: usize) -> &mut Self;
@@ -684,9 +684,9 @@ impl EmbedModel {
 
 `EmbedModel` auto-derives `Send`; does NOT auto-derive `Sync` because
 `ort::Session` is `!Sync`. Matches `silero::Session` and
-`dia::segment::SegmentModel`.
+`diarization::segment::SegmentModel`.
 
-### 4.3 `dia::cluster`
+### 4.3 `diarization::cluster`
 
 #### Constants
 
@@ -799,7 +799,7 @@ impl ClusterOptions {
     pub fn with_update_strategy(self, s: UpdateStrategy) -> Self;
     pub fn with_max_speakers(self, n: u32) -> Self;
     pub fn with_overflow_strategy(self, s: OverflowStrategy) -> Self;
-    // Mutating variants for parity with silero / dia::segment.
+    // Mutating variants for parity with silero / diarization::segment.
     pub fn set_similarity_threshold(&mut self, t: f32) -> &mut Self;
     pub fn set_update_strategy(&mut self, s: UpdateStrategy) -> &mut Self;
     pub fn set_max_speakers(&mut self, n: u32) -> &mut Self;
@@ -934,7 +934,7 @@ pub fn cluster_offline(
 ) -> Result<Vec<u64>, Error>;
 ```
 
-### 4.4 `dia::Diarizer`
+### 4.4 `diarization::Diarizer`
 
 #### Types
 
@@ -974,7 +974,7 @@ impl DiarizerOptions {
 /// source activity.
 ///
 /// Granularity is **per-(window, slot)** — one `CollectedEmbedding` per
-/// pre-reconstruction `SpeakerActivity` from `dia::segment`. This is
+/// pre-reconstruction `SpeakerActivity` from `diarization::segment`. This is
 /// finer-grained than the post-reconstruction `DiarizedSpan` output
 /// (one per closed cluster run). The two views are reconciled via
 /// `online_speaker_id` (the cluster id assigned at embed/cluster time,
@@ -986,7 +986,7 @@ pub struct CollectedEmbedding {
     pub embedding: Embedding,
     /// Online speaker id assigned by `Clusterer::submit` during streaming.
     pub online_speaker_id: u64,
-    /// Window-local slot from `dia::segment::SpeakerActivity`.
+    /// Window-local slot from `diarization::segment::SpeakerActivity`.
     pub speaker_slot: u8,
     /// Whether the embedding used the `exclude_overlap` clean mask
     /// (`true`) or fell back to the speaker-only mask (`false`).
@@ -1180,7 +1180,7 @@ pub enum InternalError {
     /// An emitted activity's range start is older than the audio
     /// buffer's earliest retained sample. Should never fire in
     /// practice — the §5.7 trim bound is exactly tight against the
-    /// `dia::segment::Segmenter` reach-back. If this fires, either
+    /// `diarization::segment::Segmenter` reach-back. If this fires, either
     /// (a) Segmenter's reach-back contract regressed, (b) caller is
     /// using a hand-rolled mid-level composition that supplies
     /// out-of-order activities, or (c) the Diarizer's audio buffer
@@ -1223,7 +1223,7 @@ debugging real `InvalidClip` errors aren't misled by sentinels.
 
 > **Important divergence from `findit-speaker-embedding`:** Python
 > center-crops clips longer than 2 s. dia uses sliding-window mean.
-> **Embeddings produced by dia::embed are NOT directly comparable with
+> **Embeddings produced by diarization::embed are NOT directly comparable with
 > Python output for clips > 2 s.** Cosine similarity between
 > dia-produced and Python-produced embeddings of the *same* clip will
 > typically land between 0.92 and 0.99 (still "same speaker" but
@@ -1671,7 +1671,7 @@ buffer retention manually.
 
 After every `process_samples` returns:
 
-- **Drop samples below `total_samples_pushed - dia::segment::WINDOW_SAMPLES`**
+- **Drop samples below `total_samples_pushed - diarization::segment::WINDOW_SAMPLES`**
   (i.e., 160 000 samples = 10 s back). **CRITICAL:** The bound is the
   *segment* window size, not the *embed* window size.
 
@@ -1683,7 +1683,7 @@ embed window." That reasoning is wrong: it confuses what
 `embed_model.embed(...)` reads from the buffer with what the *next*
 `process_samples` call will need.
 
-The actual constraint comes from `dia::segment::Segmenter`. Code trace
+The actual constraint comes from `diarization::segment::Segmenter`. Code trace
 on the v0.1.0-shipped segmenter (verified 2026-04-26):
 
 - `schedule_ready_windows` (`segmenter.rs:161-173`) emits a window with
@@ -1723,7 +1723,7 @@ i.e., it retains `WINDOW_SAMPLES - step_samples` samples — close to but
 slightly less than the Diarizer's bound, because the Segmenter doesn't
 need the tail-anchor margin until `finish()` is called).
 
-**Steady-state memory:** `dia::segment::WINDOW_SAMPLES * 4 bytes =
+**Steady-state memory:** `diarization::segment::WINDOW_SAMPLES * 4 bytes =
 160 000 × 4 = 640 KB`. Plus `Diarizer`'s own `VecDeque` overhead and
 the `CollectedEmbedding` vec (when `collect_embeddings = true`).
 
@@ -1780,7 +1780,7 @@ manifest only when the mask transitions in the middle of a fbank
 window — the gathered audio is contiguous in our path, vs the
 gathered features are contiguous in pyannote's.
 
-**Frame-rate verified.** `dia::segment::stitch::frame_to_sample`
+**Frame-rate verified.** `diarization::segment::stitch::frame_to_sample`
 defines `WINDOW_SAMPLES * frame_idx / FRAMES_PER_WINDOW = 160 000 *
 frame_idx / 589`, so a frame is ≈ 271.65 samples, ≈ 16.97 ms,
 ≈ 58.9 fps — **NOT** 100 fps / 10 ms / 160 samples (rev-6/7 prose
@@ -2109,7 +2109,7 @@ fn integrate_window(W, raw_probs[slot][frame], slot_to_cluster):
 
 **Finalization boundary**. A frame `f` is finalized when no future
 window can contribute to it. Following the same logic as
-`dia::segment::stitch::next_finalization_boundary`: a window with start
+`diarization::segment::stitch::next_finalization_boundary`: a window with start
 `s` covers frames `[frame_index_of(s), frame_index_of(s + WINDOW_SAMPLES))`.
 The smallest start of any *future* window is the next
 `Segmenter`-scheduled start, which is `(next_window_idx) * step_samples`
@@ -2125,7 +2125,7 @@ fn advance_finalization_boundary(W_id):
 ```
 
 The `Segmenter::peek_next_window_start()` accessor is added as part
-of the rev-6 segment v0.X bump (§3 in-scope items, "`dia::segment`
+of the rev-6 segment v0.X bump (§3 in-scope items, "`diarization::segment`
 v0.X bump" bullet). Returns `(next_window_idx as u64) * step_samples`
 if `!finished`, else `u64::MAX` (no future windows).
 
@@ -2159,7 +2159,7 @@ pub const SPEAKER_COUNT_WARM_UP_FRAMES_LEFT: u32 = 59;
 pub const SPEAKER_COUNT_WARM_UP_FRAMES_RIGHT: u32 = 59;
 ```
 
-(These are private constants in `dia::diarizer::reconstruct`. The
+(These are private constants in `diarization::diarizer::reconstruct`. The
 caller never sees them.)
 
 **Computation.** Done inline in §5.9 step C; see that block for the
@@ -2406,12 +2406,12 @@ overstated what the spec actually did — it kept a `as u32`
 truncating cast on `start_frame`/`end_frame` (review-8 T2-B caught
 this). Rev-9 fixes by using a Diarizer-internal `u64`-throughout
 helper that's bit-for-bit equivalent to
-`dia::segment::stitch::frame_to_sample` but doesn't truncate.
+`diarization::segment::stitch::frame_to_sample` but doesn't truncate.
 
 ```rust
-/// `dia::diarizer::reconstruct::frame_to_sample_u64`. Internal
+/// `diarization::diarizer::reconstruct::frame_to_sample_u64`. Internal
 /// helper. Bit-for-bit equivalent of
-/// `dia::segment::stitch::frame_to_sample(frame_idx: u32) -> u32`
+/// `diarization::segment::stitch::frame_to_sample(frame_idx: u32) -> u32`
 /// (rounded division), but operates on `u64` throughout to avoid
 /// truncating frame indices on long sessions. The segment's
 /// internal helper is `pub(crate)` and signatures u32 → u32 because
@@ -2431,13 +2431,13 @@ fn make_range(start_frame: u64, end_frame: u64) -> TimeRange {
 }
 ```
 
-Bit-exact equivalence to `dia::segment::stitch::frame_to_sample` is
+Bit-exact equivalence to `diarization::segment::stitch::frame_to_sample` is
 asserted by a unit test that runs both functions on `frame_idx in
 0..=FRAMES_PER_WINDOW * 4` (i.e., `0..=2356`, which covers the u32
 input range that segment uses) and checks they produce identical
 outputs after the appropriate u32 → u64 widening.
 
-(Once `dia::segment` adds a `pub(crate) frame_to_sample_u64` helper
+(Once `diarization::segment` adds a `pub(crate) frame_to_sample_u64` helper
 of its own — out of scope for v0.X bump but a v0.1.1 candidate —
 the Diarizer copy can be deleted in favor of segment's. Tracked as
 §15 #54.)
@@ -2590,7 +2590,7 @@ struct accesses. Specifically the offline-refinement snippet is now:)
 ```rust
 let collected = diar.collected_embeddings();
 let embeds: Vec<Embedding> = collected.iter().map(|c| c.embedding).collect();
-let refined: Vec<u64> = dia::cluster::cluster_offline(
+let refined: Vec<u64> = diarization::cluster::cluster_offline(
     &embeds,
     &OfflineClusterOptions::default(),
 )?;
@@ -2602,7 +2602,7 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 
 ### Unit tests
 
-**`dia::embed`:** as in rev 1, plus:
+**`diarization::embed`:** as in rev 1, plus:
 - NaN-input rejection: `compute_fbank(&[f32::NAN; 32_000])` → `Error::NonFiniteInput`.
 - `Embedding::normalize_from(&[0.0; 256])` → `None` (degenerate; below `NORM_EPSILON`).
 - `Embedding::normalize_from` round-trip: an already-normalized vector goes through with `||result|| ≈ 1.0` and per-component diff < `1e-6`.
@@ -2613,7 +2613,7 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 - `embed` of a 48 000-sample (= 3 s) clip uses 2 windows (start 0 and start 16 000; start 16 000 is also the tail anchor `48 000 - 32 000`, so dedup leaves 2), `windows_used = 2`.
 - `embed` of a 56 000-sample (= 3.5 s) clip uses 3 windows (start 0, start 16 000, tail anchor at start 24 000 = 56 000 - 32 000), `windows_used = 3`.
 
-**`dia::cluster`:**
+**`diarization::cluster`:**
 - All §5.5.1 edge cases.
 - Antipodal centroid update: `Clusterer::submit([1,0,...])` then `submit([-1,0,...])` doesn't panic; second submission becomes new speaker (not assigned).
 - Property: `RollingMean` accumulator magnitude bounded — for any sequence of `Clusterer::submit` calls under `RollingMean`, after `N` assignments any `SpeakerEntry::accumulator` satisfies `||accumulator||₂ <= N` (triangle inequality on a sum of `N` unit vectors). This is the load-bearing invariant — `cached_centroid`'s validity (`||cached_centroid|| > NORM_EPSILON` per §5.4) requires that `||accumulator||₂` not catastrophically zero out, and the upper bound complements it. Sanity check on `f32` precision behavior (no infinity, no NaN, no runaway growth).
@@ -2631,13 +2631,13 @@ let refined: Vec<u64> = dia::cluster::cluster_offline(
 - Isolated-node precondition: 3 embeddings where one is orthogonal to both others → `Error::AllDissimilar` (rev-2 spec would have *not* caught this; rev-3 does via degree-matrix check).
 - Zero-norm rejection: `cluster_offline(&[zero_embedding], _)` → `Error::DegenerateEmbedding`.
 
-**`dia::Diarizer`:**
+**`diarization::Diarizer`:**
 - All from rev 1.
 - Buffer underflow on pathological activity range → `Error::Internal(InternalError::AudioBufferUnderflow { .. })` (no panic).
 - Buffer overrun on pathological activity range → `Error::Internal(InternalError::AudioBufferOverrun { .. })` (no panic).
 - `num_speakers()` and `speakers()` reflect Clusterer state mid-stream.
 
-**`dia::Diarizer` reconstruction (rev-6):**
+**`diarization::Diarizer` reconstruction (rev-6):**
 
 Pure-compute tests (no ort, synthetic raw_probs):
 - **`exclude_overlap` clean-mask path**: window with two simultaneously-active slots, raw_probs designed so that frames 100-300 have *only* slot 0 active and frames 0-99 + 300-588 have both slots active. Activity for slot 0 covers all of [0, 588]. Verify `used_clean_mask = true`, `voice_probs` nonzero only at frames 100-300.
@@ -2692,13 +2692,13 @@ As in rev 1, plus the pyannote parity smoke test described above.
 ```rust
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<dia::cluster::Clusterer>();
-    assert_send_sync::<dia::Diarizer>();
+    assert_send_sync::<diarization::cluster::Clusterer>();
+    assert_send_sync::<diarization::Diarizer>();
 
     #[cfg(feature = "ort")]
     fn assert_send<T: Send>() {}
     #[cfg(feature = "ort")]
-    assert_send::<dia::embed::EmbedModel>();
+    assert_send::<diarization::embed::EmbedModel>();
 };
 ```
 
@@ -2706,7 +2706,7 @@ const _: fn() = || {
 
 - **`EmbedModel`**: auto-derives `Send` (from `ort::Session`); does NOT
   auto-derive `Sync`. Use one per worker. Same posture as
-  `dia::segment::SegmentModel` and `silero::Session`.
+  `diarization::segment::SegmentModel` and `silero::Session`.
 - **`Clusterer`**: auto-derives `Send + Sync`. State machine behind `&mut`.
 - **`Diarizer`**: auto-derives `Send + Sync`. ort sessions are passed by
   `&mut` per call rather than owned.
@@ -2715,7 +2715,7 @@ const _: fn() = || {
   counter (via `Segmenter::clear`); the `Clusterer`'s speaker IDs reset
   to 0. Does not discard or reload the ONNX sessions — those are
   external.
-- **Determinism**: same caveats as `dia::segment` — set
+- **Determinism**: same caveats as `diarization::segment` — set
   `intra_op_num_threads = 1` on both `SegmentModelOptions` and
   `EmbedModelOptions` for bit-exact reproducibility. K-means in spectral
   clustering uses `rand_chacha::ChaCha8Rng` (pinned by version in §7;
@@ -2734,7 +2734,7 @@ without `ort`, there's no constructor for fresh embeddings, and the
 spec doesn't ship serde for saved embeddings. Honest reasons to keep
 the borrow pattern:
 
-1. **Mirror `dia::segment::Segmenter`**: that state machine also
+1. **Mirror `diarization::segment::Segmenter`**: that state machine also
    borrows `SegmentModel` per call. Following the same pattern in
    `Diarizer` keeps the suite consistent.
 2. **Model reuse across sequential sessions in one thread**: a server
@@ -2766,16 +2766,16 @@ Same as rev 1.
 
 Same as rev 1.
 
-### 11.5 Diarizer audio buffer is bounded at `dia::segment::WINDOW_SAMPLES`
+### 11.5 Diarizer audio buffer is bounded at `diarization::segment::WINDOW_SAMPLES`
 
 The audio buffer is trimmed to retain the last
-`dia::segment::WINDOW_SAMPLES` (= 160 000 samples = 10 s) below
+`diarization::segment::WINDOW_SAMPLES` (= 160 000 samples = 10 s) below
 `total_samples_pushed`. **Steady-state memory: 640 KB** (160 000 × 4
 bytes) plus `VecDeque` overhead and the `CollectedEmbedding` vec.
 
 **Why the segment window, not the embed window:** see §5.7. Briefly:
 the segment's tail-anchored sliding window can place the start of a
-future window up to `dia::segment::WINDOW_SAMPLES` behind
+future window up to `diarization::segment::WINDOW_SAMPLES` behind
 `total_samples_pushed`, and the activity it produces may need any
 sample within that range. Trimming below that bound makes a future
 activity's audio range unrecoverable.
@@ -2964,7 +2964,7 @@ diarizer.finish_stream(&mut seg_model, &mut embed_model, |span| {
 
 The `map_dia_range_to_original` helper is application code, not
 provided by dia. (Action item §15 #50 considers whether dia should
-ship a `dia::utils::TimelineMap` helper for this — open question;
+ship a `diarization::utils::TimelineMap` helper for this — open question;
 might bloat the surface for limited gain.)
 
 **`Diarizer` introspection accessors useful for VAD-aware callers:**
@@ -2985,8 +2985,8 @@ might bloat the surface for limited gain.)
 
 From this brainstorm:
 
-- Three new modules: `dia::embed`, `dia::cluster`, `dia::Diarizer`.
-- `dia::embed` is feature-parity with `findit-speaker-embedding` plus
+- Three new modules: `diarization::embed`, `diarization::cluster`, `diarization::Diarizer`.
+- `diarization::embed` is feature-parity with `findit-speaker-embedding` plus
   sliding-window mean for long clips. Better quality than Python's
   center-crop. **Embeddings are NOT directly comparable with Python
   output for clips > 2 s** (cosine ≈ 0.92–0.99 typical for same speaker).
@@ -2999,11 +2999,11 @@ From this brainstorm:
 - `&[f32]` zero-copy throughout; `EmbeddingMeta<A, T>` generic with
   `()` defaults; consumed by value into the result.
 - Voice-weighted variant accepts caller-provided per-sample voice
-  probabilities; `dia::embed` does not run its own VAD.
+  probabilities; `diarization::embed` does not run its own VAD.
 - Sliding-window mean for clips > 2 s, zero-pad for clips ≤ 2 s,
   reject clips below `MIN_CLIP_SAMPLES`. Hardcoded 1 s hop.
 - `Embedding` newtype with `.similarity()` method; cosine = dot product.
-- Cross-window speaker linking IS in scope. New `dia::cluster` module.
+- Cross-window speaker linking IS in scope. New `diarization::cluster` module.
 - Online streaming `Clusterer` with EMA-on-unnormalized-accumulator
   centroid update (rev-2 fix; rev-1's L2-then-arithmetic-mean was
   unsound on antipodal updates). `Reject` is the default
@@ -3030,13 +3030,13 @@ From this brainstorm:
 - `ClusterAssignment::similarity` is `Option<f32>` not `f32 = -1.0`
   sentinel (rev-2; -1.0 is a valid cosine value).
 - `WINDOW_SAMPLES` renamed to `EMBED_WINDOW_SAMPLES` to avoid collision
-  with `dia::segment::WINDOW_SAMPLES = 160_000` (rev-2).
+  with `diarization::segment::WINDOW_SAMPLES = 160_000` (rev-2).
 - `collected_embeddings()` returns `&[CollectedEmbedding]` struct slice
   (rev-2; rev-1's `&[(TimeRange, Embedding)]` tuples lacked context
   for offline reconciliation).
 - `DiarizerBuilder` uses only `with_*` setters (rev-2; rev-1 mixed
   `options(opts)` and `with_*` which was inconsistent).
-- Top-level `dia::Diarizer` orchestrator. Borrows `&mut SegmentModel`
+- Top-level `diarization::Diarizer` orchestrator. Borrows `&mut SegmentModel`
   and `&mut EmbedModel` per call. Rationale (rev-2): mirror Segmenter
   pattern + allow model reuse across sessions; the rev-1
   "ort-independence" rationale was a phantom feature.
@@ -3082,7 +3082,7 @@ From this brainstorm:
   mapping.
 - **Frame rate ≈ 58.9 fps (rev-8 correction):** rev-6/7 prose said
   "100 fps / 10 ms / 160 samples" repeatedly. Verified by reading
-  shipped `dia::segment::stitch::frame_to_sample`: `WINDOW_SAMPLES *
+  shipped `diarization::segment::stitch::frame_to_sample`: `WINDOW_SAMPLES *
   frame_idx / FRAMES_PER_WINDOW = 160_000 * frame_idx / 589` ≈ 271.65
   samples/frame ≈ 16.97 ms/frame ≈ 58.9 fps. Rev-8 corrects throughout.
 - **Argmax tie-break: smallest cluster_id wins (rev-6 / rev-8 highlight
@@ -3130,12 +3130,12 @@ From this brainstorm:
     `EMBED_WINDOW_SAMPLES` (~128 KB), claiming the segment's
     tail-anchor reach-back was irrelevant. That tightening was
     incorrect; it underflows on real workloads. Rev 3 restores the
-    `dia::segment::WINDOW_SAMPLES` bound (640 KB).
+    `diarization::segment::WINDOW_SAMPLES` bound (640 KB).
 - **Revision 3** (2026-04-26): incorporates second adversarial-review
   feedback.
   - **Critical fix (T1-A):** §5.7 / §11.5 audio buffer trim bound
     reverted from `EMBED_WINDOW_SAMPLES` to
-    `dia::segment::WINDOW_SAMPLES`; steady-state memory restored to
+    `diarization::segment::WINDOW_SAMPLES`; steady-state memory restored to
     640 KB. Adds explanatory rationale on the segment tail-anchor
     reach-back.
   - **Algorithmic fix (T1-B):** §5.5 spectral clustering precondition
@@ -3162,15 +3162,15 @@ From this brainstorm:
   - **Builder parity:** `EmbedModelOptions`, `ClusterOptions`,
     `OfflineClusterOptions`, `DiarizerOptions` all gain `set_*`
     mutating methods alongside the consuming `with_*` builders, for
-    parity with `silero` and `dia::segment`.
+    parity with `silero` and `diarization::segment`.
   - **`Embedding` invariant:** rustdoc on `Embedding` makes the
     L2-norm > NORM_EPSILON invariant explicit and points to
     `normalize_from` as the only constructor that can break it
     (returns `None` instead).
   - **`DegenerateEmbedding` error variant:** new variant in BOTH
-    `dia::embed::Error` and `dia::cluster::Error` for
-    zero-norm/near-zero-norm cases — rev 2 (in `dia::cluster`) and the
-    initial design (in `dia::embed`) both misnamed these as
+    `diarization::embed::Error` and `diarization::cluster::Error` for
+    zero-norm/near-zero-norm cases — rev 2 (in `diarization::cluster`) and the
+    initial design (in `diarization::embed`) both misnamed these as
     `NonFiniteInput` (zero IS finite).
   - **Misc:** §1 wording (`findit-speaker-embedding` does not provide
     clustering — clustering layer is "novel," not "deferred"), free
@@ -3284,9 +3284,9 @@ From this brainstorm:
     + accessors, for visibility consistency within the cluster
     module (review-4 T3-A).
   - **§5.7 / §11.5 code-trace verification (review-4 T2-A):** the
-    `total_samples_pushed - dia::segment::WINDOW_SAMPLES` trim bound
+    `total_samples_pushed - diarization::segment::WINDOW_SAMPLES` trim bound
     is now justified by line-number references into the shipped
-    `dia::segment::segmenter.rs` and `window.rs`. Pushed back on
+    `diarization::segment::segmenter.rs` and `window.rs`. Pushed back on
     the reviewer's "could be `step_samples + WINDOW_SAMPLES = 200 000`"
     claim — code trace shows the bound is exactly `WINDOW_SAMPLES`,
     not `WINDOW_SAMPLES + step_samples`.
@@ -3328,7 +3328,7 @@ From this brainstorm:
   because it has been verified in prod." Diarizer output semantics
   change: spans are stitched per closed speaker turn, not per
   (window, slot) detection.
-  - **`dia::segment` v0.X bump:** new `Action::SpeakerScores { id,
+  - **`diarization::segment` v0.X bump:** new `Action::SpeakerScores { id,
     window_start, raw_probs }` variant emitted from `push_inference`
     alongside `Action::Activity`. Carries the per-frame per-speaker
     raw probabilities used for downstream stitching. `Action` marked
@@ -3347,7 +3347,7 @@ From this brainstorm:
   - **Per-frame per-cluster activation stitching (§5.9, new):**
     matches `reconstruct` (collapse-by-max within cluster, per
     chunk) plus `Inference.aggregate(skip_average=True)` (overlap-add
-    SUM across chunks). State machine in `dia::diarizer::reconstruct`.
+    SUM across chunks). State machine in `diarization::diarizer::reconstruct`.
   - **Speaker-count tracking (§5.10, new):** matches `speaker_count`
     with `warm_up=(0.1, 0.1)`. Per-frame overlap-add MEAN of
     binarized speaker counts, rounded. Hardcoded warm-up matches
@@ -3386,7 +3386,7 @@ From this brainstorm:
     inactive-slot skip. Plus pyannote parity smoke test (rev-7
     target: DER ≤ 5%; rev-8 relaxed to ≤ 10% per review-7 T3-I).
   - **§3 deferred items:** updated to remove "Per-frame voice prob
-    from `dia::segment` integrated path" (now in scope as
+    from `diarization::segment` integrated path" (now in scope as
     `Action::SpeakerScores`); added `min_cluster_size` cluster
     pruning, VBx clustering, configurable warm_up, configurable
     per-frame `min_duration_on/off`.
@@ -3430,7 +3430,7 @@ From this brainstorm:
     detection, plus 6 quality-metric tests for the three new
     DiarizedSpan fields.
   - **§15 #50 (deferred):** open question whether dia should ship a
-    `dia::utils::TimelineMap` helper for VAD-to-original timeline
+    `diarization::utils::TimelineMap` helper for VAD-to-original timeline
     mapping. Defer to v0.1.1+ pending real-world need.
   - **No algorithmic changes.** The rev-6 algorithm already handled
     variable-length VAD-filtered input correctly (segment buffers
@@ -3461,7 +3461,7 @@ From this brainstorm:
   - **§4.4 / §5.8 / §5.10 (review-7 T1-C):** SAMPLES_PER_FRAME is
     `WINDOW_SAMPLES / FRAMES_PER_WINDOW = 160_000 / 589 ≈ 271.65`,
     not the "160 / 100 fps / 10 ms" rev-7 prose claimed. Verified
-    against shipped `dia::segment::stitch::frame_to_sample`. §5.8 now
+    against shipped `diarization::segment::stitch::frame_to_sample`. §5.8 now
     uses correct frame-to-sample expansion via the actual
     `frame_to_sample` function (not a hardcoded constant).
     `MIN_CLEAN_FRAMES` (rev-7's separate constant) dropped in favor
@@ -3568,7 +3568,7 @@ From this brainstorm:
     this in the existing review-7 rejection block.
   - **§15 #54 (review-8 T2-B follow-up):** new low-severity action
     item to add `pub(crate) frame_to_sample_u64` to
-    `dia::segment::stitch` in v0.1.1 so the Diarizer can drop its
+    `diarization::segment::stitch` in v0.1.1 so the Diarizer can drop its
     internal copy.
 
 ## 14. Findings rejected from reviews
@@ -3578,8 +3578,8 @@ For traceability across both adversarial-review rounds.
 ### From review 1 (rev 1 → rev 2)
 
 - **T2-C** (drop generic `EmbeddingMeta<A, T>` to "match
-  `dia::segment::Clip`"): **rejected, sustained in rev 3.** There is
-  no `dia::segment::Clip` type — `Segmenter::push_samples(&[f32])`
+  `diarization::segment::Clip`"): **rejected, sustained in rev 3.** There is
+  no `diarization::segment::Clip` type — `Segmenter::push_samples(&[f32])`
   takes raw samples directly (verified by re-reading
   `dia/src/segment/segmenter.rs` during rev-3 work). The reviewer's
   "consistency" argument is based on a type that doesn't exist. More
@@ -3621,7 +3621,7 @@ For traceability across both adversarial-review rounds.
   + WINDOW_SAMPLES = 200 000` not 160 000" and that the
   `WINDOW_SAMPLES` bound was an unverified design assertion. The
   specific number is wrong: code trace on shipped
-  `dia::segment::segmenter.rs` (`schedule_ready_windows` at lines
+  `diarization::segment::segmenter.rs` (`schedule_ready_windows` at lines
   161-173, `emit_speaker_activities` at lines 282-329, `finish` at
   lines 453-474) and `window.rs` (`plan_starts` at line 36) shows
   the bound is exactly `WINDOW_SAMPLES`. The reviewer's hypothetical
@@ -3691,7 +3691,7 @@ but by a user-mandate scope clarification (VAD-prerequisite contract
   no-op for clips ≤ 2 s). T3-A (§3.1 phantom reference removed),
   T3-B (§4.4 min_duration_off note honestified to "v0.1.0: no
   merging; see §15 #48 for v0.1.1"), T3-E (`SAMPLE_RATE_TB` referenced
-  via `dia::segment` re-exports throughout), T3-F (`u64` everywhere
+  via `diarization::segment` re-exports throughout), T3-F (`u64` everywhere
   in frame arithmetic; no `as u32` truncating casts), T3-G
   (§5.9 explicit "buffer per WindowId; integrate when both
   Activity events and SpeakerScores have arrived"), T3-H
@@ -3729,10 +3729,10 @@ These don't block v0.1.0 but should be tracked:
 | #  | Item                                                                                              | Severity |
 | -- | ------------------------------------------------------------------------------------------------- | -------- |
 | 1  | Add `EmbeddingMeta::audio_id_mut` / `track_id_mut` if a real use case appears                     | low      |
-| 22 | Numerical parity test: compare `dia::embed::compute_fbank` against `kaldi-native-fbank` C++ reference and against `torchaudio.compliance.kaldi.fbank` (Python) on a fixed input vector. Threshold: per-coefficient |Δ| < 1e-4. | high  |
+| 22 | Numerical parity test: compare `diarization::embed::compute_fbank` against `kaldi-native-fbank` C++ reference and against `torchaudio.compliance.kaldi.fbank` (Python) on a fixed input vector. Threshold: per-coefficient |Δ| < 1e-4. | high  |
 | 23 | EMA(α) sensitivity analysis: empirically tune α on a known-labeled multi-speaker dataset; revisit `DEFAULT_EMA_ALPHA = 0.2` if a better value emerges. | medium |
 | 24 | Persistent global speaker IDs across sessions (re-identification): match new-session embeddings against saved centroids from a prior session.                                                                          | low |
-| 25 | Per-frame voice prob exposure from `dia::segment` so `embed_weighted` can be wired internally (no external VAD needed when using the Diarizer)                                                                         | medium |
+| 25 | Per-frame voice prob exposure from `diarization::segment` so `embed_weighted` can be wired internally (no external VAD needed when using the Diarizer)                                                                         | medium |
 | 26 | F1-style numerical parity test plan against `findit-speaker-embedding` Python output on clips ≤ 2 s (where dia and Python should agree, modulo floating-point noise)                                                  | medium |
 | 27 | `Diarizer` integration test on a real multi-speaker recording (e.g., a 5-minute podcast clip with 2-3 speakers) — manual inspection of speaker IDs                                                                    | high |
 | 28 | Investigate sub-quadratic spectral clustering (Nyström approximation or sparse Laplacian) for very long sessions (N > 5000)                                                                                            | low |
@@ -3750,15 +3750,15 @@ These don't block v0.1.0 but should be tracked:
 | 40 | (rev-2 review) Telemetry: optional `tracing` spans inside `Diarizer::process_samples` for per-activity embedding-and-clustering timings. Gated behind a feature flag to avoid forcing the dep on no-tracing users.    | low |
 | 41 | (rev-2 review) Verify `kaldi-native-fbank` numerical agreement with the C++ `knf-rs` binding on a 30-second test clip. If divergent beyond 1e-3, investigate which is more correct vs Python's torchaudio reference. | medium |
 | 42 | (rev-3 review T3-C) Float32 precision impact on `RollingMean` for sessions with `N > 10⁶` assignments — once `||accumulator||` reaches ~10⁶, per-component lower bits of the `f32` mantissa (≈7 decimal digits) can drift, biasing the L2-normalized centroid direction. Investigate periodic accumulator renormalization (e.g., `accumulator /= ||accumulator||` every 10 000 assignments to keep magnitude near 1) or upgrading the accumulator to `f64` internally. Not a v0.1.0 issue (typical sessions are well under 10⁶); flagged for tracking.                                                                                                                                                                                       | low |
-| 43 | (rev-4 review T2-D) **PRE-IMPLEMENTATION SPIKE** (run before writing the `dia::embed` module): integrate `kaldi-native-fbank = "0.1"` against `findit-speaker-embedding`'s reference embeddings on a fixed 16 kHz test clip and assert per-coefficient agreement with `torchaudio.compliance.kaldi.fbank` to `< 1e-4`. The crate is brand-new (0.1.0 published 2026-01-12 by RustedBytes, single version, ~1.4k downloads) and has not yet been validated in production. If the spike fails, fall back to `knf-rs` (C++ binding) **before** committing the dep in §7. This protects against shipping v0.1.0 with an fbank crate that subtly disagrees with the Python reference. Distinct from item 41 (post-ship continuous verification); this item is a go/no-go gate. | high |
+| 43 | (rev-4 review T2-D) **PRE-IMPLEMENTATION SPIKE** (run before writing the `diarization::embed` module): integrate `kaldi-native-fbank = "0.1"` against `findit-speaker-embedding`'s reference embeddings on a fixed 16 kHz test clip and assert per-coefficient agreement with `torchaudio.compliance.kaldi.fbank` to `< 1e-4`. The crate is brand-new (0.1.0 published 2026-01-12 by RustedBytes, single version, ~1.4k downloads) and has not yet been validated in production. If the spike fails, fall back to `knf-rs` (C++ binding) **before** committing the dep in §7. This protects against shipping v0.1.0 with an fbank crate that subtly disagrees with the Python reference. Distinct from item 41 (post-ship continuous verification); this item is a go/no-go gate. | high |
 | 44 | **VBx (Variational Bayes HMM Clustering of x-vectors)** as a third `OfflineMethod` for `cluster_offline`. VBx is `pyannote-audio`'s **default** offline clusterer (`speaker_diarization.py:210`); it pairs Agglomerative Hierarchical Clustering for initialization with a Variational Bayes EM refinement using PLDA scoring (Landini et al., "Bayesian HMM clustering of x-vector sequences in the LIUM speaker diarization system," 2022). Better quality than spectral on long meetings with many speakers, but: (a) batch-only — no streaming variant exists in literature; (b) requires a pre-trained PLDA model (separate training pipeline + bundled weights); (c) ~3–5× slower than spectral. Adds significant scope. Defer to v0.2 once spectral has shipped and we have a comparison baseline. (See §13 history for why we did NOT port pyannote-audio wholesale — they're a 20k-line file-in/file-out PyTorch toolkit, but VBx is a specific algorithm worth implementing on top of our streaming-friendly substrate.) | medium |
 | 45 | **Threshold tuning A/B**: empirically compare `cluster_offline` defaults against pyannote-audio's defaults (Agglomerative `centroid`-linkage threshold 0.7 vs our `Average`-linkage threshold 0.5; spectral threshold tuning). On a held-out multi-speaker dataset, measure DER (diarization error rate) across the 2D grid of (linkage, threshold). May change `DEFAULT_SIMILARITY_THRESHOLD` in v0.1.1 if a clearly-better default emerges. | low |
-| 46 | (rev-6) **Pyannote parity-test harness setup** (referenced from §9): wire up a Python sidecar (uv-managed) that runs `pyannote.audio.SpeakerDiarization` on a fixed 5-minute multi-speaker WAV, exports the reference Annotation as RTTM, and a Rust integration test that runs `dia::Diarizer` on the same WAV, exports its DiarizedSpans as RTTM, and runs `pyannote.metrics.diarization.DiarizationErrorRate` to compute DER. Assertion: DER ≤ 5% absolute. Gated via `#[ignore]` (requires Python toolchain and downloaded models; not part of default `cargo test`). The harness also doubles as the kaldi-native-fbank validation harness (§15 #43) since both need a fixed reference clip + Python reference. | high |
+| 46 | (rev-6) **Pyannote parity-test harness setup** (referenced from §9): wire up a Python sidecar (uv-managed) that runs `pyannote.audio.SpeakerDiarization` on a fixed 5-minute multi-speaker WAV, exports the reference Annotation as RTTM, and a Rust integration test that runs `diarization::Diarizer` on the same WAV, exports its DiarizedSpans as RTTM, and runs `pyannote.metrics.diarization.DiarizationErrorRate` to compute DER. Assertion: DER ≤ 5% absolute. Gated via `#[ignore]` (requires Python toolchain and downloaded models; not part of default `cargo test`). The harness also doubles as the kaldi-native-fbank validation harness (§15 #43) since both need a fixed reference clip + Python reference. | high |
 | 47 | (rev-6) **Configurable speaker-count `warm_up`**: rev-6 hardcodes `(0.1, 0.1)` to match pyannote default. Expose via `DiarizerOptions::with_speaker_count_warm_up_ratio` if user tuning becomes a real ask. | low |
 | 48 | (rev-6) **Configurable `min_duration_on/off`** for per-cluster RLE: rev-6 emits any closed run as a DiarizedSpan. Pyannote applies `min_duration_on`/`min_duration_off` thresholds in `to_annotation`. Adding ours is straightforward but defer until we have user feedback on whether tiny spans / micro-gaps cause downstream issues. | low |
 | 49 | (rev-6) **Mask-aware embedding ONNX export**: WeSpeaker ONNX export currently takes only waveform. Pyannote's mask is consumed inside the model. We approximate via per-window mean weighting in `embed_weighted`. If we ever re-export WeSpeaker with a mask input, switch the §5.8 mask path to feed it directly to the model — closer to pyannote behavior. Significant scope (re-export + maintain alongside the current export). | medium |
-| 50 | (rev-7) **`dia::utils::TimelineMap` helper for VAD-to-original mapping**: caller-side `Vec<(dia_offset, original_offset)>` log + `map_dia_range_to_original(TimeRange) -> TimeRange` helper. Currently the caller writes this themselves (~30 lines, see §11.12 example). Could ship a small `dia::utils::TimelineMap` struct with `record(dia_offset, original_offset)` / `lookup(dia_range)` API. Defer until we have evidence that >1 caller has implemented this independently — premature standardization. | low |
+| 50 | (rev-7) **`diarization::utils::TimelineMap` helper for VAD-to-original mapping**: caller-side `Vec<(dia_offset, original_offset)>` log + `map_dia_range_to_original(TimeRange) -> TimeRange` helper. Currently the caller writes this themselves (~30 lines, see §11.12 example). Could ship a small `diarization::utils::TimelineMap` struct with `record(dia_offset, original_offset)` / `lookup(dia_range)` API. Defer until we have evidence that >1 caller has implemented this independently — premature standardization. | low |
 | 51 | (rev-7) **Per-VAD-range diarization with shared speakers**: API for callers who want each VAD range to produce its own clean DiarizedSpans (no spans crossing original-VAD-range boundaries) while keeping speaker IDs consistent across ranges. Currently requires manual mid-level orchestration. Could provide `Diarizer::checkpoint() / restore_after_clear` or `Diarizer::process_chunk_isolated(samples)` that finishes-then-resumes without speaker-state loss. Defer; the §11.12 caller pattern (concatenate + post-process) is sufficient for v0.1.0. | medium |
 | 52 | (rev-8 review-7 T2-E) **ChaCha8Rng keystream byte-fixture regression test** (PRE-IMPL): assert that `ChaCha8Rng::seed_from_u64(42).next_u64()` (and a small handful of other seeds × draws) produces the exact `u64` values we record now. Test runs under both default features and `default-features = false`. Goal: catch a future `rand_chacha` minor-version bump that quietly changes the cipher's stream output, since our public determinism contract (§11.9) depends on byte-stable output. The fixture is ~6 lines of test code; the alarm value is high (silent reproducibility break across users upgrading dia transitively). | high |
 | 53 | (rev-8 review-7 T4-A) **`Action::SpeakerScores` allocation churn**: the variant carries `Box<[[f32; 589]; 3]>` ≈ 7 KB per emission. For a 60-min stream at default `step_samples = 40_000`, that's ~1440 windows × 7 KB = ~10 MB of allocations through the lifetime, all short-lived (consumed by the Diarizer's pump within the same `process_samples` call). Could pool the buffers (`pub(crate) Segmenter::take_speaker_score_buf` returning a `Box` from a small-pool freelist that the Diarizer returns post-consume) or pass `&[[f32; 589]; 3]` borrowed from segmenter scratch. Defer until profiling shows allocator pressure. | low |
-| 54 | (rev-9 review-8 T2-B) **`dia::segment::stitch::frame_to_sample_u64` helper** in `dia::segment` v0.1.1: add `pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64` alongside the existing `u32`-typed helper. The Diarizer currently carries a copy of this function (§5.11 `make_range`) to avoid the truncating cast. Once segment ships its own `u64` helper, the Diarizer copy can be deleted. Bit-exact equivalence is asserted by a unit test in §9. | low |
+| 54 | (rev-9 review-8 T2-B) **`diarization::segment::stitch::frame_to_sample_u64` helper** in `diarization::segment` v0.1.1: add `pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64` alongside the existing `u32`-typed helper. The Diarizer currently carries a copy of this function (§5.11 `make_range`) to avoid the truncating cast. Once segment ships its own `u64` helper, the Diarizer copy can be deleted. Bit-exact equivalence is asserted by a unit test in §9. | low |

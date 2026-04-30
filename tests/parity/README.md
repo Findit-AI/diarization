@@ -9,7 +9,7 @@ on a curated multi-speaker clip.
 ## Layout
 
 - `Cargo.toml` / `src/main.rs` — Rust binary `dia-parity` that runs
-  `dia::Diarizer` on a clip and dumps RTTM to stdout.
+  `diarization::Diarizer` on a clip and dumps RTTM to stdout.
 - `python/pyproject.toml` / `python/reference.py` — pyannote.audio
   reference: same clip → reference RTTM.
 - `python/score.py` — DER computation between two RTTMs.

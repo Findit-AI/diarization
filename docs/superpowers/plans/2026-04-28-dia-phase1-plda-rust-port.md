@@ -4,11 +4,11 @@
 
 **Goal:** Port `pyannote/audio` PLDA transformation
 (`pyannote.audio.utils.vbx.vbx_setup` + `xvec_tf` + `plda_tf` —
-`utils/vbx.py:181-218`) to Rust as a standalone `dia::plda` module.
+`utils/vbx.py:181-218`) to Rust as a standalone `diarization::plda` module.
 Verify byte-for-byte (within float-cast tolerance) parity against the
 Phase-0 captured `plda_embeddings.npz` artifacts.
 
-**Architecture:** New top-level module `dia::plda` with three responsibilities — load the two `.npz` weight files, expose `xvec_transform(&[f32; 256]) -> [f64; 128]` and `plda_transform(&[f64; 128]) -> [f64; 128]`, and pre-compute `phi` (the descending-sorted eigenvalue diagonal that VBx will consume in Phase 2). Internally uses `nalgebra` for matrix ops and the generalized-eigenvalue solve, plus a new `npyz` dependency for `.npz` parsing.
+**Architecture:** New top-level module `diarization::plda` with three responsibilities — load the two `.npz` weight files, expose `xvec_transform(&[f32; 256]) -> [f64; 128]` and `plda_transform(&[f64; 128]) -> [f64; 128]`, and pre-compute `phi` (the descending-sorted eigenvalue diagonal that VBx will consume in Phase 2). Internally uses `nalgebra` for matrix ops and the generalized-eigenvalue solve, plus a new `npyz` dependency for `.npz` parsing.
 
 **Tech Stack:** Rust + `nalgebra` 0.34 (already a dep) + `npyz` (new). f64 throughout to match numpy's default; f32→f64 promotion happens at the input boundary.
 
@@ -150,7 +150,7 @@ pub const EMBEDDING_DIMENSION: usize = 256;
 `src/plda/error.rs`:
 
 ```rust
-//! Error type for `dia::plda`.
+//! Error type for `diarization::plda`.
 
 use std::path::PathBuf;
 
@@ -223,7 +223,7 @@ Expected: `Finished dev profile`. Some unused-import warnings are acceptable sin
 
 ```bash
 git add Cargo.toml src/lib.rs src/plda/mod.rs src/plda/error.rs
-git commit -m "plda: scaffold dia::plda module + npyz dep"
+git commit -m "plda: scaffold diarization::plda module + npyz dep"
 ```
 
 No `Co-Authored-By` trailer.
@@ -632,14 +632,14 @@ The Phase-0 capture wrote `tests/parity/fixtures/01_dialogue/raw_embeddings.npz`
 Create `tests/parity_plda.rs`:
 
 ```rust
-//! Parity tests for `dia::plda` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::plda` against the Phase-0 captured artifacts.
 //!
 //! Skipped (with eprintln warning) if the captured artifacts are not
 //! present — Phase 0 must have been run for these to exist.
 
 use std::path::PathBuf;
 
-use dia::plda::{PldaTransform, EMBEDDING_DIMENSION, PLDA_DIMENSION};
+use diarization::plda::{PldaTransform, EMBEDDING_DIMENSION, PLDA_DIMENSION};
 use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 use std::{fs::File, io::BufReader};
@@ -1077,7 +1077,7 @@ git commit -m "plda: plda_transform via generalized eigh + parity test"
 Pull the inline `mod loader_tests` from Task 2 into a shared `src/plda/tests.rs`:
 
 ```rust
-//! Unit tests for `dia::plda`. Heavy parity tests live in
+//! Unit tests for `diarization::plda`. Heavy parity tests live in
 //! `tests/parity_plda.rs`; this module covers the small, model-free
 //! invariants that the load/transform paths must hold for any input.
 
@@ -1238,7 +1238,7 @@ gh pr create --base 0.1.0 --head feat/phase1-plda \
 Implements **Phase 1** of the Option-A pyannote-parity work
 (`docs/superpowers/plans/2026-04-28-dia-phase1-plda-rust-port.md`).
 
-This PR adds the new `dia::plda` module: a standalone Rust port of
+This PR adds the new `diarization::plda` module: a standalone Rust port of
 `pyannote.audio.utils.vbx.vbx_setup` + the inner `xvec_tf` and `plda_tf`
 lambdas (`utils/vbx.py:181-218` in pyannote.audio 4.0.4). The module is
 not yet integrated into `Diarizer` — that wiring lands in a later phase.

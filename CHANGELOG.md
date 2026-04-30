@@ -1,10 +1,10 @@
 # UNRELEASED
 
-This release ships `dia::embed`, `dia::cluster`, and `dia::Diarizer`,
-completing the v0.1.0 phase 2 vision. `dia::segment` gains an additive
+This release ships `diarization::embed`, `diarization::cluster`, and `diarization::Diarizer`,
+completing the v0.1.0 phase 2 vision. `diarization::segment` gains an additive
 v0.X bump (see CORRECTNESS GUARANTEES below).
 
-FEATURES — `dia::embed`
+FEATURES — `diarization::embed`
 
 - **`Embedding`** newtype (256-d L2-normalized) with invariant
   `||embedding|| > NORM_EPSILON`, enforced by `Embedding::normalize_from`
@@ -14,7 +14,7 @@ FEATURES — `dia::embed`
   per the spec §15 #43 pre-impl spike.
 - **`EmbedModel`** ort wrapper for WeSpeaker ResNet34. `from_file` /
   `from_memory` constructors with `_with_options` variants. Auto-derives
-  `Send`; explicitly `!Sync` (matches `dia::segment::SegmentModel`).
+  `Send`; explicitly `!Sync` (matches `diarization::segment::SegmentModel`).
 - **`embed`** / **`embed_with_meta`**: high-level API. Sliding-window
   mean for clips > 2 s.
 - **`embed_weighted`** / **`embed_weighted_with_meta`**: per-sample
@@ -26,7 +26,7 @@ FEATURES — `dia::embed`
   metadata path is zero-cost.
 - **`cosine_similarity`** free function alongside `Embedding::similarity`.
 
-FEATURES — `dia::cluster`
+FEATURES — `diarization::cluster`
 
 - **Online streaming `Clusterer`** with `submit(&Embedding)` returning
   `ClusterAssignment { speaker_id, is_new_speaker, similarity }`.
@@ -48,7 +48,7 @@ FEATURES — `dia::cluster`
 - **N ≤ 2 fast paths** before any matrix work; isolated-node
   precondition catches dissimilar inputs without an undefined Laplacian.
 
-FEATURES — `dia::Diarizer` (rev-6 pyannote-style reconstruction)
+FEATURES — `diarization::Diarizer` (rev-6 pyannote-style reconstruction)
 
 - **`process_samples`** / **`finish_stream`**: streaming entry points
   borrowing `&mut SegmentModel` + `&mut EmbedModel` per call.
@@ -75,7 +75,7 @@ FEATURES — `dia::Diarizer` (rev-6 pyannote-style reconstruction)
   `buffered_frames`, `total_samples_pushed`, `num_speakers`, `speakers`.
 - **Auto-derived `Send + Sync`**.
 
-FEATURES — `dia::segment` v0.X bump
+FEATURES — `diarization::segment` v0.X bump
 
 - **`Action::SpeakerScores { id, window_start, raw_probs }`** variant
   emitted from `push_inference` alongside `Action::Activity`.
@@ -88,7 +88,7 @@ CORRECTNESS GUARANTEES
 
 - **Bit-deterministic offline clustering** for a given input + seed,
   enforced by `tests/chacha_keystream_fixture.rs` regression test.
-- **Frame-rate math verified**: `dia::segment::stitch::frame_to_sample`
+- **Frame-rate math verified**: `diarization::segment::stitch::frame_to_sample`
   yields ≈ 271.65 samples/frame (≈ 58.9 fps); the Diarizer carries a
   `frame_to_sample_u64` helper bit-exactly equivalent to segment's
   `u32` version.
@@ -99,7 +99,7 @@ CORRECTNESS GUARANTEES
 
 TESTING
 
-- ~175 unit tests across `dia::embed`, `dia::cluster`, `dia::diarizer`.
+- ~175 unit tests across `diarization::embed`, `diarization::cluster`, `diarization::diarizer`.
 - 149 lib tests pass on `--no-default-features --features std` (no ort).
 - Gated integration tests for end-to-end Diarizer pump on a 30-s clip
   (8 #[ignore]'d tests in `tests/integration_diarizer.rs`).
@@ -129,12 +129,12 @@ KNOWN LIMITATIONS / DEFERRED TO v0.1.1+
 
 # 0.1.0 (2026-04-26)
 
-Initial release. Ships the `dia::segment` module — Sans-I/O speaker
+Initial release. Ships the `diarization::segment` module — Sans-I/O speaker
 segmentation backed by `pyannote/segmentation-3.0` ONNX.
 
 FEATURES
 
-- **Sans-I/O state machine** (`dia::segment::Segmenter`) with no `ort`
+- **Sans-I/O state machine** (`diarization::segment::Segmenter`) with no `ort`
   dependency. Caller pumps audio in via `push_samples`, drains `Action`s
   via `poll`, runs ONNX inference externally, and pushes scores back via
   `push_inference`. The state machine is exercisable in unit tests with
@@ -146,7 +146,7 @@ FEATURES
   with `from_file`, `from_memory`, and `*_with_options` constructors.
 - **`SegmentModelOptions`** builder for `GraphOptimizationLevel`,
   `ExecutionProviderDispatch`, intra/inter thread counts. Both `ort`
-  types are re-exported from `dia::segment`.
+  types are re-exported from `diarization::segment`.
 - **`mediatime`-based time types** (`TimeRange`, `Timestamp`, `Duration`)
   for every sample range and duration crossing the public API.
 - **Sliding-window scheduling** with configurable step (default 2.5 s)
@@ -216,7 +216,7 @@ KNOWN LIMITATIONS
 
 DEFERRED FOR v0.2
 
-- `dia::embed` module (speaker embedding via WeSpeaker ResNet34).
+- `diarization::embed` module (speaker embedding via WeSpeaker ResNet34).
 - `infer_batch` for cross-stream batching, `IoBinding`-based
   reusable-output-buffer fast path, `Arc<[f32]>` in `Action::NeedsInference`.
 - `serde` derives on output types.

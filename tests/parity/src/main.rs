@@ -1,4 +1,4 @@
-//! Run `dia::Diarizer` on a fixed audio clip and dump RTTM (NIST format)
+//! Run `diarization::Diarizer` on a fixed audio clip and dump RTTM (NIST format)
 //! to stdout. Pair with `python/reference.py` for the pyannote.audio
 //! reference + `python/score.py` for DER computation.
 //!
@@ -6,7 +6,7 @@
 //! (run from the dia crate root).
 
 use anyhow::{Context, Result, bail};
-use dia::{
+use diarization::{
   diarizer::{Diarizer, DiarizerOptions},
   embed::EmbedModel,
   segment::SegmentModel,

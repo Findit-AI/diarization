@@ -1,11 +1,11 @@
-//! Error type for `dia::embed`.
+//! Error type for `diarization::embed`.
 
 #[cfg(feature = "ort")]
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Errors returned by `dia::embed` APIs.
+/// Errors returned by `diarization::embed` APIs.
 #[derive(Debug, Error)]
 pub enum Error {
   /// Input clip too short. Either `samples.len() < MIN_CLIP_SAMPLES`

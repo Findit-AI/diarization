@@ -5,7 +5,7 @@ declared rev 4 "near-qualified" with one must-fix; this revision applies
 that fix plus the line-edit polish items the reviewer flagged).
 
 **Status:** ready for re-review (reviewer suggested this is the last round).
-**Scope:** The `dia::segment` module only. `dia::embed` is a separate sub-project to be specced after this one ships.
+**Scope:** The `diarization::segment` module only. `diarization::embed` is a separate sub-project to be specced after this one ships.
 
 > **Revision 5 changes** (full list in §12 / §15): defines the
 > `frame_index_of(sample) -> u64` companion to `frame_to_sample` with
@@ -21,8 +21,8 @@ that fix plus the line-edit polish items the reviewer flagged).
 
 `dia` is a Rust port of two findit-studio Python projects: `findit-pyannote-seg` (speaker
 segmentation, M1) and `findit-speaker-embedding` (speaker embedding, M2). The single
-`dia` crate will host both as modules: `dia::segment` and `dia::embed`. **This spec
-covers `dia::segment` only.**
+`dia` crate will host both as modules: `diarization::segment` and `diarization::embed`. **This spec
+covers `diarization::segment` only.**
 
 The crate sits in the findit-studio Rust suite alongside `silero` (VAD),
 `soundevents` (sound-event classification), `scenesdetect` (scene/shot
@@ -156,7 +156,7 @@ seg.finish_stream(&mut model, |event| { /* drain */ })?;
 | `include_frame_probabilities`                   | Adds another `Action` variant; ship when a caller actually needs it.                                  |
 | Bundled ONNX model (`include_bytes!`)           | Model is ~5.7 MB; licensing review can come later. Provide a download script.                         |
 | Reference parity test vs `pyannote.audio`       | Requires Python + HF_TOKEN. Layer 1 unit tests cover the logic; F1 lands later.                       |
-| Cross-window speaker clustering / global IDs    | Future M3 layer (downstream of `dia::embed`); not segmentation's job.                                 |
+| Cross-window speaker clustering / global IDs    | Future M3 layer (downstream of `diarization::embed`); not segmentation's job.                                 |
 | `infer_batch` for cross-stream batching         | Not needed at CPU `intra_threads=1` (batch=1 is already the fastest path on M1). Add for GPU/HT-CPU.  |
 | `IoBinding` / `infer_into(&mut [f32; 4123])`    | ~16 KB allocation per 2.5 s of audio; not a hot path. Add when a profile points here.                 |
 | `Arc<[f32]>` / borrow-token in `NeedsInference` | Same — alloc cost is small; design churn is large.                                                    |
@@ -171,7 +171,7 @@ seg.finish_stream(&mut model, |event| { /* drain */ })?;
 
 ### Out of scope (handled elsewhere)
 
-- Speaker embedding — `dia::embed`, separate sub-project.
+- Speaker embedding — `diarization::embed`, separate sub-project.
 - Resampling — input must be 16 kHz mono float32; caller enforces.
 - Audio-file decoding — caller's responsibility.
 - Threading / worker pools — caller's responsibility.
@@ -182,7 +182,7 @@ seg.finish_stream(&mut model, |event| { /* drain */ })?;
 
 ```rust
 /// 16 kHz monolithic timebase used for every `TimeRange` and `Timestamp`
-/// emitted by `dia::segment`. pyannote-seg-3.0 only operates at 16 kHz.
+/// emitted by `diarization::segment`. pyannote-seg-3.0 only operates at 16 kHz.
 pub const SAMPLE_RATE_TB: Timebase;
 
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
@@ -859,10 +859,10 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
 
-    assert_send_sync::<dia::segment::Segmenter>();
+    assert_send_sync::<diarization::segment::Segmenter>();
 
     #[cfg(feature = "ort")]
-    assert_send::<dia::segment::SegmentModel>();
+    assert_send::<diarization::segment::SegmentModel>();
 };
 ```
 
@@ -1169,7 +1169,7 @@ API/documentation cleanups.
 | 5  | Clamp tail-window activity ranges to `total_samples`. (§5.5)                                     | critical |
 | 6  | Add ONNX shape verification at `SegmentModel::from_file` / `from_memory`. (§4)                    | high     |
 | 7  | Add `Segmenter::pending_inferences()` and `buffered_samples()`. (§4)                              | high     |
-| 8  | Add `SegmentModelOptions` with `with_optimization_level`, `with_providers`, `with_intra_op_num_threads`, `with_inter_op_num_threads`; re-export `GraphOptimizationLevel` and `ExecutionProviderDispatch` from `dia::segment`. (§4) | high     |
+| 8  | Add `SegmentModelOptions` with `with_optimization_level`, `with_providers`, `with_intra_op_num_threads`, `with_inter_op_num_threads`; re-export `GraphOptimizationLevel` and `ExecutionProviderDispatch` from `diarization::segment`. (§4) | high     |
 | 9  | Restore `#[derive(thiserror::Error)]` on `Error`; remove manual `Display`/`std::error::Error` impls. (§4)                                                                                            | high     |
 | 10 | **`SegmentModel` should be `Send` (and not `Sync`)**, matching silero. The current impl is auto-derived from `ort::Session` which is already `!Sync`, so confirm rather than change. **No `PhantomData` needed for either type** (`Segmenter` stays `Send + Sync` via auto-derive). (§10) | high     |
 | 11 | `Cargo.toml` revert to `thiserror = "2"` (drop `default-features = false`). (§7)                  | medium   |
