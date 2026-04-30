@@ -3,7 +3,8 @@
 use crate::{
   hungarian::UNMATCHED,
   reconstruct_pyannote::{
-    Error, MAX_CLUSTER_ID, ReconstructInput, SlidingWindow, discrete_to_spans, reconstruct,
+    Error, MAX_CLUSTER_ID, ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans,
+    reconstruct, spans_to_rttm_lines,
   },
 };
 
@@ -200,6 +201,99 @@ fn rejects_cluster_id_above_max() {
     frames_sw,
   };
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
+}
+
+/// `count[t]` exceeding MAX_CLUSTER_ID is rejected. Without this guard
+/// a corrupt count value (e.g. `255`) drives `num_clusters` to 255 and
+/// fabricates ~250 dummy speakers in the top-K binarize. Codex review
+/// HIGH round 5 of Phase 5.
+#[test]
+fn rejects_count_above_max_cluster_id() {
+  let (chunks_sw, frames_sw) = default_swins();
+  let mut count = vec![1u8; 4];
+  count[2] = 255;
+  let segmentations = vec![0.5_f64; 8];
+  let hard_clusters = vec![vec![0i32, 1i32]];
+  let input = ReconstructInput {
+    segmentations: &segmentations,
+    num_chunks: 1,
+    num_frames_per_chunk: 4,
+    num_speakers: 2,
+    hard_clusters: &hard_clusters,
+    count: &count,
+    num_output_frames: 4,
+    chunks_sw,
+    frames_sw,
+  };
+  assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
+}
+
+/// RTTM speaker labels are remapped in first-appearance order.
+/// Pyannote's `Annotation.labels()` + `rename_labels` sequence
+/// renumbers clusters by encounter time so the first-emitted span
+/// is always `SPEAKER_00`. Without the remap, a span with cluster_id=1
+/// emitted before cluster_id=0 would produce `SPEAKER_01` first,
+/// diverging from pyannote's RTTM. Codex review MEDIUM round 5 of
+/// Phase 5.
+#[test]
+fn rttm_relabels_clusters_in_encounter_order() {
+  let spans = vec![
+    RttmSpan {
+      cluster: 1,
+      start: 0.0,
+      duration: 1.0,
+    },
+    RttmSpan {
+      cluster: 0,
+      start: 1.0,
+      duration: 1.0,
+    },
+    RttmSpan {
+      cluster: 1,
+      start: 2.0,
+      duration: 1.0,
+    },
+  ];
+  let lines = spans_to_rttm_lines(&spans, "uri");
+  // First-encountered cluster id (1) → SPEAKER_00.
+  // Second new (0) → SPEAKER_01.
+  assert!(
+    lines[0].contains("SPEAKER_00"),
+    "first span should be SPEAKER_00 (got: {})",
+    lines[0]
+  );
+  assert!(
+    lines[1].contains("SPEAKER_01"),
+    "second new cluster should be SPEAKER_01 (got: {})",
+    lines[1]
+  );
+  // Reused cluster_id (1) keeps the SPEAKER_00 label.
+  assert!(
+    lines[2].contains("SPEAKER_00"),
+    "reused cluster should keep its first-encounter label (got: {})",
+    lines[2]
+  );
+}
+
+/// Sanity: when cluster ids are encounter-ordered (pyannote-equivalent
+/// hard_clusters output), the remap is identity.
+#[test]
+fn rttm_relabel_is_identity_when_already_encounter_ordered() {
+  let spans = vec![
+    RttmSpan {
+      cluster: 0,
+      start: 0.0,
+      duration: 1.0,
+    },
+    RttmSpan {
+      cluster: 1,
+      start: 1.0,
+      duration: 1.0,
+    },
+  ];
+  let lines = spans_to_rttm_lines(&spans, "uri");
+  assert!(lines[0].contains("SPEAKER_00"));
+  assert!(lines[1].contains("SPEAKER_01"));
 }
 
 #[test]

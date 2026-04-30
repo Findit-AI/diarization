@@ -12,6 +12,17 @@ use crate::{hungarian::UNMATCHED, reconstruct_pyannote::error::Error};
 /// of Phase 5.
 pub const MAX_CLUSTER_ID: i32 = 1023;
 
+/// Hard upper bound on `count[t]` (instantaneous active speaker count
+/// per output frame). Pyannote derives `count` from
+/// `aggregate(sum(binarized_seg, axis=-1))`, so the theoretical max is
+/// `overlap_factor * num_speakers` ≈ 30 for the community-1 config
+/// (10s chunk, 1s step, 3 speakers). Real fixtures observe max=2.
+/// Capping at `64` allows comfortable headroom over realistic values
+/// while catching `u8::MAX = 255`-style sentinel corruption that would
+/// drive `num_clusters` and the top-K binarize past the actual
+/// speaker space. Codex review HIGH round 5 of Phase 5.
+pub const MAX_COUNT_PER_FRAME: u8 = 64;
+
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingWindow {
@@ -112,6 +123,22 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   }
   if count.len() != num_output_frames {
     return Err(Error::Shape("count.len() != num_output_frames"));
+  }
+  // count[t] = instantaneous active speaker count at output frame t.
+  // Pyannote derives this from `aggregate(sum(binarized_seg, axis=-1))`
+  // which sums per-chunk active counts over overlapping chunks. Real
+  // fixtures observe max=2; theoretical max for community-1 is
+  // overlap_factor * num_speakers ≈ 30. `MAX_COUNT_PER_FRAME = 64`
+  // allows headroom while catching u8::MAX=255 sentinel corruption that
+  // would expand `num_clusters` past the actual speaker space and
+  // fabricate dummy speakers in the top-K binarize. Codex review HIGH
+  // round 5 of Phase 5.
+  for &c in count {
+    if c > MAX_COUNT_PER_FRAME {
+      return Err(Error::Shape(
+        "count entry exceeds MAX_COUNT_PER_FRAME (64)",
+      ));
+    }
   }
   for w in [chunks_sw, frames_sw] {
     if !w.duration.is_finite() || !w.step.is_finite() || !w.start.is_finite() {

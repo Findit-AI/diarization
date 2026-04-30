@@ -115,13 +115,30 @@ pub fn discrete_to_spans(
 ///
 /// Times are formatted to 3 decimal places (millisecond resolution),
 /// matching pyannote's `Annotation.write_rttm` default.
+///
+/// Cluster ids are remapped to `SPEAKER_NN` in **first-appearance
+/// order** (pyannote's `Annotation.labels()` + `rename_labels(...)`
+/// sequence in `speaker_diarization.py:721-740`): the first cluster
+/// id encountered when walking `spans` in time order becomes
+/// `SPEAKER_00`, the second new id `SPEAKER_01`, etc. Without this,
+/// raw cluster ids that don't start at 0 (or have gaps) would emit
+/// labels like `SPEAKER_01` before `SPEAKER_00`, diverging from
+/// pyannote's RTTM. Codex review MEDIUM round 5 of Phase 5.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
+  use std::collections::HashMap;
+  let mut next_label = 0usize;
+  let mut id_to_label: HashMap<usize, usize> = HashMap::new();
   spans
     .iter()
     .map(|s| {
+      let label = *id_to_label.entry(s.cluster).or_insert_with(|| {
+        let l = next_label;
+        next_label += 1;
+        l
+      });
       format!(
         "SPEAKER {uri} 1 {:.3} {:.3} <NA> <NA> SPEAKER_{:02} <NA> <NA>",
-        s.start, s.duration, s.cluster
+        s.start, s.duration, label
       )
     })
     .collect()
