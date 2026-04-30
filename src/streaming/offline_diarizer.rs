@@ -59,7 +59,7 @@ use crate::{
   segment::{
     FRAMES_PER_WINDOW, POWERSET_CLASSES, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S,
     SAMPLE_RATE_HZ, SegmentModel, WINDOW_SAMPLES,
-    powerset::{powerset_to_speakers, softmax_row},
+    powerset::{powerset_to_speakers_hard, softmax_row},
   },
 };
 
@@ -225,7 +225,10 @@ impl StreamingOfflineDiarizer {
           row[k] = logits[f * POWERSET_CLASSES + k];
         }
         let probs = softmax_row(&row);
-        let speakers = powerset_to_speakers(&probs);
+        // Pyannote's `to_multilabel(soft=False)` — see the long
+        // comment in `crate::offline::owned::OwnedDiarizationPipeline
+        // ::run` stage 1 for the rationale.
+        let speakers = powerset_to_speakers_hard(&probs);
         for s in 0..SLOTS_PER_CHUNK {
           segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = speakers[s] as f64;
         }

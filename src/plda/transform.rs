@@ -329,42 +329,20 @@ impl PldaTransform {
   /// Mirrors `pyannote/audio/utils/vbx.py:201-208`.
   pub fn new() -> Result<Self, Error> {
     let XvecWeights { mean1, mean2, lda } = load_xvec();
-    let PldaWeights { mu, tr, psi } = load_plda();
+    let PldaWeights {
+      mu,
+      tr: _, // kept in the loader for diagnostic / future use
+      psi: _,
+      eigenvectors_desc,
+      phi_desc,
+    } = load_plda();
 
-    // ── Build B and W matrices (clustering.py:201-203). ─────────
-    //
-    // `(tr.T / psi)` is a numpy broadcast. For shape `(M, M) /
-    // (M,)`, numpy aligns dimensions from the right, so the (M,)
-    // vector becomes a row applied per-column:
-    //   `(tr.T / psi)[i, j] == tr.T[i, j] / psi[j]`
-    // (NOT `/ psi[i]` — that would be per-row scaling). Verified
-    // by hand against numpy's actual values.
-    let tr_t = tr.transpose();
-    let mut tr_t_scaled = tr_t.clone();
-    for j in 0..PLDA_DIMENSION {
-      let scale = 1.0 / psi[j];
-      for i in 0..PLDA_DIMENSION {
-        tr_t_scaled[(i, j)] *= scale;
-      }
-    }
-    let w = (&tr_t * &tr)
-      .try_inverse()
-      .ok_or(Error::WNotPositiveDefinite)?;
-    let b = (&tr_t_scaled * &tr)
-      .try_inverse()
-      .ok_or(Error::WNotPositiveDefinite)?;
-
-    // ── Generalized eigh, sorted descending. ────────────────────
-    let (eigenvalues_desc, eigenvectors_desc) = generalized_eigh_descending(&b, &w)?;
-
-    // pyannote's `plda_tf` is `(x - mu) @ plda_tr.T` where
-    // `plda_tr = wccn.T[::-1]`. Substituting:
-    //   plda_tr.T = (wccn.T[::-1]).T = wccn[:, ::-1]
-    // i.e. eigenvectors-as-columns in descending order. That's
-    // exactly what `eigenvectors_desc` is. Storing it directly.
-    let plda_eigenvectors_desc = eigenvectors_desc;
-    let phi = eigenvalues_desc;
-
+    // Eigenvectors are pre-computed offline via scipy's `eigh` on
+    // `(B, W)` and shipped in `models/plda/eigenvectors_desc.bin`.
+    // See `loader::EIGENVECTORS_DESC_BYTES` for the rationale —
+    // LAPACK eigenvector signs are implementation-defined and
+    // pinning them avoids a 38% DER divergence on fixture 04 due
+    // to nalgebra/scipy disagreeing on 67 of 128 column signs.
     Ok(Self {
       mean1,
       mean2,
@@ -372,8 +350,8 @@ impl PldaTransform {
       sqrt_in_dim: (EMBEDDING_DIMENSION as f64).sqrt(),
       sqrt_out_dim: (PLDA_DIMENSION as f64).sqrt(),
       plda_mu: mu,
-      plda_eigenvectors_desc,
-      phi,
+      plda_eigenvectors_desc: eigenvectors_desc,
+      phi: phi_desc,
     })
   }
 

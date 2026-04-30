@@ -21,6 +21,20 @@ const MU_BYTES: &[u8] = include_bytes!("../../models/plda/mu.bin");
 const TR_BYTES: &[u8] = include_bytes!("../../models/plda/tr.bin");
 const PSI_BYTES: &[u8] = include_bytes!("../../models/plda/psi.bin");
 
+/// PLDA eigenvectors_desc, derived offline via scipy's `eigh` and
+/// shipped pre-computed. Sourced by
+/// `scripts/extract-plda-eigenvectors.py`. We pin the eigenvectors
+/// because LAPACK's eigenvector sign convention is implementation-
+/// defined and varies across BLAS backends — nalgebra's
+/// `SymmetricEigen` and scipy's `eigh` produced sign-flipped columns
+/// on 67 of 128 dims for the community-1 weights, which propagated
+/// through VBx as a 38% DER divergence on fixture 04 (heavy three-
+/// speaker overlap). With pyannote's exact eigenvectors loaded here,
+/// `post_plda` matches captured pyannote within ~1e-12 absolute,
+/// across every (chunk, slot) row of every captured fixture.
+const EIGENVECTORS_DESC_BYTES: &[u8] = include_bytes!("../../models/plda/eigenvectors_desc.bin");
+const PHI_DESC_BYTES: &[u8] = include_bytes!("../../models/plda/phi_desc.bin");
+
 // Compile-time size assertions. Catches blob/dimension drift the
 // instant `cargo build` runs — far less surprising than a panic at
 // `PldaTransform::new()` time.
@@ -30,6 +44,8 @@ const _: () = assert!(LDA_BYTES.len() == EMBEDDING_DIMENSION * PLDA_DIMENSION * 
 const _: () = assert!(MU_BYTES.len() == PLDA_DIMENSION * 8);
 const _: () = assert!(TR_BYTES.len() == PLDA_DIMENSION * PLDA_DIMENSION * 8);
 const _: () = assert!(PSI_BYTES.len() == PLDA_DIMENSION * 8);
+const _: () = assert!(EIGENVECTORS_DESC_BYTES.len() == PLDA_DIMENSION * PLDA_DIMENSION * 8);
+const _: () = assert!(PHI_DESC_BYTES.len() == PLDA_DIMENSION * 8);
 
 // ── Public types ────────────────────────────────────────────────────
 
@@ -47,6 +63,17 @@ pub(super) struct PldaWeights {
   pub mu: DVector<f64>,  // (128,)
   pub tr: DMatrix<f64>,  // (128, 128) row-major in the source numpy
   pub psi: DVector<f64>, // (128,)
+  /// Pre-computed eigenvectors of the generalized eigenvalue problem
+  /// `B v = λ W v` (where `B = inv(tr.T / psi @ tr)` and `W = inv(tr.T
+  /// @ tr)`), sorted descending by eigenvalue. Columns are unit-norm
+  /// in `W`-metric. Captured offline from scipy's `eigh` to lock the
+  /// eigenvector sign convention against pyannote's runtime stack.
+  pub eigenvectors_desc: DMatrix<f64>, // (128, 128)
+  /// Eigenvalues `λ_desc` matching `eigenvectors_desc`. Pyannote's
+  /// `phi`. Pre-computed for parity (the eigenvalues themselves
+  /// are sign-invariant, but we ship them anyway for byte-equal
+  /// reproducibility against the captured fixture).
+  pub phi_desc: DVector<f64>, // (128,)
 }
 
 // ── Loaders ─────────────────────────────────────────────────────────
@@ -64,6 +91,12 @@ pub(super) fn load_plda() -> PldaWeights {
     mu: bytes_to_vector(MU_BYTES, PLDA_DIMENSION),
     tr: bytes_to_row_major_matrix(TR_BYTES, PLDA_DIMENSION, PLDA_DIMENSION),
     psi: bytes_to_vector(PSI_BYTES, PLDA_DIMENSION),
+    eigenvectors_desc: bytes_to_row_major_matrix(
+      EIGENVECTORS_DESC_BYTES,
+      PLDA_DIMENSION,
+      PLDA_DIMENSION,
+    ),
+    phi_desc: bytes_to_vector(PHI_DESC_BYTES, PLDA_DIMENSION),
   }
 }
 

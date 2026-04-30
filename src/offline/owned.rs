@@ -36,7 +36,7 @@ use crate::{
   segment::{
     FRAMES_PER_WINDOW, POWERSET_CLASSES, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S,
     SAMPLE_RATE_HZ, SegmentModel, WINDOW_SAMPLES,
-    powerset::{powerset_to_speakers, softmax_row},
+    powerset::{powerset_to_speakers_hard, softmax_row},
   },
 };
 
@@ -194,7 +194,16 @@ impl OwnedDiarizationPipeline {
           row[k] = logits[f * POWERSET_CLASSES + k];
         }
         let probs = softmax_row(&row);
-        let speakers = powerset_to_speakers(&probs);
+        // Pyannote's `to_multilabel(powerset, soft=False)` picks the
+        // argmax powerset class, then maps to the speaker mask. This
+        // is the conversion captured `segmentations.npz` reflects —
+        // every entry is exactly 0.0 or 1.0. Soft marginals followed
+        // by `>= onset` would disagree on 3-way overlap chunks where
+        // the marginal sum exceeds 0.5 but argmax picks a different
+        // class. Critical for `filter_embeddings`'s `single_active`
+        // mask (frames where sum_speakers == 1) and for `count`,
+        // both of which assume hard argmax binarization.
+        let speakers = powerset_to_speakers_hard(&probs);
         for s in 0..SLOTS_PER_CHUNK {
           segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = speakers[s] as f64;
         }

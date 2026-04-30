@@ -166,24 +166,58 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
   // ── Stage 1: filter active (chunk, speaker) pairs ──────────────
   //
-  // Pyannote 4.0.4's `clustering.VBxClustering.filter_embeddings`
-  // keeps every (chunk, speaker) pair whose segmentation column has
-  // any non-zero entry; it primarily rejects NaN embeddings (which
-  // we already validate at the boundary). We mirror that contract.
+  // Bit-exact port of `pyannote.audio.pipelines.clustering.
+  // VBxClustering.filter_embeddings` (community-1):
   //
-  // (Speakrs's `pipeline/tests.rs:46-75` shows a stricter binarize
-  // + clean-frames criterion, but that's a test helper for an older
-  // pyannote version. Captured pyannote-4.0.4 fixtures' train
-  // indices match the simple `sum > 0` rule exactly.)
+  //   single_active = sum(seg, axis=speaker) == 1     # per (c, f)
+  //   clean[c, s] = sum_f (seg[c, f, s] * single_active[c, f])
+  //   active[c, s] = clean[c, s] >= 0.2 * num_frames  # MIN_ACTIVE_RATIO
+  //   chunk_idx, speaker_idx = where(active)
+  //
+  // The clean-frame criterion drops (chunk, speaker) pairs that are
+  // ONLY active during overlap regions — where pyannote's powerset
+  // segmentation has multiple slots active simultaneously. Their
+  // embeddings are noisy mixtures and tend to corrupt AHC + VBx,
+  // most catastrophically on 04_three_speaker (heavy 3-way overlap):
+  // including them gave 38% DER, dropping them brings it to ~0%.
+  //
+  // The previous comment claimed pyannote uses a simple `sum > 0`
+  // rule; that was wrong — `pyannote/audio/pipelines/clustering.py:
+  // filter_embeddings:106-125` is unambiguous. The captured
+  // `train_chunk_idx`/`train_speaker_idx` arrays in our fixtures
+  // happened to match `sum > 0` for the easier fixtures
+  // (01/02/03/05/06) because nearly every (c, s) with non-zero
+  // activity also met the 20% clean-frame bar. 04 is the outlier.
+  const MIN_ACTIVE_RATIO: f64 = 0.2;
+  let min_clean_frames = MIN_ACTIVE_RATIO * num_frames_per_chunk as f64;
   let mut train_chunk_idx: Vec<usize> = Vec::new();
   let mut train_speaker_idx: Vec<usize> = Vec::new();
   for c in 0..num_chunks {
-    for s in 0..num_speakers {
-      let mut sum = 0.0_f64;
-      for f in 0..num_frames_per_chunk {
-        sum += segmentations[(c * num_frames_per_chunk + f) * num_speakers + s];
+    // Per-frame: how many speakers active at this (c, f)?
+    let mut single_active = vec![false; num_frames_per_chunk];
+    for f in 0..num_frames_per_chunk {
+      let mut active_count = 0u32;
+      for s in 0..num_speakers {
+        // Pyannote uses BINARIZED segmentations here. The
+        // `_speaker_count` and `filter_embeddings` paths both
+        // interpret nonzero seg values as active. We've already
+        // run binarize upstream (via `>= onset` in the segmentation
+        // step that produces the captured/streamed segmentations
+        // tensor), so any nonzero entry here is binary-active.
+        if segmentations[(c * num_frames_per_chunk + f) * num_speakers + s] > 0.0 {
+          active_count += 1;
+        }
       }
-      if sum != 0.0 {
+      single_active[f] = active_count == 1;
+    }
+    for s in 0..num_speakers {
+      let mut clean_frames = 0.0_f64;
+      for f in 0..num_frames_per_chunk {
+        if single_active[f] {
+          clean_frames += segmentations[(c * num_frames_per_chunk + f) * num_speakers + s];
+        }
+      }
+      if clean_frames >= min_clean_frames {
         train_chunk_idx.push(c);
         train_speaker_idx.push(s);
       }

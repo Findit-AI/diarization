@@ -45,6 +45,47 @@ pub fn powerset_to_speakers(probs: &[f32; POWERSET_CLASSES]) -> [f32; 3] {
   ]
 }
 
+/// Pyannote's `to_multilabel(powerset, soft=False)`: argmax over the
+/// 7 powerset classes, then look up each speaker's hard 0/1
+/// activation. Mirrors `pyannote/audio/utils/powerset.py:115-140`.
+///
+/// Class index → speaker mask:
+///   0 (silence) → (0, 0, 0)
+///   1 (A)       → (1, 0, 0)
+///   2 (B)       → (0, 1, 0)
+///   3 (C)       → (0, 0, 1)
+///   4 (A+B)     → (1, 1, 0)
+///   5 (A+C)     → (1, 0, 1)
+///   6 (B+C)     → (0, 1, 1)
+///
+/// Output is *hard* — every entry is exactly 0.0 or 1.0. Use this
+/// in the segmentation aggregation path; pyannote's downstream
+/// `filter_embeddings` / `count` / `reconstruct` all assume binary
+/// values, and the soft marginals from
+/// [`powerset_to_speakers`] disagree with hard argmax near 3-way
+/// overlaps where the marginal sum-then-threshold flags a speaker
+/// active when argmax would pick a different class entirely.
+pub fn powerset_to_speakers_hard(probs: &[f32; POWERSET_CLASSES]) -> [f32; 3] {
+  let mut argmax = 0usize;
+  let mut max = probs[0];
+  for (k, &p) in probs.iter().enumerate().skip(1) {
+    if p > max {
+      max = p;
+      argmax = k;
+    }
+  }
+  const TABLE: [[f32; 3]; POWERSET_CLASSES] = [
+    [0.0, 0.0, 0.0], // silence
+    [1.0, 0.0, 0.0], // A
+    [0.0, 1.0, 0.0], // B
+    [0.0, 0.0, 1.0], // C
+    [1.0, 1.0, 0.0], // A+B
+    [1.0, 0.0, 1.0], // A+C
+    [0.0, 1.0, 1.0], // B+C
+  ];
+  TABLE[argmax]
+}
+
 /// Voice probability (= `1 - p(silence)`) for one softmaxed row.
 pub(crate) fn voice_prob(probs: &[f32; POWERSET_CLASSES]) -> f32 {
   1.0 - probs[0]
