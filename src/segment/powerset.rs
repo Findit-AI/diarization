@@ -19,7 +19,7 @@
 use crate::segment::options::POWERSET_CLASSES;
 
 /// Numerically stable softmax over one row of [`POWERSET_CLASSES`] logits.
-pub(crate) fn softmax_row(logits: &[f32; POWERSET_CLASSES]) -> [f32; POWERSET_CLASSES] {
+pub fn softmax_row(logits: &[f32; POWERSET_CLASSES]) -> [f32; POWERSET_CLASSES] {
   let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
   let mut out = [0f32; POWERSET_CLASSES];
   let mut sum = 0f32;
@@ -37,7 +37,7 @@ pub(crate) fn softmax_row(logits: &[f32; POWERSET_CLASSES]) -> [f32; POWERSET_CL
 
 /// Per-speaker probabilities `[p(A), p(B), p(C)]` from a softmaxed
 /// [`POWERSET_CLASSES`] row.
-pub(crate) fn powerset_to_speakers(probs: &[f32; POWERSET_CLASSES]) -> [f32; 3] {
+pub fn powerset_to_speakers(probs: &[f32; POWERSET_CLASSES]) -> [f32; 3] {
   [
     probs[1] + probs[4] + probs[5],
     probs[2] + probs[4] + probs[6],

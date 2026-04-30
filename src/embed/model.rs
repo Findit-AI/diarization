@@ -243,6 +243,43 @@ impl EmbedModel {
     self.embed_masked_with_meta(samples, keep_mask, EmbeddingMeta::default())
   }
 
+  /// [`embed_masked`](Self::embed_masked) but returns the **unnormalized**
+  /// 256-d aggregate vector (the per-window WeSpeaker sum before L2
+  /// normalization).
+  ///
+  /// Phase 5d entry point: pyannote feeds the raw unnormalized output
+  /// into `xvec_transform`'s mean-centering step. Calling
+  /// `embed_masked` and then constructing a `RawEmbedding` from the
+  /// L2-normalized result produces materially different PLDA features
+  /// (verified by `plda::tests::normalized_vs_raw_input_produce_materially_different_output`),
+  /// which downstream propagates into AHC + VBx and breaks parity.
+  /// Errors are the same as [`embed_masked`](Self::embed_masked).
+  pub fn embed_masked_raw(
+    &mut self,
+    samples: &[f32],
+    keep_mask: &[bool],
+  ) -> Result<[f32; crate::embed::EMBEDDING_DIM], Error> {
+    if keep_mask.len() != samples.len() {
+      return Err(Error::MaskShapeMismatch {
+        samples_len: samples.len(),
+        mask_len: keep_mask.len(),
+      });
+    }
+    let gathered: Vec<f32> = samples
+      .iter()
+      .zip(keep_mask.iter())
+      .filter_map(|(&s, &keep)| keep.then_some(s))
+      .collect();
+    if gathered.len() < MIN_CLIP_SAMPLES as usize {
+      return Err(Error::InvalidClip {
+        len: gathered.len(),
+        min: MIN_CLIP_SAMPLES as usize,
+      });
+    }
+    let (sum, _windows_used) = embed_unweighted(self, &gathered)?;
+    Ok(sum)
+  }
+
   /// [`embed_masked`](Self::embed_masked) with explicit observability metadata.
   pub fn embed_masked_with_meta<A, T>(
     &mut self,

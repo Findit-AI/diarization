@@ -5,7 +5,7 @@
 mod error;
 mod hysteresis;
 pub(crate) mod options;
-mod powerset;
+pub mod powerset;
 mod segmenter;
 pub(crate) mod stitch;
 mod types;

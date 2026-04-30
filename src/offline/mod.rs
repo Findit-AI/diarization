@@ -41,7 +41,17 @@
 
 mod algo;
 
+#[cfg(feature = "ort")]
+mod owned;
+
 #[cfg(test)]
 mod parity_tests;
 
+#[cfg(all(test, feature = "ort"))]
+mod owned_smoke_tests;
+
 pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
+
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub use owned::{OwnedDiarizationPipeline, OwnedPipelineConfig, SLOTS_PER_CHUNK};
