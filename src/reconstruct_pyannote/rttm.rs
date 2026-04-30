@@ -116,31 +116,25 @@ pub fn discrete_to_spans(
 /// Times are formatted to 3 decimal places (millisecond resolution),
 /// matching pyannote's `Annotation.write_rttm` default.
 ///
-/// Cluster ids are remapped to `SPEAKER_NN` in **numeric sort order**:
-/// the smallest distinct cluster id becomes `SPEAKER_00`, the next
-/// `SPEAKER_01`, etc.
+/// Cluster ids are remapped to `SPEAKER_NN` matching pyannote's
+/// `Annotation.labels()` = `sorted(_labels, key=str)`
+/// (`pyannote.core.annotation.Annotation:920-932`). The smallest
+/// label by decimal-string lex-order becomes `SPEAKER_00`, the
+/// next `SPEAKER_01`, etc. For ids below 10 this agrees with
+/// numeric order; above 10 they diverge (e.g. `["10", "2"]`
+/// lex-sorts to `["10", "2"]`). Real workloads with long
+/// recordings or large meetings can produce 10+ alive clusters, so
+/// using numeric sort would silently mislabel speakers vs the
+/// pyannote reference.
 ///
-/// Pyannote's `Annotation.labels()` does `sorted(_labels, key=str)`
-/// (`pyannote.core.annotation.Annotation:920-932`) because the
-/// `Annotation` type accepts arbitrary hashable labels. For our
-/// integer-only cluster ids in `0..=MAX_CLUSTER_ID = 1023`, str-sort
-/// and numeric-sort agree below 10 (`"0", "1", ..., "9"`) and
-/// diverge above (`["10", "2"]` lex-sorts to `["10", "2"]`). After
-/// VBx the alive cluster count is typically 1–4, well below the
-/// crossover; all five captured fixtures hit ≤ 2 alive clusters.
-/// Numeric sort is simpler, allocation-free, and equivalent on the
-/// realistic distribution.
-///
-/// **TODO** (scope): if a future fixture or downstream tool needs
-/// bit-exact RTTM matching pyannote on ≥ 10-cluster output,
-/// reintroduce a str-key compare here (with allocation-free decimal
-/// rendering, or via the `itoa` crate). Until then, the simpler
-/// integer ordering matches every captured fixture's reference.rttm.
+/// Implementation: [`cmp_cluster_id_str`] is the canonical
+/// pyannote-equivalent comparator. It renders both ids into stack-
+/// allocated `itoa::Buffer`s and compares the resulting `&str`
+/// slices — zero heap allocation.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   use std::collections::HashMap;
-  // Collect distinct cluster ids in numeric sort order.
   let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster).collect();
-  unique_ids.sort_unstable();
+  unique_ids.sort_unstable_by(|a, b| cmp_cluster_id_str(*a, *b));
   unique_ids.dedup();
   let id_to_label: HashMap<usize, usize> = unique_ids
     .into_iter()
@@ -157,4 +151,18 @@ pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
       )
     })
     .collect()
+}
+
+/// Lexicographically compare two cluster ids by their decimal string
+/// representation. Mirrors Python's `sorted([a, b], key=str)` ordering
+/// used by `pyannote.core.Annotation.labels()`.
+///
+/// Allocation-free: `itoa::Buffer` is a stack-allocated `[u8; 40]`
+/// (sized for any 64-bit integer). Two buffers per compare = ~80
+/// bytes stack — sort_unstable_by drives this O(n log n) times for
+/// `n` distinct cluster ids, all stack work.
+pub fn cmp_cluster_id_str(a: usize, b: usize) -> std::cmp::Ordering {
+  let mut buf_a = itoa::Buffer::new();
+  let mut buf_b = itoa::Buffer::new();
+  buf_a.format(a).cmp(buf_b.format(b))
 }

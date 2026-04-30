@@ -57,6 +57,12 @@ pathfinding = "4.15"
 # Phase 4: AHC initialization (centroid-method linkage).
 kodama = "0.3"
 
+# Phase 5: integer→decimal-string rendering for pyannote's
+# `Annotation.labels()` lex-sort (cluster id → SPEAKER_NN label
+# remapping in RTTM emission). itoa::Buffer is a [u8; 40] stack
+# buffer — allocation-free.
+itoa = "1"
+
 
 [dev-dependencies]
 anyhow = "1"
