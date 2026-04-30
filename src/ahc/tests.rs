@@ -240,10 +240,8 @@ mod simd_partition_stability {
     for seed in 0..SEEDS {
       let mut rng = ChaCha20Rng::seed_from_u64(seed);
       let m = DMatrix::<f64>::from_fn(N, D, |_, _| rng.random::<f64>() * 2.0 - 1.0);
-      let scalar = ahc_init_with_simd(&m, PYANNOTE_COMMUNITY_THRESHOLD, false)
-        .expect("scalar AHC");
-      let simd =
-        ahc_init_with_simd(&m, PYANNOTE_COMMUNITY_THRESHOLD, true).expect("SIMD AHC");
+      let scalar = ahc_init_with_simd(&m, PYANNOTE_COMMUNITY_THRESHOLD, false).expect("scalar AHC");
+      let simd = ahc_init_with_simd(&m, PYANNOTE_COMMUNITY_THRESHOLD, true).expect("SIMD AHC");
       assert_eq!(
         scalar, simd,
         "AHC partition diverged on seed {seed}: scalar={scalar:?}, simd={simd:?}"
