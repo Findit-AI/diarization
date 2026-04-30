@@ -139,8 +139,14 @@ impl RawEmbedding {
   ///   that an `NORM_EPSILON`-only floor would have passed straight
   ///   through into `xvec_transform`'s centering step. Codex
   ///   review HIGH (round 7).
-  #[cfg(test)]
-  pub(crate) fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
+  ///
+  /// Phase 5c: now `pub` (was `#[cfg(test)] pub(crate)`). The offline
+  /// diarization path (`offline::OfflineDiarizer`) calls this on the
+  /// per-chunk per-speaker masked WeSpeaker output. The validation is
+  /// load-bearing: it rejects all-zero / near-zero degraded embedder
+  /// outputs that would silently pass `xvec_transform`'s post-centering
+  /// norm guard.
+  pub fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
       return Err(Error::NonFiniteInput);
     }

@@ -60,11 +60,11 @@
 pub mod cluster;
 pub mod diarizer;
 pub mod embed;
-// `plda` etc. are intentionally crate-private in v0.1.0. The math
-// ships here but the public-API integration via `Diarizer` lands in
-// Phase 5c. Bench infrastructure (the `_bench` feature) flips them
-// to `pub` so external `benches/*.rs` can call the inner kernels
-// directly without going through the still-WIP integration.
+// Phase 5c (this commit): the full pyannote `cluster_vbx` pipeline
+// (PLDA → AHC → VBx → centroid → cosine → Hungarian → reconstruct)
+// is now publicly available alongside the streaming `Diarizer` /
+// online clusterer. See `offline::OfflineDiarizer` for the batch
+// owned-audio entrypoint.
 pub mod segment;
 
 // Numerical primitives shared across the algorithm modules. Three-tier
@@ -79,44 +79,18 @@ pub mod ops;
 #[cfg(not(feature = "_bench"))]
 pub(crate) mod ops;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod plda;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod plda;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod vbx;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod vbx;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod hungarian;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod hungarian;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod ahc;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod ahc;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod centroid;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod centroid;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod pipeline;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod pipeline;
 
-#[cfg_attr(feature = "_bench", doc(hidden))]
-#[cfg(feature = "_bench")]
 pub mod reconstruct;
-#[cfg(not(feature = "_bench"))]
-pub(crate) mod reconstruct;
+
+pub mod offline;
