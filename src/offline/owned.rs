@@ -291,58 +291,81 @@ impl OwnedDiarizationPipeline {
 
     // ── Stage 3: build count tensor + sliding-window timing ────────
     //
-    // Pyannote's `Inference.aggregate` produces a per-output-frame
-    // per-speaker probability grid by averaging chunks via the
-    // `hamming` kernel and applying PIT-permutation alignment between
-    // adjacent chunks. We use a simpler scheme: per output-frame,
-    // average activity (max across speakers within a chunk) over
-    // covering chunks, then binarize at `onset` to get a per-frame
-    // active-speaker count.
+    // Pyannote's algorithm (per `reconstruct::algo` comment + the
+    // pyannote source `pipelines/speaker_diarization.py`):
+    //   1. Per chunk, per frame: binarize seg > onset and sum across
+    //      slots → per-(chunk, frame) speaker count (integer 0..3).
+    //   2. Aggregate this per-chunk count tensor across overlapping
+    //      chunks via hamming-weighted average → per-output-frame
+    //      float count.
+    //   3. Round to integer.
     //
-    // The output-frame grid spans `[0, samples.len())` at
+    // Why this is permutation-invariant: the sum-across-slots in step 1
+    // collapses speaker identity. Two chunks where slot_0 is different
+    // speakers still agree on "how many speakers are speaking now"
+    // (assuming the segmentation model is well-trained, which it is
+    // for community-1). No PIT alignment needed for the count.
+    //
+    // Output-frame grid: spans `[0, total_samples)` at
     // `SAMPLES_PER_OUTPUT_FRAME` step. Each chunk c covers output
-    // frames `[c * step / SAMPLES_PER_OUTPUT_FRAME, (c * step + win)
-    // / SAMPLES_PER_OUTPUT_FRAME)`.
+    // frames `[c * step / spf, (c * step + win) / spf)`.
     let total_samples = ((num_chunks - 1) * step + win) as f64;
     let num_output_frames = (total_samples / SAMPLES_PER_OUTPUT_FRAME).ceil() as usize;
+
+    // Precompute per-chunk per-frame integer counts (slots active).
+    let mut chunk_counts: Vec<u8> = vec![0; num_chunks * FRAMES_PER_WINDOW];
+    for c in 0..num_chunks {
+      for f in 0..FRAMES_PER_WINDOW {
+        let mut n = 0u8;
+        for s in 0..SLOTS_PER_CHUNK {
+          if segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset as f64
+          {
+            n += 1;
+          }
+        }
+        chunk_counts[c * FRAMES_PER_WINDOW + f] = n;
+      }
+    }
+
     let mut count = vec![0u8; num_output_frames];
-    // For each output frame, count the binarized active speakers
-    // averaged across covering chunks (max-aggregation per slot).
-    let mut chunk_slot_max = vec![0.0_f32; SLOTS_PER_CHUNK];
+    let win_f = win as f64;
     for ofr in 0..num_output_frames {
-      // Output frame ofr center sample.
       let sample_idx = (ofr as f64 + 0.5) * SAMPLES_PER_OUTPUT_FRAME;
       // Find chunks whose [start, start+win) covers sample_idx.
-      let lo_chunk = if sample_idx >= win as f64 {
-        ((sample_idx - win as f64) / step as f64).ceil() as usize
+      let lo_chunk = if sample_idx >= win_f {
+        ((sample_idx - win_f) / step as f64).ceil() as usize
       } else {
         0
       };
-      let hi_chunk = (sample_idx / step as f64).floor() as usize + 1;
-      let hi_chunk = hi_chunk.min(num_chunks);
-      // For each speaker slot, take max prob across covering chunks
-      // at this output frame.
-      chunk_slot_max.iter_mut().for_each(|v| *v = 0.0);
+      let hi_chunk = ((sample_idx / step as f64).floor() as usize + 1).min(num_chunks);
+      let mut weighted_sum = 0.0_f64;
+      let mut weight_total = 0.0_f64;
       for cc in lo_chunk..hi_chunk {
         let chunk_start_sample = (cc * step) as f64;
         let chunk_relative_sample = sample_idx - chunk_start_sample;
-        if chunk_relative_sample < 0.0 || chunk_relative_sample >= win as f64 {
+        if chunk_relative_sample < 0.0 || chunk_relative_sample >= win_f {
           continue;
         }
         let chunk_frame = (chunk_relative_sample / SAMPLES_PER_OUTPUT_FRAME) as usize;
         if chunk_frame >= FRAMES_PER_WINDOW {
           continue;
         }
-        for s in 0..SLOTS_PER_CHUNK {
-          let v =
-            segmentations[(cc * FRAMES_PER_WINDOW + chunk_frame) * SLOTS_PER_CHUNK + s] as f32;
-          if v > chunk_slot_max[s] {
-            chunk_slot_max[s] = v;
-          }
-        }
+        // Hamming weight: w(τ) = 0.54 − 0.46·cos(2π·τ) where
+        // τ = chunk_relative_sample / win ∈ [0, 1). Edges of a chunk
+        // get less weight than the center, matching pyannote's
+        // `Inference.aggregate(hamming=True)`. Reduces the Gibbs
+        // ringing at chunk-boundary frames.
+        let tau = chunk_relative_sample / win_f;
+        let w = 0.54 - 0.46 * (std::f64::consts::TAU * tau).cos();
+        weighted_sum += chunk_counts[cc * FRAMES_PER_WINDOW + chunk_frame] as f64 * w;
+        weight_total += w;
       }
-      let n_active = chunk_slot_max.iter().filter(|&&v| v >= cfg.onset).count();
-      count[ofr] = n_active.min(u8::MAX as usize) as u8;
+      let avg = if weight_total > 0.0 {
+        weighted_sum / weight_total
+      } else {
+        0.0
+      };
+      count[ofr] = avg.round().clamp(0.0, u8::MAX as f64) as u8;
     }
 
     let chunks_sw = SlidingWindow {
