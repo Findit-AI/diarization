@@ -184,7 +184,9 @@ mod differential_tests {
     let mut rng = ChaCha20Rng::seed_from_u64(0x202);
     let n = 32usize;
     let d = 192usize;
-    let rows: Vec<f64> = (0..n * d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
+    let rows: Vec<f64> = (0..n * d)
+      .map(|_| rng.random::<f64>() * 2.0 - 1.0)
+      .collect();
     let s = super::scalar::pdist_euclidean(&rows, n, d);
     let v = super::dispatch::pdist_euclidean(&rows, n, d, true);
     assert_eq!(s.len(), v.len(), "pdist length mismatch");
