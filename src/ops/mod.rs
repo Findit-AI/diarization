@@ -108,68 +108,82 @@ pub(crate) const fn simd128_available() -> bool {
 mod differential_tests {
   //! Scalar vs SIMD differential tests.
   //!
-  //! The module-level docs in [`crate::ops::scalar`] state that
-  //! scalar is the *algorithmic* contract, not byte-identical to
-  //! the SIMD backends — FMA fuses one rounding into `a*b+c` and
-  //! parallel-lane reduction reorders the summation. These tests
-  //! enforce concrete tolerances on the divergence so a future kernel
-  //! change can't drift the contract silently.
-  //!
-  //! Codex adversarial review MEDIUM (this commit). The earlier
-  //! contract claimed "zero divergence" — wrong. The new contract:
-  //! - Well-conditioned inputs (drawn from realistic VBx/AHC ranges):
-  //!   relative error ≤ 1e-12 — passes for every kernel here.
-  //! - Catastrophic-cancellation inputs (Codex's example
-  //!   `[1e16, 1, -1e16, 1]`): scalar and SIMD legitimately disagree.
-  //!   The test captures the magnitude so we don't accidentally
-  //!   widen it under future kernel rewrites.
+  //! Contract (Codex adversarial review, multiple rounds):
+  //! - On `aarch64` (the deployment target), scalar and the NEON
+  //!   backend produce **bit-identical** results for all five
+  //!   primitives. Achieved by:
+  //!   1. scalar uses `f64::mul_add` for per-element FMA (one IEEE
+  //!      754 rounding, identical to `vfmaq_f64`);
+  //!   2. scalar's reduction tree mirrors NEON's (4 partial sums
+  //!      over modulo-4 indices, then `((s00+s10) + (s01+s11))`).
+  //! - On `x86_64`, AVX2 (4-lane) and AVX-512 (8-lane) use their
+  //!   native lane widths — different reduction trees from NEON.
+  //!   Per-element FMA is still bit-identical, but the lane-width
+  //!   reduction may diverge from scalar by O(1e-15) relative on
+  //!   well-conditioned inputs. Cross-architecture bit-identity is
+  //!   not claimed.
+  //! - On both architectures, catastrophic-cancellation inputs
+  //!   (`[1e16, 1, -1e16, 1]`) legitimately diverge between scalar
+  //!   and SIMD due to the documented reduction-order difference.
 
   use rand::{SeedableRng, prelude::*};
   use rand_chacha::ChaCha20Rng;
 
-  /// Realistic VBx/AHC dot inputs converge to within 1 ulp ⋅ N.
+  /// On aarch64 scalar matches NEON bit-for-bit; elsewhere the
+  /// well-conditioned inputs hold a tighter bound than the previous
+  /// 1e-12 contract.
   #[test]
-  fn dot_well_conditioned_inputs_within_1e12() {
+  fn dot_well_conditioned_inputs_match() {
     for d in [4usize, 16, 64, 128, 192, 256] {
       let mut rng = ChaCha20Rng::seed_from_u64(0xab + d as u64);
       let a: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let b: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let s = super::scalar::dot(&a, &b);
       let v = super::dispatch::dot(&a, &b, true);
-      let rel = ((s - v) / s.abs().max(1.0)).abs();
-      assert!(
-        rel < 1.0e-12,
-        "dot d={d} scalar/SIMD divergence {rel:e} exceeds 1e-12 (s={s}, v={v})"
+      #[cfg(target_arch = "aarch64")]
+      assert_eq!(
+        s.to_bits(),
+        v.to_bits(),
+        "dot d={d} scalar/NEON not bit-identical (s={s}, v={v})"
       );
+      #[cfg(not(target_arch = "aarch64"))]
+      {
+        let rel = ((s - v) / s.abs().max(1.0)).abs();
+        assert!(
+          rel < 1.0e-14,
+          "dot d={d} scalar/SIMD divergence {rel:e} exceeds 1e-14 (s={s}, v={v})"
+        );
+      }
     }
   }
 
   /// Realistic embedding-dim L2-norm-squared (the AHC + cosine
-  /// normalization pattern) stays well-conditioned.
+  /// normalization pattern).
   #[test]
-  fn dot_self_l2_norm_within_1e12() {
+  fn dot_self_l2_norm_match() {
     let mut rng = ChaCha20Rng::seed_from_u64(0x101);
     let a: Vec<f64> = (0..256).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
     let s = super::scalar::dot(&a, &a);
     let v = super::dispatch::dot(&a, &a, true);
-    let rel = ((s - v) / s.abs()).abs();
-    assert!(rel < 1.0e-12, "‖a‖² scalar/SIMD divergence {rel:e}");
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(s.to_bits(), v.to_bits(), "‖a‖² scalar/NEON not bit-identical");
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+      let rel = ((s - v) / s.abs()).abs();
+      assert!(rel < 1.0e-14, "‖a‖² scalar/SIMD divergence {rel:e}");
+    }
   }
 
-  /// Catastrophic-cancellation inputs *legitimately* diverge — this
-  /// is the documented break in the contract. The test captures the
-  /// observed magnitude so any kernel rewrite that widens it lights
-  /// up here.
+  /// Catastrophic-cancellation inputs *do* diverge across reduction
+  /// orders. Scalar uses 4-acc pair reduction; AVX2 uses 4-lane;
+  /// AVX-512 uses 8-lane. Test captures the magnitude so any future
+  /// kernel rewrite that widens it surfaces here.
   #[test]
-  fn dot_catastrophic_cancellation_diverges_within_known_band() {
-    // Codex's example, exactly. Scalar serial sum: ((1e16 + 1) - 1e16) + 1 = 0 + 1 = 1.
-    // SIMD 2-lane reduce (a=[1e16,1,-1e16,1], b=[1,1,1,1]): lane0 = 1e16 + (-1e16) = 0; lane1 = 1+1 = 2;
-    // horizontal reduce = 2.
+  fn dot_catastrophic_cancellation_within_known_band() {
     let a: [f64; 4] = [1e16, 1.0, -1e16, 1.0];
     let b: [f64; 4] = [1.0; 4];
     let s = super::scalar::dot(&a, &b);
     let v = super::dispatch::dot(&a, &b, true);
-    // Both are finite small integers — capture the absolute gap.
     let abs_gap = (s - v).abs();
     assert!(
       abs_gap < 10.0,
@@ -177,28 +191,30 @@ mod differential_tests {
     );
   }
 
-  /// `pdist_euclidean` differential — same well-conditioned tolerance
-  /// as `dot` (it's a `dot`-shape kernel under the hood for `(a-b)²`).
+  /// `pdist_euclidean` differential.
   #[test]
-  fn pdist_euclidean_well_conditioned_within_1e12() {
+  fn pdist_euclidean_well_conditioned_match() {
     let mut rng = ChaCha20Rng::seed_from_u64(0x202);
     let n = 32usize;
     let d = 192usize;
-    let rows: Vec<f64> = (0..n * d)
-      .map(|_| rng.random::<f64>() * 2.0 - 1.0)
-      .collect();
+    let rows: Vec<f64> = (0..n * d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
     let s = super::scalar::pdist_euclidean(&rows, n, d);
     let v = super::dispatch::pdist_euclidean(&rows, n, d, true);
     assert_eq!(s.len(), v.len(), "pdist length mismatch");
-    let mut max_rel = 0.0_f64;
-    for (sv, vv) in s.iter().zip(v.iter()) {
-      let rel = ((sv - vv) / sv.abs().max(1.0)).abs();
-      max_rel = max_rel.max(rel);
+    for (idx, (sv, vv)) in s.iter().zip(v.iter()).enumerate() {
+      #[cfg(target_arch = "aarch64")]
+      assert_eq!(
+        sv.to_bits(),
+        vv.to_bits(),
+        "pdist[{idx}] scalar/NEON not bit-identical (s={sv}, v={vv})"
+      );
+      #[cfg(not(target_arch = "aarch64"))]
+      {
+        let rel = ((sv - vv) / sv.abs().max(1.0)).abs();
+        assert!(rel < 1.0e-14, "pdist[{idx}] divergence {rel:e}");
+        let _ = idx;
+      }
     }
-    assert!(
-      max_rel < 1.0e-12,
-      "pdist scalar/SIMD divergence {max_rel:e} exceeds 1e-12"
-    );
   }
 
   /// Mismatched `dot` lengths must `panic!` (not UB) even with
@@ -252,9 +268,10 @@ mod differential_tests {
     let _ = super::dispatch::pdist_euclidean(&rows, usize::MAX, 2, true);
   }
 
-  /// `axpy` is *element-wise* FMA without inter-lane reduction — it
-  /// IS byte-identical (single FMA per output, no associativity break).
-  /// This test asserts the stronger guarantee.
+  /// `axpy` is per-element FMA with no reduction. With scalar using
+  /// `f64::mul_add` it must match SIMD's `vfmaq_f64` /
+  /// `_mm256_fmadd_pd` / `_mm512_fmadd_pd` bit-for-bit on every
+  /// architecture.
   #[test]
   fn axpy_byte_identical() {
     let mut rng = ChaCha20Rng::seed_from_u64(0x303);
@@ -266,13 +283,11 @@ mod differential_tests {
     let mut y_simd = y_init.clone();
     super::scalar::axpy(&mut y_scalar, alpha, &x);
     super::dispatch::axpy(&mut y_simd, alpha, &x, true);
-    // FMA fuses (alpha*x[i] + y[i]) — scalar uses `y[i] += alpha*x[i]`
-    // (two-rounding). They differ at most ½ ulp per element.
     for (i, (s, v)) in y_scalar.iter().zip(y_simd.iter()).enumerate() {
-      let rel = ((s - v) / s.abs().max(1.0)).abs();
-      assert!(
-        rel < 1.0e-15,
-        "axpy[{i}] scalar/SIMD divergence {rel:e} exceeds ½ ulp"
+      assert_eq!(
+        s.to_bits(),
+        v.to_bits(),
+        "axpy[{i}] scalar/SIMD not bit-identical (s={s}, v={v})"
       );
     }
   }

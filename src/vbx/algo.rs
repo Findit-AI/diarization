@@ -171,6 +171,35 @@ pub fn vbx_iterate(
   fb: f64,
   max_iters: usize,
 ) -> Result<VbxOutput, Error> {
+  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, true)
+}
+
+/// Test-only entrypoint: same as [`vbx_iterate`] with explicit
+/// `use_simd`. Used by the end-to-end backend-forced differential
+/// test in [`crate::pipeline::tests`]. Production code always passes
+/// `true`.
+#[cfg(test)]
+pub(crate) fn vbx_iterate_with_simd(
+  x: &DMatrix<f64>,
+  phi: &DVector<f64>,
+  qinit: &DMatrix<f64>,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
+  use_simd: bool,
+) -> Result<VbxOutput, Error> {
+  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, use_simd)
+}
+
+fn vbx_iterate_inner(
+  x: &DMatrix<f64>,
+  phi: &DVector<f64>,
+  qinit: &DMatrix<f64>,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
+  use_simd: bool,
+) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
   if phi.len() != d {
     return Err(Error::Shape("Phi.len() must equal X.ncols()"));
@@ -242,10 +271,12 @@ pub fn vbx_iterate(
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi)) and rho via
   // a single row-major pack of X. nalgebra is column-major so `x.row(r)`
   // is strided — we copy into `x_row_major` once and reuse the slice
-  // for both `ops::dot(row, row, true)` (T·D L2-norm-squared) and the
-  // `rho[r,d] = x[r,d] * sqrt(phi[d])` element-wise scale, packing
-  // `rho` row-major in the process so downstream consumers can pull
-  // contiguous rows without re-striding through DMatrix.
+  // for the L2-norm-squared dot reduction.
+  //
+  // SIMD dot: scalar/NEON bit-identical contract (see
+  // `ops::scalar::dot` module docs), so VBx EM trajectory, ELBO
+  // convergence, and downstream `pi[s] > SP_ALIVE_THRESHOLD = 1e-7`
+  // alive-cluster decisions are deterministic across backends.
   let log_2pi = (2.0_f64 * std::f64::consts::PI).ln();
   let mut x_row_major: Vec<f64> = Vec::with_capacity(t * d);
   for r in 0..t {
@@ -256,7 +287,7 @@ pub fn vbx_iterate(
   let mut g = DVector::<f64>::zeros(t);
   for r in 0..t {
     let row = &x_row_major[r * d..(r + 1) * d];
-    let row_sq = crate::ops::dot(row, row, true);
+    let row_sq = crate::ops::dot(row, row, use_simd);
     g[r] = -0.5 * (row_sq + d as f64 * log_2pi);
   }
   // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d]. Column-major DMatrix
@@ -316,10 +347,9 @@ pub fn vbx_iterate(
     // (invL + alpha**2) @ Phi : (S, D) · (D,) → (S,).
     //
     // Pack `(invL[s,:] + α[s,:]²)` into a contiguous scratch buffer
-    // and reduce against `phi.as_slice()` via `ops::dot`. The fused
-    // pack costs the same `D` adds + `D` muls as the original inline
-    // accumulator, but the reduction now flows through the SIMD dot
-    // backend. Buffer is reused across `s` (one alloc per EM iter).
+    // and reduce against `phi.as_slice()`. Buffer is reused across `s`
+    // (one alloc per EM iter). SIMD dot — same scalar/NEON
+    // bit-identical contract as the G norm-squared above.
     let mut sa_phi = DVector::<f64>::zeros(s);
     let mut sa_buf: Vec<f64> = vec![0.0; d];
     let phi_slice = phi.as_slice();
@@ -329,7 +359,7 @@ pub fn vbx_iterate(
         let a = alpha[(sj, dk)];
         sa_buf[dk] = inv + a * a;
       }
-      sa_phi[sj] = crate::ops::dot(&sa_buf, phi_slice, true);
+      sa_phi[sj] = crate::ops::dot(&sa_buf, phi_slice, use_simd);
     }
     let mut log_p = DMatrix::<f64>::zeros(t, s);
     for tt in 0..t {

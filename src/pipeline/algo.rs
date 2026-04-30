@@ -89,6 +89,29 @@ pub struct AssignEmbeddingsInput<'a> {
 ///      does this to avoid artificial cluster inflation).
 ///   4. A new fixture captured with `num_clusters` forcing != auto.
 pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
+  assign_embeddings_inner(input, true)
+}
+
+/// Test-only entrypoint: identical to [`assign_embeddings`] but
+/// threads an explicit `use_simd` flag through every internal
+/// `ops::*` callsite (`ahc_init`, `vbx_iterate`,
+/// `weighted_centroids`, stage-6 cosine, `cosine_distance_pre_norm`).
+/// Used by the end-to-end backend-forced differential test in
+/// [`crate::pipeline::tests`] to prove that scalar and SIMD
+/// produce *bit-identical* hard cluster assignments on aarch64
+/// (Codex adversarial review, repeated rounds).
+#[cfg(test)]
+pub(crate) fn assign_embeddings_with_simd(
+  input: &AssignEmbeddingsInput<'_>,
+  use_simd: bool,
+) -> Result<Vec<Vec<i32>>, Error> {
+  assign_embeddings_inner(input, use_simd)
+}
+
+fn assign_embeddings_inner(
+  input: &AssignEmbeddingsInput<'_>,
+  use_simd: bool,
+) -> Result<Vec<Vec<i32>>, Error> {
   let &AssignEmbeddingsInput {
     embeddings,
     num_chunks,
@@ -214,12 +237,28 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
       train_embeddings[(i, d)] = embeddings[(row, d)];
     }
   }
-  let ahc_clusters = ahc_init(&train_embeddings, threshold)?;
+  // In test builds, route through the `*_with_simd` variants so the
+  // backend-forced differential test in `pipeline::tests` can A/B
+  // both backends end-to-end. Production (release) builds always go
+  // through the `true` path; the cfg branch compiles to the same
+  // call.
+  #[cfg(test)]
+  let ahc_clusters = crate::ahc::algo::ahc_init_with_simd(&train_embeddings, threshold, use_simd)?;
+  #[cfg(not(test))]
+  let ahc_clusters = {
+    let _ = use_simd;
+    ahc_init(&train_embeddings, threshold)?
+  };
 
   // ── Stage 3 (caller-supplied): post_plda is the VBx feature matrix.
   // ── Stage 4: VBx ──────────────────────────────────────────────
   let num_init = ahc_clusters.iter().copied().max().expect("num_train >= 2") + 1;
   let qinit = build_qinit(&ahc_clusters, num_init);
+  #[cfg(test)]
+  let vbx_out = crate::vbx::algo::vbx_iterate_with_simd(
+    post_plda, phi, &qinit, fa, fb, max_iters, use_simd,
+  )?;
+  #[cfg(not(test))]
   let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason == StopReason::MaxIterationsReached {
     // Pyannote silently accepts max_iters reached — it's the common
@@ -229,6 +268,15 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   }
 
   // ── Stage 5: drop sp-squashed clusters, compute centroids ───────
+  #[cfg(test)]
+  let centroids = crate::centroid::algo::weighted_centroids_with_simd(
+    &vbx_out.gamma,
+    &vbx_out.pi,
+    &train_embeddings,
+    SP_ALIVE_THRESHOLD,
+    use_simd,
+  )?;
+  #[cfg(not(test))]
   let centroids = weighted_centroids(
     &vbx_out.gamma,
     &vbx_out.pi,
@@ -240,22 +288,11 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   // ── Stage 6: cdist(embeddings, centroids, metric="cosine") ─────
   // Then `soft_clusters = 2 - e2k_distance`. Per pyannote.
   //
-  // **Deterministic scalar dot** — see `ops::scalar` module docs +
-  // `ahc::algo` precision contract. The cosine costs computed here
-  // feed `constrained_argmax` (Hungarian) at stage 7, which does
-  // make discrete assignment decisions over the cost matrix. While
-  // Hungarian is a global-optimum solver and is much more robust to
-  // small SIMD perturbations than AHC's per-merge threshold cut,
-  // near-tied chunk×cluster pairs would still flip across NEON,
-  // AVX2, AVX-512, and scalar builds. We route stage-6 dot products
-  // through scalar to keep `assign_embeddings` cross-architecture
-  // deterministic — matching the AHC scalar fix. Codex adversarial
-  // review MEDIUM (this commit).
-  //
-  // The other SIMD wiring (centroid axpy, VBx dot reductions) stays
-  // SIMD: their outputs are continuous (centroid coordinates flow
-  // into this scalar dot, so the SIMD divergence collapses here;
-  // VBx outputs feed ELBO + log_p continuously, no thresholds).
+  // SIMD dot — bit-identical to scalar on aarch64 (see
+  // `ops::scalar::dot` module docs). The cosine costs feed
+  // `constrained_argmax` (Hungarian) at stage 7; cross-architecture
+  // determinism on aarch64 is guaranteed by the scalar/NEON
+  // bit-identical contract.
   //
   // nalgebra is column-major so `embeddings.row(r)` and
   // `centroids.row(k)` are strided. We pack all centroid rows into
@@ -273,7 +310,7 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   }
   let centroid_norm_sq: Vec<f64> = centroid_buf
     .chunks_exact(embed_dim)
-    .map(|row| crate::ops::dot(row, row, false))
+    .map(|row| crate::ops::dot(row, row, use_simd))
     .collect();
   let mut emb_row: Vec<f64> = vec![0.0; embed_dim];
   for (c, soft_c) in soft.iter_mut().enumerate() {
@@ -282,9 +319,10 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
       for d in 0..embed_dim {
         emb_row[d] = embeddings[(row, d)];
       }
-      let emb_norm_sq = crate::ops::dot(&emb_row, &emb_row, false);
+      let emb_norm_sq = crate::ops::dot(&emb_row, &emb_row, use_simd);
       for (k, c_row) in centroid_buf.chunks_exact(embed_dim).enumerate() {
-        let dist = cosine_distance_pre_norm(&emb_row, emb_norm_sq, c_row, centroid_norm_sq[k]);
+        let dist =
+          cosine_distance_pre_norm(&emb_row, emb_norm_sq, c_row, centroid_norm_sq[k], use_simd);
         soft_c[(s, k)] = 2.0 - dist;
       }
     }
@@ -371,12 +409,17 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 ///
 /// Operates on contiguous f64 slices (`row_a`, `row_b`) — the layout
 /// `ops::dot` expects.
-fn cosine_distance_pre_norm(row_a: &[f64], norm_sq_a: f64, row_b: &[f64], norm_sq_b: f64) -> f64 {
+fn cosine_distance_pre_norm(
+  row_a: &[f64],
+  norm_sq_a: f64,
+  row_b: &[f64],
+  norm_sq_b: f64,
+  use_simd: bool,
+) -> f64 {
   debug_assert_eq!(row_a.len(), row_b.len());
-  // Scalar dot for cross-architecture deterministic Hungarian
-  // assignment — see stage-6 comment block above for the full
-  // rationale.
-  let dot = crate::ops::dot(row_a, row_b, false);
+  // SIMD dot: scalar/NEON bit-identical contract — see stage-6
+  // comment block above.
+  let dot = crate::ops::dot(row_a, row_b, use_simd);
   let denom = norm_sq_a.sqrt() * norm_sq_b.sqrt();
   if denom == 0.0 {
     return f64::NAN;

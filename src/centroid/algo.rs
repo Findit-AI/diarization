@@ -49,6 +49,31 @@ pub fn weighted_centroids(
   embeddings: &DMatrix<f64>,
   sp_threshold: f64,
 ) -> Result<DMatrix<f64>, Error> {
+  weighted_centroids_inner(q, sp, embeddings, sp_threshold, true)
+}
+
+/// Test-only entrypoint: identical to [`weighted_centroids`] but with
+/// the `use_simd` flag exposed so end-to-end differential tests can
+/// A/B both backends on identical inputs. Production code goes
+/// through [`weighted_centroids`] which always passes `true`.
+#[cfg(test)]
+pub(crate) fn weighted_centroids_with_simd(
+  q: &DMatrix<f64>,
+  sp: &DVector<f64>,
+  embeddings: &DMatrix<f64>,
+  sp_threshold: f64,
+  use_simd: bool,
+) -> Result<DMatrix<f64>, Error> {
+  weighted_centroids_inner(q, sp, embeddings, sp_threshold, use_simd)
+}
+
+fn weighted_centroids_inner(
+  q: &DMatrix<f64>,
+  sp: &DVector<f64>,
+  embeddings: &DMatrix<f64>,
+  sp_threshold: f64,
+  use_simd: bool,
+) -> Result<DMatrix<f64>, Error> {
   let (num_train, num_init) = q.shape();
   if num_train == 0 {
     return Err(Error::Shape("q must have at least one row"));
@@ -112,13 +137,19 @@ pub fn weighted_centroids(
   }
   let mut centroid_buf: Vec<f64> = vec![0.0; num_alive * embed_dim];
   let mut w_totals: Vec<f64> = vec![0.0; num_alive];
+  // SIMD AXPY: scalar and NEON produce bit-identical results
+  // (scalar uses `f64::mul_add`, NEON uses `vfmaq_f64` — both single-
+  // rounding FMA, no inter-element reduction so no order-divergence
+  // either). Centroid coordinates downstream are bit-stable across
+  // backends. Cross-arch (AVX2/AVX-512) is also bit-identical for
+  // axpy specifically — see `ops::differential_tests::axpy_byte_identical`.
   for (alive_idx, &k) in alive.iter().enumerate() {
     let centroid_slice = &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
     for t in 0..num_train {
       let w = q[(t, k)];
       w_totals[alive_idx] += w;
       let emb_slice = &embed_buf[t * embed_dim..(t + 1) * embed_dim];
-      crate::ops::axpy(centroid_slice, w, emb_slice, true);
+      crate::ops::axpy(centroid_slice, w, emb_slice, use_simd);
     }
   }
   for &w_total in &w_totals {

@@ -16,6 +16,9 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[cfg(test)]
+pub(crate) mod algo;
+#[cfg(not(test))]
 mod algo;
 mod error;
 

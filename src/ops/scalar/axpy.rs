@@ -1,7 +1,14 @@
 //! Scalar AXPY: `y += alpha * x`.
+//!
+//! Uses `f64::mul_add` for per-element FMA — bit-identical to the
+//! NEON / AVX2 / AVX-512 backends, which use `vfmaq_f64` /
+//! `_mm256_fmadd_pd` / `_mm512_fmadd_pd`. AXPY has no inter-element
+//! reduction, so cross-architecture bit-identity holds for AXPY
+//! everywhere FMA is available (mandatory in ARMv8 baseline; gated
+//! behind the AVX2 dispatcher's `fma` runtime check on x86_64).
 
-/// In-place fused multiply-add over a slice: `y[i] += alpha * x[i]`
-/// for each `i`.
+/// In-place fused multiply-add over a slice: `y[i] = alpha * x[i] +
+/// y[i]` for each `i`, with one IEEE 754 rounding per element.
 ///
 /// Used by `centroid::weighted_centroids`'s
 /// `centroids[k, d] += w * embeddings[t, d]` accumulator. The
@@ -16,6 +23,6 @@
 pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
   debug_assert_eq!(y.len(), x.len(), "axpy: length mismatch");
   for i in 0..y.len() {
-    y[i] += alpha * x[i];
+    y[i] = f64::mul_add(alpha, x[i], y[i]);
   }
 }
