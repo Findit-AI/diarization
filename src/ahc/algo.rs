@@ -1,29 +1,46 @@
 //! AHC initialization: L2-normalize → centroid linkage → fcluster + remap.
 //!
-//! ## Precision contract w.r.t. SIMD `pdist_euclidean`
+//! ## Determinism contract w.r.t. `pdist_euclidean`
 //!
-//! Pairwise distances flow through [`crate::ops::pdist_euclidean`]
-//! with `use_simd = true`. The SIMD backends use FMA + parallel-lane
-//! reduction (see `crate::ops::scalar` module docs) and *do* differ
-//! from the scalar serial sum by O(1e-12) relative on well-conditioned
-//! inputs. Since the threshold cut here is hard `<= threshold`, a
-//! distance landing within ~1e-12 of `threshold` could in principle
-//! flip an AHC merge between scalar and SIMD — Codex adversarial
-//! review MEDIUM (this commit).
+//! AHC's pairwise-distance computation runs through the **scalar**
+//! [`crate::ops::pdist_euclidean`] path unconditionally in production
+//! (Codex adversarial review, MEDIUM, repeated 2026-04-30). The SIMD
+//! backends use FMA + parallel-lane reduction (see
+//! [`crate::ops::scalar`] module docs) and differ from scalar by
+//! O(1e-12) relative on well-conditioned inputs. Since the cut here
+//! is a hard `<= threshold` decision, a distance landing within
+//! ~1e-12 of `threshold` could in principle flip an AHC merge — and
+//! the same audio could then partition into different speakers on
+//! NEON, AVX2, AVX-512, or scalar builds.
 //!
-//! The differential tests in [`crate::ahc::tests`] empirically verify
-//! that scalar-vs-SIMD partition stability holds for:
-//! - random embeddings (50 seeds × N=20, D=128) at the production
-//!   pyannote-community-1 threshold of 0.6;
-//! - constructed embeddings with pairwise distances designed to land
-//!   on the threshold boundary (within ulp-level windows);
-//! - all 5 captured pyannote fixtures (parity tests).
+//! The differential tests in [`crate::ahc::tests::simd_partition_stability`]
+//! show that for 50 random seeds (N=20, D=128) and constructed
+//! threshold-adjacent inputs, scalar and SIMD agree on the partition.
+//! That is *empirical* evidence the two paths align; it is not a
+//! proof for arbitrary production audio. We choose determinism over
+//! the ~25% pipeline speedup that AHC SIMD would provide:
+//! cross-architecture reproducibility of speaker labels matters more
+//! than the wall-clock saving for a diarization pipeline. The SIMD
+//! path remains available via the test-only `ahc_init_with_simd`
+//! entrypoint so the differential tests continue to A/B both
+//! backends on identical inputs.
 //!
-//! Callers needing strict cross-architecture bit-identical
-//! partitioning (e.g., golden-RTTM regression diffs across CPUs) must
-//! build with `RUSTFLAGS="--cfg diarization_force_scalar"` to bypass
-//! every SIMD backend. The performance cost on aarch64 is ~25% of the
-//! pipeline (AHC `pdist_euclidean` is the dominant hot path).
+//! Other `ops::*` SIMD wiring stays SIMD. Audit of every other
+//! discrete-decision-fed-by-SIMD site (Codex's "next step"):
+//!
+//! | Site | SIMD producer | Discrete decision | Verdict |
+//! |---|---|---|---|
+//! | `pipeline::stage 6 cosine` → `constrained_argmax` (Hungarian) | `ops::dot` | global cost-matrix matching | KEEP SIMD — Hungarian uses *relative ordering* of costs over the whole matrix; a 1e-12 perturbation in a single cell almost never flips the global optimum |
+//! | `centroid::weighted_centroids` → stage 6 cosine | `ops::axpy` | (transitive, same as above) | KEEP SIMD |
+//! | `vbx::vbx_iterate` G/sa_phi reductions → ELBO + log_p | `ops::dot` | continuous arithmetic, no threshold | KEEP SIMD |
+//! | `vbx::vbx_iterate` convergence: `delta < epsilon` | (indirect) | scale-aware regression band already absorbs ulp perturbations (`ELBO_REGRESSION_RTOL = 1e-9`, much wider than SIMD divergence) | KEEP SIMD |
+//! | `ahc_init` → linkage threshold cut | `ops::pdist_euclidean` | hard `<= threshold` per merge | **SCALAR** (this fix) |
+//!
+//! Only AHC's per-merge hard threshold is brittle enough to warrant
+//! the SIMD revert. Hungarian's global matching and VBx's
+//! tolerance-banded convergence are robust to the documented
+//! O(1e-12) divergence; the parity tests pass, and qualitatively
+//! these are not "single-distance-flips-the-cut" decisions.
 
 use crate::ahc::error::Error;
 use kodama::{Method, Step, linkage};
@@ -57,7 +74,9 @@ use nalgebra::DMatrix;
 /// drive `diarization::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
-  ahc_init_inner(embeddings, threshold, true)
+  // Production path: scalar pdist for cross-architecture determinism
+  // at the threshold cut. See module docs for the rationale.
+  ahc_init_inner(embeddings, threshold, false)
 }
 
 /// Test-only entrypoint: identical to [`ahc_init`] but with the
