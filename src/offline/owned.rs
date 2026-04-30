@@ -71,6 +71,12 @@ pub struct OwnedPipelineConfig {
   pub max_iters: usize,
   /// Span post-processing min_duration_off (seconds). Community-1: 0.0.
   pub min_duration_off: f64,
+  /// Temporal smoothing epsilon for top-k reconstruction. Community-1
+  /// default `Some(0.1)` matches speakrs's
+  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }` — reduces flicker
+  /// between near-tied speakers. Set to `None` for bit-exact
+  /// pyannote argmax behavior.
+  pub smoothing_epsilon: Option<f32>,
 }
 
 impl Default for OwnedPipelineConfig {
@@ -83,6 +89,7 @@ impl Default for OwnedPipelineConfig {
       fb: 0.8,
       max_iters: 20,
       min_duration_off: 0.0,
+      smoothing_epsilon: Some(0.1),
     }
   }
 }
@@ -109,6 +116,7 @@ impl OwnedDiarizationPipeline {
         fb: 0.8,
         max_iters: 20,
         min_duration_off: 0.0,
+        smoothing_epsilon: Some(0.1),
       },
     }
   }
@@ -368,6 +376,40 @@ impl OwnedDiarizationPipeline {
       count[ofr] = avg.round().clamp(0.0, u8::MAX as f64) as u8;
     }
 
+    // ── Stage 3b: median-smooth the count tensor ──────────────────
+    //
+    // Even with hamming-weighted aggregation, the rounded per-frame
+    // count can flicker between adjacent integer values (e.g.
+    // 1, 2, 1, 1, 2, 1, ...) on chunks where the true number of
+    // active speakers is borderline. This drives the reconstruct
+    // top-k selection to spuriously emit a second speaker for a
+    // single frame, producing flicker spans of <= ~30 ms (one frame
+    // ≈ 16.97 ms). Pyannote/speakrs avoid this via smoothed
+    // reconstruction (already applied above) plus the inherent
+    // smoothness of pyannote's PIT-aligned aggregation. We
+    // post-process the count tensor with a small-window median
+    // filter — robust to single-frame outliers, preserves true
+    // multi-speaker regions that span many frames.
+    //
+    // Window size 7 (≈ 119 ms) was chosen to match the typical
+    // duration of legitimate sub-second turns we want to KEEP
+    // (pyannote reference RTTM has 0.034 s spans). 119 ms < 200 ms
+    // so genuine 200+ ms speaker turns survive the median.
+    if num_output_frames >= 7 {
+      const MEDIAN_WIN: usize = 7;
+      const HALF: usize = MEDIAN_WIN / 2;
+      let mut smoothed = count.clone();
+      for ofr in HALF..(num_output_frames - HALF) {
+        let mut window: [u8; MEDIAN_WIN] = [0; MEDIAN_WIN];
+        for (j, w) in window.iter_mut().enumerate() {
+          *w = count[ofr - HALF + j];
+        }
+        window.sort_unstable();
+        smoothed[ofr] = window[HALF];
+      }
+      count = smoothed;
+    }
+
     let chunks_sw = SlidingWindow {
       start: 0.0,
       duration: WINDOW_SAMPLES as f64 / SAMPLE_RATE_HZ as f64,
@@ -396,6 +438,7 @@ impl OwnedDiarizationPipeline {
       fb: cfg.fb,
       max_iters: cfg.max_iters,
       min_duration_off: cfg.min_duration_off,
+      smoothing_epsilon: cfg.smoothing_epsilon,
     };
     diarize_offline(&input)
   }

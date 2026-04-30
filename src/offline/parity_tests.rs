@@ -86,6 +86,8 @@ fn run_offline_parity(fixture_dir: &str) {
     fb: fb_arr[0],
     max_iters: max_iters_arr[0] as usize,
     min_duration_off: min_dur_off_arr[0],
+    // Phase 5c parity: bit-exact pyannote argmax (no smoothing).
+    smoothing_epsilon: None,
   };
 
   let out = diarize_offline(&input).expect("diarize_offline");

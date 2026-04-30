@@ -72,6 +72,17 @@ pub struct OfflineInput<'a> {
   /// adjacent same-cluster spans separated by a gap `≤
   /// min_duration_off`. Community-1 default: `0.0` (no merging).
   pub min_duration_off: f64,
+
+  /// Optional temporal smoothing epsilon for the reconstruct top-k
+  /// selection. `None` = bit-exact pyannote (descending-activation
+  /// argmax). `Some(0.1)` matches speakrs's
+  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }` default — when
+  /// two clusters' activations differ by `< eps`, prefer the one
+  /// selected at the previous frame. Reduces flicker between
+  /// near-tied speakers; recommended for `OwnedDiarizationPipeline`
+  /// since ONNX numerical drift produces more near-ties than
+  /// pyannote's pure-PyTorch path.
+  pub smoothing_epsilon: Option<f32>,
 }
 
 /// Output of [`diarize_offline`].
@@ -121,6 +132,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     fb,
     max_iters,
     min_duration_off,
+    smoothing_epsilon,
   } = input;
 
   // ── Boundary checks ────────────────────────────────────────────
@@ -249,6 +261,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     num_output_frames,
     chunks_sw,
     frames_sw,
+    smoothing_epsilon,
   };
   let discrete_diarization = reconstruct(&recon_input)?;
 

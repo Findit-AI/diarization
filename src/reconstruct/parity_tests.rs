@@ -192,6 +192,7 @@ fn run_reconstruct_parity(fixture_dir: &str) {
     num_output_frames,
     chunks_sw,
     frames_sw,
+    smoothing_epsilon: None,
   };
   let got = reconstruct(&recon_input).expect("reconstruct");
 

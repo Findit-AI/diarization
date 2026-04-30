@@ -161,6 +161,7 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
     num_output_frames,
     chunks_sw,
     frames_sw,
+    smoothing_epsilon: None,
   };
   let grid = reconstruct(&recon_input).expect("reconstruct");
   let num_clusters = grid.len() / num_output_frames;

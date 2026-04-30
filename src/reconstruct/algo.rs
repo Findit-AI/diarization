@@ -63,6 +63,15 @@ pub struct ReconstructInput<'a> {
   /// Inner (frame-level) sliding window — defines per-output-frame
   /// timing. Used to compute `closest_frame(chunk_time)`.
   pub frames_sw: SlidingWindow,
+  /// Optional temporal smoothing epsilon for top-k selection.
+  /// `None` (default) = strict descending-activation argmax (matches
+  /// pyannote bit-exact). `Some(eps)` = when comparing two clusters
+  /// whose activations differ by `< eps`, prefer the one that was
+  /// selected at frame `t - 1`. Mirrors speakrs's
+  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }`. Reduces flicker
+  /// between near-tied speakers without over-smoothing high-confidence
+  /// transitions.
+  pub smoothing_epsilon: Option<f32>,
 }
 
 /// Run pyannote's reconstruction.
@@ -94,6 +103,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
     num_output_frames,
     chunks_sw,
     frames_sw,
+    smoothing_epsilon,
   } = input;
 
   // ── Boundary checks ────────────────────────────────────────────
@@ -298,24 +308,47 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
 
   // ── Stage 3: top-`count[t]` binarize per output frame ──────────
   let mut out = vec![0.0f32; num_output_frames * num_clusters];
+  let mut prev_selected: Vec<usize> = Vec::new();
   for (t, &c_byte) in count.iter().enumerate().take(num_output_frames) {
     let c_count = c_byte as usize;
     if c_count == 0 {
+      prev_selected.clear();
       continue;
     }
     // Sort cluster indices by descending activation at frame t.
     let row_start = t * num_clusters;
     let mut sorted: Vec<usize> = (0..num_clusters).collect();
-    sorted.sort_by(|&a, &b| {
-      let va = aggregated[row_start + a];
-      let vb = aggregated[row_start + b];
-      // Descending: vb.partial_cmp(va). Stable tie-break by index
-      // (sort_by is stable since 1.20).
-      vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for &k in sorted.iter().take(c_count) {
+    if let Some(eps) = smoothing_epsilon {
+      // Speakrs-style tie-breaking: when two activations are within
+      // `eps` of each other, prefer the one that was selected at
+      // t-1. Falls back to descending-activation order otherwise.
+      sorted.sort_by(|&a, &b| {
+        let va = aggregated[row_start + a];
+        let vb = aggregated[row_start + b];
+        let diff = (va - vb).abs();
+        if diff < eps {
+          let a_was = prev_selected.contains(&a);
+          let b_was = prev_selected.contains(&b);
+          // Bias toward previously-selected (descending order: was-active first).
+          b_was.cmp(&a_was)
+        } else {
+          vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+        }
+      });
+    } else {
+      sorted.sort_by(|&a, &b| {
+        let va = aggregated[row_start + a];
+        let vb = aggregated[row_start + b];
+        // Descending: vb.partial_cmp(va). Stable tie-break by index
+        // (sort_by is stable since 1.20).
+        vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+      });
+    }
+    let now_selected: Vec<usize> = sorted.iter().take(c_count).copied().collect();
+    for &k in &now_selected {
       out[row_start + k] = 1.0;
     }
+    prev_selected = now_selected;
   }
 
   // Reference UNMATCHED so the import isn't dead code.
