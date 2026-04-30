@@ -125,3 +125,86 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
     }
   }
 }
+
+/// Codex adversarial review MEDIUM (this commit). NaN/inf in the
+/// FULL embeddings matrix — including rows outside the train subset
+/// — must surface `Error::NonFinite("embeddings")` at the boundary,
+/// not silently flow into stage-6 cosine scoring where Hungarian's
+/// `nan_to_num` would rewrite the resulting NaN cost to global
+/// `nanmin` and produce a plausible-looking but wrong assignment.
+#[test]
+fn rejects_nan_in_non_train_embedding_row() {
+  let num_chunks = 4;
+  let num_speakers = 2;
+  let embed_dim = 4;
+  let plda_dim = 4;
+  let num_frames = 8;
+  let mut embeddings = DMatrix::<f64>::from_element(num_chunks * num_speakers, embed_dim, 0.5);
+  // Train subset is just the first 2 rows; corrupt a non-train row.
+  embeddings[(7, 1)] = f64::NAN;
+  let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
+  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let phi = DVector::<f64>::from_element(plda_dim, 1.0);
+  let input = AssignEmbeddingsInput {
+    embeddings: &embeddings,
+    num_chunks,
+    num_speakers,
+    segmentations: &segmentations,
+    num_frames,
+    post_plda: &post_plda,
+    phi: &phi,
+    train_chunk_idx: &[0usize, 1],
+    train_speaker_idx: &[0usize, 1],
+    threshold: 0.6,
+    fa: 0.07,
+    fb: 0.8,
+    max_iters: 20,
+  };
+  let result = assign_embeddings(&input);
+  assert!(
+    matches!(result, Err(crate::pipeline::Error::NonFinite("embeddings"))),
+    "expected NonFinite(embeddings), got {result:?}"
+  );
+}
+
+/// Same precondition for `segmentations`: stage 7 sums all entries
+/// for the inactive-speaker mask. A NaN in segmentations would make
+/// `sum_activity` non-zero (NaN ≠ 0) for every speaker, defeating the
+/// inactive-speaker override. Codex adversarial review MEDIUM (this
+/// commit).
+#[test]
+fn rejects_nan_in_segmentations() {
+  let num_chunks = 3;
+  let num_speakers = 2;
+  let embed_dim = 4;
+  let plda_dim = 4;
+  let num_frames = 8;
+  let embeddings = DMatrix::<f64>::from_element(num_chunks * num_speakers, embed_dim, 0.5);
+  let mut segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
+  segmentations[10] = f64::INFINITY;
+  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let phi = DVector::<f64>::from_element(plda_dim, 1.0);
+  let input = AssignEmbeddingsInput {
+    embeddings: &embeddings,
+    num_chunks,
+    num_speakers,
+    segmentations: &segmentations,
+    num_frames,
+    post_plda: &post_plda,
+    phi: &phi,
+    train_chunk_idx: &[0usize, 1],
+    train_speaker_idx: &[0usize, 1],
+    threshold: 0.6,
+    fa: 0.07,
+    fb: 0.8,
+    max_iters: 20,
+  };
+  let result = assign_embeddings(&input);
+  assert!(
+    matches!(
+      result,
+      Err(crate::pipeline::Error::NonFinite("segmentations"))
+    ),
+    "expected NonFinite(segmentations), got {result:?}"
+  );
+}

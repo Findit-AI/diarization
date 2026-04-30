@@ -166,6 +166,25 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
       return Err(Error::Shape("train_speaker_idx[i] out of range"));
     }
   }
+  // Validate that *every* row of `embeddings` and *every* entry of
+  // `segmentations` is finite. AHC and centroid only validate the
+  // train subset (rows indexed by `train_chunk_idx`/`train_speaker_idx`),
+  // but stage 6 reads ALL embedding rows for cosine scoring and stage
+  // 7 reads ALL segmentations for the inactive-speaker mask. A NaN in
+  // a non-train row would silently become a soft cost that
+  // `constrained_argmax` rewrites to the global `nanmin` — yielding
+  // a plausible-looking but wrong assignment with no surfaced error.
+  // Codex adversarial review MEDIUM (this commit).
+  for v in embeddings.iter() {
+    if !v.is_finite() {
+      return Err(Error::NonFinite("embeddings"));
+    }
+  }
+  for v in segmentations.iter() {
+    if !v.is_finite() {
+      return Err(Error::NonFinite("segmentations"));
+    }
+  }
   // Pyannote one-cluster fast path (`clustering.py:588-594`): when
   // fewer than 2 active embeddings survive `filter_embeddings`,
   // pyannote skips AHC/VBx entirely and returns
@@ -221,18 +240,30 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   // ── Stage 6: cdist(embeddings, centroids, metric="cosine") ─────
   // Then `soft_clusters = 2 - e2k_distance`. Per pyannote.
   //
+  // **Deterministic scalar dot** — see `ops::scalar` module docs +
+  // `ahc::algo` precision contract. The cosine costs computed here
+  // feed `constrained_argmax` (Hungarian) at stage 7, which does
+  // make discrete assignment decisions over the cost matrix. While
+  // Hungarian is a global-optimum solver and is much more robust to
+  // small SIMD perturbations than AHC's per-merge threshold cut,
+  // near-tied chunk×cluster pairs would still flip across NEON,
+  // AVX2, AVX-512, and scalar builds. We route stage-6 dot products
+  // through scalar to keep `assign_embeddings` cross-architecture
+  // deterministic — matching the AHC scalar fix. Codex adversarial
+  // review MEDIUM (this commit).
+  //
+  // The other SIMD wiring (centroid axpy, VBx dot reductions) stays
+  // SIMD: their outputs are continuous (centroid coordinates flow
+  // into this scalar dot, so the SIMD divergence collapses here;
+  // VBx outputs feed ELBO + log_p continuously, no thresholds).
+  //
   // nalgebra is column-major so `embeddings.row(r)` and
-  // `centroids.row(k)` are strided. `ops::dot` (and its eventual SIMD
-  // backend) wants contiguous slices. We pack all centroid rows into
+  // `centroids.row(k)` are strided. We pack all centroid rows into
   // one flat row-major buffer (`centroid_buf`, length
   // `num_alive * embed_dim`, single heap alloc) and reuse one
-  // `emb_row` scratch buffer across the inner k-loop.
-  //
-  // `norm_sq` factors are hoisted: `centroid_norm_sq[k]` is a stage-6
+  // `emb_row` scratch buffer across the inner k-loop. `norm_sq`
+  // factors are hoisted: `centroid_norm_sq[k]` is a stage-6
   // constant, `emb_norm_sq` is constant across the inner k-loop.
-  // Without this hoist the triple loop pays for `ops::dot` three times
-  // per (c, s, k) and recomputes the same `||row||²` num_alive times
-  // for embeddings and num_chunks·num_speakers times per centroid.
   let mut soft = vec![DMatrix::<f64>::zeros(num_speakers, num_alive); num_chunks];
   let mut centroid_buf: Vec<f64> = Vec::with_capacity(num_alive * embed_dim);
   for k in 0..num_alive {
@@ -242,7 +273,7 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   }
   let centroid_norm_sq: Vec<f64> = centroid_buf
     .chunks_exact(embed_dim)
-    .map(|row| crate::ops::dot(row, row, true))
+    .map(|row| crate::ops::dot(row, row, false))
     .collect();
   let mut emb_row: Vec<f64> = vec![0.0; embed_dim];
   for (c, soft_c) in soft.iter_mut().enumerate() {
@@ -251,7 +282,7 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
       for d in 0..embed_dim {
         emb_row[d] = embeddings[(row, d)];
       }
-      let emb_norm_sq = crate::ops::dot(&emb_row, &emb_row, true);
+      let emb_norm_sq = crate::ops::dot(&emb_row, &emb_row, false);
       for (k, c_row) in centroid_buf.chunks_exact(embed_dim).enumerate() {
         let dist = cosine_distance_pre_norm(&emb_row, emb_norm_sq, c_row, centroid_norm_sq[k]);
         soft_c[(s, k)] = 2.0 - dist;
@@ -342,7 +373,10 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 /// `ops::dot` expects.
 fn cosine_distance_pre_norm(row_a: &[f64], norm_sq_a: f64, row_b: &[f64], norm_sq_b: f64) -> f64 {
   debug_assert_eq!(row_a.len(), row_b.len());
-  let dot = crate::ops::dot(row_a, row_b, true);
+  // Scalar dot for cross-architecture deterministic Hungarian
+  // assignment — see stage-6 comment block above for the full
+  // rationale.
+  let dot = crate::ops::dot(row_a, row_b, false);
   let denom = norm_sq_a.sqrt() * norm_sq_b.sqrt();
   if denom == 0.0 {
     return f64::NAN;
