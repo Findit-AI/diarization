@@ -95,25 +95,56 @@ pub fn weighted_centroids(
   }
 
   // Compute weighted sums + total weight per surviving cluster.
+  // nalgebra is column-major so `embeddings.row(t)` is strided. We
+  // pre-pack `embeddings` into a row-major scratch buffer once, and
+  // accumulate centroids into a row-major buffer too, so the inner
+  // `centroid[k] += w * embedding[t]` reduces to `ops::axpy` over
+  // contiguous f64 slices. Final write-back fills the column-major
+  // `DMatrix` output. The `w_total <= 0` validation deferred to after
+  // accumulation — wasted work on bad input is bounded by the input
+  // shape and the error is the same either way.
   let num_alive = alive.len();
-  let mut centroids = DMatrix::<f64>::zeros(num_alive, embed_dim);
+  let mut embed_buf: Vec<f64> = Vec::with_capacity(num_train * embed_dim);
+  for t in 0..num_train {
+    for d in 0..embed_dim {
+      embed_buf.push(embeddings[(t, d)]);
+    }
+  }
+  let mut centroid_buf: Vec<f64> = vec![0.0; num_alive * embed_dim];
+  let mut w_totals: Vec<f64> = vec![0.0; num_alive];
   for (alive_idx, &k) in alive.iter().enumerate() {
-    let mut w_total = 0.0;
+    let centroid_slice =
+      &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
     for t in 0..num_train {
       let w = q[(t, k)];
-      w_total += w;
-      for d in 0..embed_dim {
-        centroids[(alive_idx, d)] += w * embeddings[(t, d)];
-      }
+      w_totals[alive_idx] += w;
+      let emb_slice = &embed_buf[t * embed_dim..(t + 1) * embed_dim];
+      crate::ops::axpy(centroid_slice, w, emb_slice, true);
     }
+  }
+  for &w_total in &w_totals {
     if w_total <= 0.0 {
       return Err(Error::Shape(
         "surviving cluster has non-positive total weight; \
          cannot normalize without producing NaN",
       ));
     }
+  }
+  // Normalize: row-wise divide by w_total. The axpy primitive doesn't
+  // cover this shape (per-row scalar); a small scalar loop is fine —
+  // num_alive · embed_dim is at most ~20 · 256 = 5120 ops per session.
+  for (alive_idx, &w_total) in w_totals.iter().enumerate() {
+    let inv_w = 1.0 / w_total;
+    let centroid_slice =
+      &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
+    for v in centroid_slice.iter_mut() {
+      *v *= inv_w;
+    }
+  }
+  let mut centroids = DMatrix::<f64>::zeros(num_alive, embed_dim);
+  for k in 0..num_alive {
     for d in 0..embed_dim {
-      centroids[(alive_idx, d)] /= w_total;
+      centroids[(k, d)] = centroid_buf[k * embed_dim + d];
     }
   }
 

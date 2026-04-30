@@ -239,14 +239,27 @@ pub fn vbx_iterate(
     return Err(Error::Shape("max_iters must be at least 1"));
   }
 
-  // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi))
+  // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi)) and rho via
+  // a single row-major pack of X. nalgebra is column-major so `x.row(r)`
+  // is strided — we copy into `x_row_major` once and reuse the slice
+  // for both `ops::dot(row, row, true)` (T·D L2-norm-squared) and the
+  // `rho[r,d] = x[r,d] * sqrt(phi[d])` element-wise scale, packing
+  // `rho` row-major in the process so downstream consumers can pull
+  // contiguous rows without re-striding through DMatrix.
   let log_2pi = (2.0_f64 * std::f64::consts::PI).ln();
+  let mut x_row_major: Vec<f64> = Vec::with_capacity(t * d);
+  for r in 0..t {
+    for c in 0..d {
+      x_row_major.push(x[(r, c)]);
+    }
+  }
   let mut g = DVector::<f64>::zeros(t);
   for r in 0..t {
-    let row_sq: f64 = x.row(r).iter().map(|v| v * v).sum();
+    let row = &x_row_major[r * d..(r + 1) * d];
+    let row_sq = crate::ops::dot(row, row, true);
     g[r] = -0.5 * (row_sq + d as f64 * log_2pi);
   }
-  // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d]
+  // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d].
   let v_sqrt: DVector<f64> = phi.map(|p| p.sqrt());
   let mut rho = x.clone();
   for r in 0..t {
@@ -292,16 +305,23 @@ pub fn vbx_iterate(
     // ── log_p_ (per-(frame, speaker) log-likelihood, Eq. 23) ─────
     // log_p_[t,s] = Fa * (rho @ alpha.T - 0.5*(invL+alpha**2)@Phi + G) (Eq. 23)
     let rho_alpha_t = &rho * alpha.transpose(); // (T, S)
-    // (invL + alpha**2) @ Phi : (S, D) · (D,) → (S,)
+    // (invL + alpha**2) @ Phi : (S, D) · (D,) → (S,).
+    //
+    // Pack `(invL[s,:] + α[s,:]²)` into a contiguous scratch buffer
+    // and reduce against `phi.as_slice()` via `ops::dot`. The fused
+    // pack costs the same `D` adds + `D` muls as the original inline
+    // accumulator, but the reduction now flows through the SIMD dot
+    // backend. Buffer is reused across `s` (one alloc per EM iter).
     let mut sa_phi = DVector::<f64>::zeros(s);
+    let mut sa_buf: Vec<f64> = vec![0.0; d];
+    let phi_slice = phi.as_slice();
     for sj in 0..s {
-      let mut acc = 0.0;
       for dk in 0..d {
         let inv = inv_l[(sj, dk)];
-        let a2 = alpha[(sj, dk)] * alpha[(sj, dk)];
-        acc += (inv + a2) * phi[dk];
+        let a = alpha[(sj, dk)];
+        sa_buf[dk] = inv + a * a;
       }
-      sa_phi[sj] = acc;
+      sa_phi[sj] = crate::ops::dot(&sa_buf, phi_slice, true);
     }
     let mut log_p = DMatrix::<f64>::zeros(t, s);
     for tt in 0..t {
