@@ -1,17 +1,23 @@
-//! Phase 5e CLI: silero VAD + dia offline diarization on a 16 kHz
-//! mono WAV. Streams audio through silero in chunks, runs the
-//! offline pipeline on each closed voice range, prints RTTM lines
-//! to stdout.
+//! Streaming voice-range-driven diarization on a 16 kHz mono WAV.
+//!
+//! Caller drives silero VAD externally and pushes one voice range at
+//! a time into [`StreamingOfflineDiarizer`]. At end-of-stream,
+//! `finalize` runs global pyannote-equivalent clustering and prints
+//! original-timeline RTTM spans.
 //!
 //! ```sh
 //! cargo run --example run_streaming_pipeline --features ort --release -- clip_16k.wav > hyp.rttm
 //! ```
 
 use diarization::{
-  embed::EmbedModel, plda::PldaTransform, segment::SegmentModel,
-  streaming::StreamingDiarizationPipeline,
+  embed::EmbedModel,
+  plda::PldaTransform,
+  segment::SegmentModel,
+  streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer},
 };
-use silero::Session as VadSession;
+use silero::{
+  Session as VadSession, SpeechOptions, SpeechSegment, SpeechSegmenter, StreamState as VadStream,
+};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,42 +49,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut seg = SegmentModel::from_file(crate_root.join("models/segmentation-3.0.onnx"))?;
   let mut emb = EmbedModel::from_file(crate_root.join("models/wespeaker_resnet34_lm.onnx"))?;
   let plda = PldaTransform::new()?;
-  let vad = VadSession::from_memory(silero::BUNDLED_MODEL)?;
+  let mut vad_session = VadSession::from_memory(silero::BUNDLED_MODEL)?;
+  let vad_opts = SpeechOptions::default()
+    .with_min_silence_duration(std::time::Duration::from_millis(1500))
+    .with_min_speech_duration(std::time::Duration::from_millis(250))
+    .with_max_speech_duration(std::time::Duration::from_secs(60));
+  let mut vad_stream = VadStream::new(vad_opts.sample_rate());
+  let mut vad_segmenter = SpeechSegmenter::new(vad_opts);
 
-  let mut pipeline = StreamingDiarizationPipeline::new(vad);
+  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
+
+  // Stream the audio through silero to discover voice ranges, then
+  // push each range's PCM through the diarizer eagerly. The voice-
+  // range-to-PCM mapping is straightforward because we already have
+  // `samples` fully buffered; in a true streaming setting (e.g.
+  // ffmpeg → stdin) the caller would maintain a rolling buffer.
+  let chunk = 16_000;
+  let mut emitted: Vec<SpeechSegment> = Vec::new();
+  for window in samples.chunks(chunk) {
+    vad_segmenter.process_samples(&mut vad_session, &mut vad_stream, window, |s| {
+      emitted.push(s);
+    })?;
+  }
+  vad_segmenter.finish_stream(&mut vad_session, &mut vad_stream, |s| {
+    emitted.push(s);
+  })?;
+
+  for seg_span in &emitted {
+    let start = seg_span.start_sample() as usize;
+    let end = (seg_span.end_sample() as usize).min(samples.len());
+    if end <= start {
+      continue;
+    }
+    diarizer.push_voice_range(
+      &mut seg,
+      &mut emb,
+      seg_span.start_sample(),
+      &samples[start..end],
+    )?;
+  }
+
+  let spans = diarizer.finalize(&plda)?;
   let uri = std::path::Path::new(clip)
     .file_stem()
     .and_then(|s| s.to_str())
     .unwrap_or("audio");
-
-  let emit_span = |span: diarization::streaming::StreamingDiarizedSpan| {
+  for span in &spans {
     let start = span.start_sample as f64 / 16_000.0;
     let dur = (span.end_sample - span.start_sample) as f64 / 16_000.0;
     println!(
       "SPEAKER {} 1 {:.3} {:.3} <NA> <NA> SPEAKER_{:02} <NA> <NA>",
       uri, start, dur, span.speaker_id
     );
-  };
-
-  // Push the audio in 1-second chunks to simulate streaming. The
-  // VAD itself processes silero-frame-sized blocks internally.
-  let chunk = 16_000;
-  let mut span_count = 0u32;
-  let mut spans_emitter = |span: diarization::streaming::StreamingDiarizedSpan| {
-    span_count += 1;
-    emit_span(span);
-  };
-  for window in samples.chunks(chunk) {
-    pipeline.push_audio(&mut seg, &mut emb, &plda, window, &mut spans_emitter)?;
   }
-  pipeline.finish(&mut seg, &mut emb, &plda, &mut spans_emitter)?;
 
   eprintln!(
-    "# streaming dia (Phase 5e): {} speakers tracked, {} spans emitted (samples={}, secs={:.1})",
-    pipeline.num_speakers(),
-    span_count,
+    "# streaming dia: {} voice ranges, {} spans emitted (samples={}, secs={:.1})",
+    diarizer.num_ranges(),
+    spans.len(),
     samples.len(),
-    samples.len() as f64 / 16_000.0
+    samples.len() as f64 / 16_000.0,
   );
   Ok(())
 }

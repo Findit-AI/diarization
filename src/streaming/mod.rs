@@ -1,54 +1,35 @@
-//! Phase 5e: streaming VAD-gated diarization.
+//! Streaming voice-range-driven diarization.
 //!
-//! Production flow: silero VAD continuously processes the input
-//! audio, emitting bounded voice ranges. Each completed voice range
-//! is passed through dia's offline diarization pipeline
-//! ([`crate::offline::OwnedDiarizationPipeline`]), producing
-//! pyannote-equivalent speaker assignments WITHIN that range. Cross-
-//! range speaker identity is tracked via a session-wide centroid
-//! bank.
+//! Architecture: caller drives a VAD (silero, webrtc, etc.) and pushes
+//! one bounded voice range at a time via
+//! [`StreamingOfflineDiarizer::push_voice_range`]. Each push runs the
+//! heavy stages 1+2 (sliding-window segmentation + masked embedding)
+//! eagerly and accumulates the derived tensors. At end-of-stream,
+//! [`StreamingOfflineDiarizer::finalize`] runs a single global
+//! pyannote-equivalent `cluster_vbx` pass over the union of
+//! accumulated chunks and emits original-timeline spans with
+//! consistent speaker ids across ranges.
 //!
-//! ## Why this matches pyannote accuracy
+//! ## Accuracy
 //!
-//! The full-batch pyannote pipeline (`SpeakerDiarization.apply`) does
-//! AHC + VBx clustering on the entire recording's embeddings. For
-//! streaming use cases, waiting for the entire recording defeats the
-//! purpose. The voice-range-gated pattern preserves pyannote's
-//! algorithm (AHC + VBx + reconstruct) at the granularity of one
-//! voice range — typically 0.5–60 seconds — and uses a lighter-
-//! weight centroid-bank match across ranges to maintain global
-//! speaker identity.
+//! Global clustering on the union of voice-range chunks is the same
+//! algorithm pyannote runs on the full recording — the only audio
+//! pyannote sees that we don't is the silence-gated portions, which
+//! pyannote's segmentation model would mark inactive anyway. Cross-
+//! range identity is established by AHC + VBx in PLDA space, not by a
+//! cosine centroid bank — fixing the over- and under-merge failure
+//! modes of the previous fingerprint architecture.
 //!
-//! Within each voice range, accuracy = `OwnedDiarizationPipeline`
-//! accuracy (Phase 5d). Across ranges, identity tracking is similar
-//! to the streaming `Diarizer::process_samples` cosine + EMA
-//! approach but operates on per-range CENTROIDS (averages of clean
-//! embeddings), which are far more stable than per-chunk-slot
-//! embeddings.
+//! ## When NOT to use this
 //!
-//! ## API
-//!
-//! - [`StreamingDiarizationPipeline::new`] — construct with the
-//!   silero VAD options + dia's offline pipeline config.
-//! - [`StreamingDiarizationPipeline::push_audio`] — push raw 16 kHz
-//!   mono samples; emits diarized spans via callback as voice ranges
-//!   close.
-//! - [`StreamingDiarizationPipeline::finish`] — flush silero, run
-//!   diarization on any trailing voice range.
-//!
-//! ## What this is NOT
-//!
-//! - Not bit-exact pyannote — within a voice range, accuracy is
-//!   Phase 5d (1.77%–6.50% DER vs pyannote on 5 of 6 captured
-//!   fixtures). The cross-range speaker bank adds another layer of
-//!   approximation since pyannote clusters globally, not per-range.
-//! - Not lower-latency than one voice range — the offline pipeline
-//!   needs the full range to compute AHC dendrograms. For sub-range
-//!   latency, use [`crate::diarizer::Diarizer::process_samples`]
-//!   (online cosine + EMA, lower accuracy).
+//! Latency is `finalize`-bound — the global clustering pass does not
+//! emit spans incrementally. For sub-range latency (live captioning,
+//! real-time speaker labels), use
+//! [`crate::diarizer::Diarizer::process_samples`] (online cosine +
+//! EMA, lower accuracy but emits spans as voice ranges close).
 
-mod pipeline;
+mod offline_diarizer;
 
-pub use pipeline::{
-  StreamingDiarizationPipeline, StreamingDiarizedSpan, StreamingError, StreamingPipelineConfig,
+pub use offline_diarizer::{
+  DiarizedSpan, StreamingError, StreamingOfflineConfig, StreamingOfflineDiarizer,
 };
