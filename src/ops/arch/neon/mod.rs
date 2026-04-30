@@ -9,8 +9,10 @@
 
 mod axpy;
 mod dot;
+mod exp;
 mod pdist_euclidean;
 
 pub(crate) use axpy::axpy;
 pub(crate) use dot::dot;
+pub(crate) use exp::exp_inplace;
 pub(crate) use pdist_euclidean::pdist_euclidean;

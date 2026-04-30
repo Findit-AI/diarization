@@ -13,12 +13,14 @@
 
 mod axpy;
 mod dot;
+mod exp;
 mod inv_l_row;
 mod lse;
 mod pdist_euclidean;
 
 pub use axpy::axpy;
 pub use dot::dot;
+pub use exp::exp_inplace;
 pub use inv_l_row::inv_l_row;
 pub use lse::logsumexp_row;
 pub use pdist_euclidean::pdist_euclidean;

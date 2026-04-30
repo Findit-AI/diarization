@@ -113,8 +113,7 @@ pub fn weighted_centroids(
   let mut centroid_buf: Vec<f64> = vec![0.0; num_alive * embed_dim];
   let mut w_totals: Vec<f64> = vec![0.0; num_alive];
   for (alive_idx, &k) in alive.iter().enumerate() {
-    let centroid_slice =
-      &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
+    let centroid_slice = &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
     for t in 0..num_train {
       let w = q[(t, k)];
       w_totals[alive_idx] += w;
@@ -135,8 +134,7 @@ pub fn weighted_centroids(
   // num_alive · embed_dim is at most ~20 · 256 = 5120 ops per session.
   for (alive_idx, &w_total) in w_totals.iter().enumerate() {
     let inv_w = 1.0 / w_total;
-    let centroid_slice =
-      &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
+    let centroid_slice = &mut centroid_buf[alive_idx * embed_dim..(alive_idx + 1) * embed_dim];
     for v in centroid_slice.iter_mut() {
       *v *= inv_w;
     }
