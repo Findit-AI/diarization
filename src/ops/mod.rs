@@ -201,6 +201,57 @@ mod differential_tests {
     );
   }
 
+  /// Mismatched `dot` lengths must `panic!` (not UB) even with
+  /// `use_simd = true`. The dispatcher enforces `a.len() == b.len()`
+  /// unconditionally before routing to the unsafe SIMD kernel — this
+  /// test would silently OOB-read `b` if that guard were debug-only.
+  /// Codex adversarial review HIGH.
+  #[test]
+  #[should_panic(expected = "ops::dot")]
+  fn dot_dispatch_panics_on_length_mismatch_under_simd() {
+    let a = vec![1.0_f64; 8];
+    let b = vec![1.0_f64; 4];
+    let _ = super::dispatch::dot(&a, &b, true);
+  }
+
+  /// Same panic boundary on the scalar path — the precondition is
+  /// asserted *before* the SIMD branch, so both routes reach the
+  /// same panic.
+  #[test]
+  #[should_panic(expected = "ops::dot")]
+  fn dot_dispatch_panics_on_length_mismatch_under_scalar() {
+    let a = vec![1.0_f64; 8];
+    let b = vec![1.0_f64; 4];
+    let _ = super::dispatch::dot(&a, &b, false);
+  }
+
+  /// Mismatched `axpy` lengths must `panic!` not UB.
+  #[test]
+  #[should_panic(expected = "ops::axpy")]
+  fn axpy_dispatch_panics_on_length_mismatch_under_simd() {
+    let mut y = vec![0.0_f64; 8];
+    let x = vec![1.0_f64; 4];
+    super::dispatch::axpy(&mut y, 0.5, &x, true);
+  }
+
+  /// `pdist_euclidean` rejects shape mismatch with a panic.
+  #[test]
+  #[should_panic(expected = "ops::pdist_euclidean")]
+  fn pdist_dispatch_panics_on_shape_mismatch_under_simd() {
+    let rows = vec![1.0_f64; 100]; // 5 * 20 worth of data
+    // claim 10 rows × 20 cols (200 entries) — doesn't match 100.
+    let _ = super::dispatch::pdist_euclidean(&rows, 10, 20, true);
+  }
+
+  /// `pdist_euclidean` rejects `n * d` overflow before hitting the
+  /// unsafe path.
+  #[test]
+  #[should_panic(expected = "ops::pdist_euclidean")]
+  fn pdist_dispatch_panics_on_dim_overflow() {
+    let rows: Vec<f64> = vec![];
+    let _ = super::dispatch::pdist_euclidean(&rows, usize::MAX, 2, true);
+  }
+
   /// `axpy` is *element-wise* FMA without inter-lane reduction — it
   /// IS byte-identical (single FMA per output, no associativity break).
   /// This test asserts the stronger guarantee.

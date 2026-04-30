@@ -12,9 +12,22 @@ use crate::ops::{avx2_available, avx512_available};
 ///
 /// `use_simd = false` forces the scalar reference. Otherwise routes
 /// to the best available SIMD backend per arch + runtime detection.
+///
+/// # Panics
+///
+/// If `y.len() != x.len()`. Enforced unconditionally so a release-mode
+/// safe-Rust caller cannot bypass the precondition into the unsafe
+/// SIMD kernel (which only `debug_assert!`s and would OOB-read `x`
+/// otherwise). Codex adversarial review HIGH.
 #[inline]
-#[allow(dead_code)] // Step 3: scaffolded; centroid wiring lands in a future commit.
 pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
+  assert_eq!(
+    y.len(),
+    x.len(),
+    "ops::axpy: y.len() ({}) must equal x.len() ({})",
+    y.len(),
+    x.len()
+  );
   if use_simd {
     cfg_select! {
       target_arch = "aarch64" => {

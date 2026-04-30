@@ -11,8 +11,28 @@ use crate::ops::{avx2_available, avx512_available};
 /// Pairwise Euclidean distance over the rows of an `(n, d)` row-major
 /// f64 matrix; condensed `pdist`-style ordering. See
 /// [`crate::ops::scalar::pdist_euclidean`] for the contract.
+///
+/// # Panics
+///
+/// If `n * d` overflows `usize`, or if `rows.len() != n * d`. Enforced
+/// unconditionally — the arch SIMD kernels stride raw pointers by
+/// `i * d` for `i` in `0..n` and would walk off the slice end in
+/// release builds where their `debug_assert!` is a no-op. Codex
+/// adversarial review HIGH.
 #[inline]
 pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize, use_simd: bool) -> Vec<f64> {
+  let expected = n
+    .checked_mul(d)
+    .expect("ops::pdist_euclidean: n * d overflows usize");
+  assert_eq!(
+    rows.len(),
+    expected,
+    "ops::pdist_euclidean: rows.len() ({}) must equal n * d ({} * {} = {})",
+    rows.len(),
+    n,
+    d,
+    expected
+  );
   if use_simd {
     cfg_select! {
       target_arch = "aarch64" => {

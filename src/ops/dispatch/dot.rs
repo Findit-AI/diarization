@@ -14,8 +14,22 @@ use crate::ops::{avx2_available, avx512_available};
 /// benches for A/B comparison). Otherwise routes to the best available
 /// SIMD backend on this `target_arch` after runtime CPU-feature
 /// detection.
+///
+/// # Panics
+///
+/// If `a.len() != b.len()`. This is enforced *unconditionally* — the
+/// arch SIMD kernels read raw pointers bounded only by `a.len()` and
+/// would otherwise load past `b` end in release builds, where their
+/// `debug_assert!` is a no-op. Codex adversarial review HIGH.
 #[inline]
 pub fn dot(a: &[f64], b: &[f64], use_simd: bool) -> f64 {
+  assert_eq!(
+    a.len(),
+    b.len(),
+    "ops::dot: a.len() ({}) must equal b.len() ({})",
+    a.len(),
+    b.len()
+  );
   if use_simd {
     cfg_select! {
       target_arch = "aarch64" => {
