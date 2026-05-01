@@ -22,6 +22,10 @@ Cargo.lock
 # Segmentation model is committed to git so it ships with the crate
 # (`SegmentModel::bundled` under feature `bundled-segmentation`).
 !/models/segmentation-3.0.onnx
+# WeSpeaker ResNet34-LM is too large for crates.io (27 MB), but is
+# committed to git so it can be served as a GitHub release asset.
+!/models/wespeaker_resnet34_lm.onnx
+!/models/wespeaker_resnet34_lm.onnx.data
 **.claude/
 
 # Spike-specific (kaldi-native-fbank parity)
