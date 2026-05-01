@@ -32,10 +32,34 @@ sde64 -version
 # `is_x86_feature_detected!("avx512f")` will return true under
 # emulation, and `cargo test` invocations get wrapped through
 # `sde64 -future --` so each test process runs under the emulator.
+#
+# Test scope: `ops::` differential tests catch primitive-level ulp
+# drift, but pyannote-parity tests under `pipeline::parity_tests`,
+# `cluster::ahc::parity_tests`, `cluster::vbx::parity_tests`,
+# `cluster::centroid::parity_tests`, `offline::parity_tests`, and
+# `reconstruct::parity_tests` exercise the threshold-sensitive
+# decisions (AHC `<= threshold` cuts, VBx alive-cluster gates,
+# centroid argmax) that ulp drift could flip. We run all of them
+# under SDE so an AVX-512-induced cluster decision flip is caught
+# in CI rather than at runtime on AVX-512 hosts. Codex review
+# MEDIUM round 6.
+#
+# `aggregate::parity_tests` is also included (count-tensor exact
+# match) since the count loop is on the SIMD path under
+# `aggregate::count`.
 RUSTFLAGS="-Dwarnings" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -future --" \
 cargo test \
   --lib \
   --target "$TARGET" \
   --no-default-features \
-  ops::
+  -- \
+  ops:: \
+  pipeline::parity_tests \
+  cluster::ahc::parity_tests \
+  cluster::vbx::parity_tests \
+  cluster::centroid::parity_tests \
+  offline::parity_tests \
+  reconstruct::parity_tests \
+  aggregate::parity_tests \
+  plda::parity_tests

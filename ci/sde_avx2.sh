@@ -44,10 +44,23 @@ sde64 -version
 # `is_x86_feature_detected!("avx2")` and `is_x86_feature_detected!
 # ("fma")` return true, while `is_x86_feature_detected!("avx512f")`
 # returns false.
+# Mirrors `ci/sde_avx512.sh`'s expanded test scope. Pyannote-parity
+# tests run under SDE-emulated Haswell (AVX2 + FMA, no AVX-512) so
+# AVX2-induced ulp drift on threshold-sensitive decisions surfaces
+# in CI. Codex review MEDIUM round 6.
 RUSTFLAGS="-Dwarnings --cfg diarization_disable_avx512" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -hsw --" \
 cargo test \
   --lib \
   --target "$TARGET" \
   --no-default-features \
-  ops::
+  -- \
+  ops:: \
+  pipeline::parity_tests \
+  cluster::ahc::parity_tests \
+  cluster::vbx::parity_tests \
+  cluster::centroid::parity_tests \
+  offline::parity_tests \
+  reconstruct::parity_tests \
+  aggregate::parity_tests \
+  plda::parity_tests

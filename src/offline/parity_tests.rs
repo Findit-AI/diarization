@@ -155,3 +155,16 @@ fn diarize_offline_matches_pyannote_04_three_speaker() {
 fn diarize_offline_matches_pyannote_05_four_speaker() {
   run_offline_parity("05_four_speaker");
 }
+
+/// Long-recording end-to-end parity. The strict bit-exact partition
+/// test in `pipeline::parity_tests` is `#[ignore]` for this fixture
+/// because nalgebra/matrixmultiply GEMM accumulates differently from
+/// numpy/OpenBLAS over T=1004 EM iterations and flips a discrete
+/// cluster decision at chunk 6. The end-to-end span-duration check
+/// here uses the same 5% tolerance as the other 5 fixtures and is
+/// what production callers actually depend on (matches streaming-
+/// offline DER ≤ 0.19% on this fixture). Codex review HIGH round 6.
+#[test]
+fn diarize_offline_matches_pyannote_06_long_recording() {
+  run_offline_parity("06_long_recording");
+}
