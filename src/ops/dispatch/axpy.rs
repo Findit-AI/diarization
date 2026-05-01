@@ -67,6 +67,14 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
 ///
 /// If `y.len() != x.len()`.
 #[inline]
+// `axpy_f32`'s only callers (in `crate::embed::embedder`) are gated
+// behind `feature = "ort"`. Under `--no-default-features` the function
+// is unused but must stay reachable so SDE / miri jobs that build
+// without `ort` can still verify the SIMD-policy doesn't regress.
+// `RUSTFLAGS=-Dwarnings` would otherwise turn the dead-code warning
+// into a hard error and skip backend coverage entirely. Codex review
+// MEDIUM round 10.
+#[allow(dead_code)]
 pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32]) {
   assert_eq!(
     y.len(),

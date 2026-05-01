@@ -136,6 +136,12 @@ pub struct EmbeddingResult<A = (), T = ()> {
 
 impl<A, T> EmbeddingResult<A, T> {
   /// Construct (typically from inside `EmbedModel`).
+  // The only caller (`crate::embed::embedder`) is gated behind feature
+  // `ort`. Under `--no-default-features` the constructor is unused but
+  // we keep it reachable so `cargo test --no-default-features` (used
+  // by SDE / miri CI lanes) compiles under `-Dwarnings`.
+  // Codex review MEDIUM round 10.
+  #[allow(dead_code)]
   pub(crate) fn new(
     embedding: Embedding,
     source_duration: Duration,

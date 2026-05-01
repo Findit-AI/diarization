@@ -41,14 +41,79 @@ fn rejects_q_emb_row_mismatch() {
 
 #[test]
 fn rejects_no_surviving_clusters() {
+  // Both sp values are well below the guard band lower bound
+  // (1.01e-9 < SP_ALIVE_THRESHOLD * 0.01 = 1e-9 false; pick 1e-12)
+  // — outside the SIMD ambiguity band on the squashed side, so the
+  // function reaches the "no surviving clusters" path.
   let q = DMatrix::<f64>::from_element(3, 2, 0.5);
-  // Both sp values below default threshold → no surviving clusters.
-  let sp = DVector::<f64>::from_vec(vec![1.0e-10, 1.0e-12]);
+  let sp = DVector::<f64>::from_vec(vec![1.0e-12, 1.0e-13]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
     weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
+}
+
+/// Codex review HIGH round 10. VBx reductions are SIMD on x86, so a
+/// `sp` value landing within ulp drift of `SP_ALIVE_THRESHOLD` would
+/// flip the alive/squashed decision across CPU backends. The guard
+/// band `[threshold * 0.01, threshold * 100]` rejects those inputs
+/// with `Error::AmbiguousAliveCluster`. This test constructs `sp`
+/// values inside the band on each side of the threshold and verifies
+/// the error fires before any SIMD-dependent decision is made.
+#[test]
+fn rejects_sp_in_simd_guard_band_above_threshold() {
+  let q = DMatrix::<f64>::from_element(3, 2, 0.5);
+  // 5e-7 is between threshold (1e-7) and the upper guard bound (1e-5).
+  let sp = DVector::<f64>::from_vec(vec![5.0e-7, 0.99]);
+  let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
+  let err =
+    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+  assert!(
+    matches!(err, Error::AmbiguousAliveCluster { cluster: 0, .. }),
+    "got unexpected error: {err:?}"
+  );
+}
+
+#[test]
+fn rejects_sp_in_simd_guard_band_below_threshold() {
+  let q = DMatrix::<f64>::from_element(3, 2, 0.5);
+  // 5e-9 is between the lower guard bound (1e-9) and threshold (1e-7).
+  let sp = DVector::<f64>::from_vec(vec![0.99, 5.0e-9]);
+  let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
+  let err =
+    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+  assert!(
+    matches!(err, Error::AmbiguousAliveCluster { cluster: 1, .. }),
+    "got unexpected error: {err:?}"
+  );
+}
+
+/// `sp` exactly at threshold lands inside the band — guarded.
+#[test]
+fn rejects_sp_exactly_at_threshold() {
+  let q = DMatrix::<f64>::from_element(3, 2, 0.5);
+  let sp = DVector::<f64>::from_vec(vec![SP_ALIVE_THRESHOLD, 0.99]);
+  let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
+  let err =
+    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+  assert!(
+    matches!(err, Error::AmbiguousAliveCluster { cluster: 0, .. }),
+    "got unexpected error: {err:?}"
+  );
+}
+
+/// Captured-fixture-shaped `sp`: alive ≈ 0.85, squashed ≈ 1.76e-14.
+/// Both values are far outside the guard band; the function must
+/// proceed normally.
+#[test]
+fn accepts_sp_well_outside_guard_band() {
+  let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+  let sp = DVector::<f64>::from_vec(vec![0.85, 1.76e-14]);
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+    .expect("realistic captured-fixture sp must pass");
+  assert_eq!(c.shape(), (1, 2));
 }
 
 #[test]

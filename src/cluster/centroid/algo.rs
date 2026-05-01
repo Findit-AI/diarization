@@ -86,6 +86,35 @@ pub fn weighted_centroids(
     }
   }
 
+  // SIMD safety guard band around sp_threshold. AVX2 / AVX-512 dot
+  // reductions diverge from scalar/NEON by O(1e-15) relative; the
+  // upstream `pi` values come out of `vbx_iterate` via `crate::ops::dot`
+  // (SIMD on x86), so a value landing very close to `sp_threshold`
+  // could flip the alive/squashed decision across CPU backends. We
+  // refuse to proceed when any `sp[k]` lands in `[threshold * 0.01,
+  // threshold * 100]` — a 4-orders-of-magnitude band. Captured
+  // fixtures observe alive ratios ≥ 6e4× and squashed ratios ≥ 7e5×
+  // (`vbx::parity_tests::vbx_pi_has_safe_margin_from_sp_alive_threshold`),
+  // so the band never fires on realistic inputs but catches
+  // adversarial / pathological data the SIMD path can't safely
+  // resolve. Codex review HIGH round 10.
+  if sp_threshold > 0.0 {
+    let lo = sp_threshold * 0.01;
+    let hi = sp_threshold * 100.0;
+    for k in 0..num_init {
+      let v = sp[k];
+      if v > lo && v < hi {
+        return Err(Error::AmbiguousAliveCluster {
+          cluster: k,
+          value: v,
+          threshold: sp_threshold,
+          lo,
+          hi,
+        });
+      }
+    }
+  }
+
   // Identify surviving clusters (sp > threshold).
   let alive: Vec<usize> = (0..num_init).filter(|&k| sp[k] > sp_threshold).collect();
   if alive.is_empty() {
