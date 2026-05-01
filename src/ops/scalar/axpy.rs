@@ -26,3 +26,22 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
     y[i] = f64::mul_add(alpha, x[i], y[i]);
   }
 }
+
+/// f32 variant of [`axpy`]. Used by the embedding aggregation path
+/// (`embed::embedder::embed_unweighted` / `embed_weighted_inner`) to
+/// sum per-window WeSpeaker outputs into a 256-d accumulator.
+///
+/// Implemented in scalar form with `f32::mul_add`; the Rust compiler
+/// emits NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps` for this loop in
+/// release mode (verified on 1.95 nightly with `cargo asm`). We keep
+/// it as a named primitive so callers route through the SIMD-aware
+/// [`crate::ops::axpy_f32`] dispatcher; arch-specific overrides can
+/// be added later without touching call sites.
+#[inline]
+#[allow(dead_code)]
+pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32]) {
+  debug_assert_eq!(y.len(), x.len(), "axpy_f32: length mismatch");
+  for i in 0..y.len() {
+    y[i] = f32::mul_add(alpha, x[i], y[i]);
+  }
+}

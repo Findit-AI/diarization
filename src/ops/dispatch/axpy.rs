@@ -54,3 +54,31 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
   }
   scalar::axpy(y, alpha, x);
 }
+
+/// f32 AXPY: `y[i] += alpha * x[i]`.
+///
+/// Used by [`crate::embed::embedder`] to accumulate per-window
+/// WeSpeaker embeddings into a 256-d aggregator. No arch-specific
+/// kernel yet — the scalar `f32::mul_add` loop autovectorizes to
+/// `vfmaq_f32` (NEON) / `_mm256_fmadd_ps` (AVX2 + FMA) with
+/// `--release`. Kept behind the `use_simd` gate for symmetry with
+/// the f64 `axpy` and so we can plug in explicit SIMD kernels later
+/// without touching call sites.
+///
+/// # Panics
+///
+/// If `y.len() != x.len()`.
+#[inline]
+pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32], use_simd: bool) {
+  assert_eq!(
+    y.len(),
+    x.len(),
+    "ops::axpy_f32: y.len() ({}) must equal x.len() ({})",
+    y.len(),
+    x.len()
+  );
+  // Suppress unused-import warning when only the scalar fallback is
+  // reachable on this build.
+  let _ = use_simd;
+  scalar::axpy_f32(y, alpha, x);
+}

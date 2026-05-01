@@ -35,7 +35,7 @@ mod inv_l_row;
 mod lse;
 mod pdist_euclidean;
 
-pub use axpy::axpy;
+pub use axpy::{axpy, axpy_f32};
 pub use dot::dot;
 pub use exp::exp_inplace;
 pub use inv_l_row::inv_l_row;

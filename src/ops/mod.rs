@@ -45,7 +45,7 @@ mod dispatch;
 pub mod scalar;
 
 #[allow(unused_imports)] // Step 2: axpy/inv_l_row scaffolded; wired in Step 3.
-pub use dispatch::{axpy, dot, exp_inplace, inv_l_row, logsumexp_row, pdist_euclidean};
+pub use dispatch::{axpy, axpy_f32, dot, exp_inplace, inv_l_row, logsumexp_row, pdist_euclidean};
 
 // ─── runtime CPU-feature detection ───────────────────────────────────
 //

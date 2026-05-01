@@ -6,9 +6,12 @@
 //! methods on `EmbedModel` (variable-length clips). They are `pub(crate)`
 //! because the public surface lives on `EmbedModel` itself (Task 27).
 
-use crate::embed::{
-  EmbedModel, Error,
-  options::{EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, HOP_SAMPLES, MIN_CLIP_SAMPLES, NORM_EPSILON},
+use crate::{
+  embed::{
+    EmbedModel, Error,
+    options::{EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, HOP_SAMPLES, MIN_CLIP_SAMPLES, NORM_EPSILON},
+  },
+  ops,
 };
 
 /// Plan window starts for a clip of `len` samples (spec §5.1).
@@ -75,10 +78,15 @@ pub(crate) fn embed_unweighted(
   let win = EMBED_WINDOW_SAMPLES as usize;
   let clips: Vec<&[f32]> = starts.iter().map(|&s| &samples[s..s + win]).collect();
   let raws = model.embed_audio_clips_batch(&clips)?;
+  // SIMD-routable per-window aggregation. `ops::axpy_f32` with
+  // `alpha = 1.0` is `y += x`; the f32 mul_add loop autovectorizes
+  // to NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps` over 256-element
+  // strides. Using mul_add (vs scalar `+=`) shifts the rounding
+  // boundary by at most 1 ULP per element relative to a literal
+  // `*s += r` chain, which doesn't propagate visibly through
+  // L2-normalize / cosine clustering.
   for raw in &raws {
-    for (s, r) in sum.iter_mut().zip(raw.iter()) {
-      *s += r;
-    }
+    ops::axpy_f32(&mut sum, 1.0, raw.as_slice(), true);
   }
   Ok((sum, starts.len() as u32))
 }
@@ -129,9 +137,7 @@ pub(crate) fn embed_weighted_inner(
     if w < NORM_EPSILON {
       return Err(Error::AllSilent);
     }
-    for (s, r) in sum.iter_mut().zip(raw.iter()) {
-      *s += w * r;
-    }
+    ops::axpy_f32(&mut sum, w, raw.as_slice(), true);
     return Ok((sum, 1, w));
   }
 
@@ -142,9 +148,7 @@ pub(crate) fn embed_weighted_inner(
   for (i, &start) in starts.iter().enumerate() {
     let weights = &voice_probs[start..start + win];
     let w: f32 = weights.iter().sum::<f32>() / win as f32;
-    for (s, r) in sum.iter_mut().zip(raws[i].iter()) {
-      *s += w * r;
-    }
+    ops::axpy_f32(&mut sum, w, raws[i].as_slice(), true);
     total_weight += w;
   }
   if total_weight < NORM_EPSILON {
