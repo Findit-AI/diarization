@@ -9,11 +9,8 @@
 //! ```
 
 use diarization::{
-  embed::EmbedModel,
-  offline::OwnedDiarizationPipeline,
-  plda::PldaTransform,
-  reconstruct::spans_to_rttm_lines,
-  segment::SegmentModel,
+  embed::EmbedModel, offline::OwnedDiarizationPipeline, plda::PldaTransform,
+  reconstruct::spans_to_rttm_lines, segment::SegmentModel,
 };
 use std::path::PathBuf;
 
@@ -41,7 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
   let mut seg = SegmentModel::from_file(crate_root.join("models/segmentation-3.0.onnx"))?;
-  let mut emb = EmbedModel::from_torchscript_file(crate_root.join("models/wespeaker_resnet34_lm.pt"))?;
+  let mut emb =
+    EmbedModel::from_torchscript_file(crate_root.join("models/wespeaker_resnet34_lm.pt"))?;
   let plda = PldaTransform::new()?;
 
   let pipeline = OwnedDiarizationPipeline::new();

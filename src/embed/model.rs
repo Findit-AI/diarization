@@ -427,11 +427,10 @@ impl EmbedModel {
   #[cfg_attr(docsrs, doc(cfg(feature = "tch")))]
   pub fn from_torchscript_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
     let path = path.as_ref();
-    let module =
-      tch::CModule::load(path).map_err(|source| Error::LoadTorchScript {
-        path: path.to_path_buf(),
-        source,
-      })?;
+    let module = tch::CModule::load(path).map_err(|source| Error::LoadTorchScript {
+      path: path.to_path_buf(),
+      source,
+    })?;
     Ok(Self {
       backend: Box::new(tch_backend::TchBackend { module }),
     })
@@ -447,9 +446,11 @@ impl EmbedModel {
     samples: &[f32],
   ) -> Result<[f32; EMBEDDING_DIM], Error> {
     let mut out = self.backend.embed_audio_clips_batch(&[samples])?;
-    Ok(out
-      .pop()
-      .expect("backend returned a non-empty batch for n=1 input"))
+    Ok(
+      out
+        .pop()
+        .expect("backend returned a non-empty batch for n=1 input"),
+    )
   }
 
   /// Batched audio-clip inference. Returns N raw (un-normalized)
@@ -687,9 +688,7 @@ mod tests {
     let mut model = EmbedModel::from_file(&path).expect("load model");
     let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
     let single = model.embed_audio_clip(&samples).expect("single");
-    let batch = model
-      .embed_audio_clips_batch(&[&samples])
-      .expect("batch");
+    let batch = model.embed_audio_clips_batch(&[&samples]).expect("batch");
     assert_eq!(batch.len(), 1);
     assert_eq!(single, batch[0]);
   }
