@@ -30,18 +30,18 @@ fn clear_resets_collected_embeddings_too() {
   // would offline-re-cluster after clear()).
   let mut d = Diarizer::new(DiarizerOptions::default());
   d.collected_embeddings
-    .push(crate::diarizer::CollectedEmbedding {
-      range: mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
-      embedding: crate::embed::Embedding::normalize_from({
+    .push(crate::diarizer::CollectedEmbedding::new(
+      mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
+      crate::embed::Embedding::normalize_from({
         let mut v = [0.0f32; 256];
         v[0] = 1.0;
         v
       })
       .unwrap(),
-      online_speaker_id: 0,
-      speaker_slot: 0,
-      used_clean_mask: true,
-    });
+      0,
+      0,
+      true,
+    ));
   assert_eq!(d.collected_embeddings().len(), 1);
   d.clear();
   assert_eq!(d.total_samples_pushed(), 0);
@@ -166,18 +166,18 @@ fn take_collected_returns_and_drops() {
   // The collected_embeddings field is pub(crate); we can populate
   // it directly from inside the diarizer module's tests.
   d.collected_embeddings
-    .push(crate::diarizer::CollectedEmbedding {
-      range: mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
-      embedding: crate::embed::Embedding::normalize_from({
+    .push(crate::diarizer::CollectedEmbedding::new(
+      mediatime::TimeRange::new(0, 32_000, crate::segment::options::SAMPLE_RATE_TB),
+      crate::embed::Embedding::normalize_from({
         let mut v = [0.0f32; 256];
         v[0] = 1.0;
         v
       })
       .unwrap(),
-      online_speaker_id: 0,
-      speaker_slot: 0,
-      used_clean_mask: true,
-    });
+      0,
+      0,
+      true,
+    ));
   assert_eq!(d.collected_embeddings().len(), 1);
   let taken = d.take_collected();
   assert_eq!(taken.len(), 1);

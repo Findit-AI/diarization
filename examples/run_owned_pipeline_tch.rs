@@ -49,13 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .file_stem()
     .and_then(|s| s.to_str())
     .unwrap_or("audio");
-  for line in spans_to_rttm_lines(&out.spans, uri) {
+  for line in spans_to_rttm_lines(&out.spans(), uri) {
     println!("{line}");
   }
   eprintln!(
     "# tch embed: {} spans, {} clusters",
-    out.spans.len(),
-    out.num_clusters
+    out.spans().len(),
+    out.num_clusters()
   );
   Ok(())
 }

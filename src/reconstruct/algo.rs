@@ -26,12 +26,57 @@ pub const MAX_COUNT_PER_FRAME: u8 = 64;
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingWindow {
-  pub start: f64,
-  pub duration: f64,
-  pub step: f64,
+  start: f64,
+  duration: f64,
+  step: f64,
 }
 
 impl SlidingWindow {
+  /// Construct a sliding window. All values in seconds.
+  pub const fn new(start: f64, duration: f64, step: f64) -> Self {
+    Self {
+      start,
+      duration,
+      step,
+    }
+  }
+
+  /// First-frame center offset (seconds).
+  pub const fn start(&self) -> f64 {
+    self.start
+  }
+
+  /// Per-frame receptive-field length (seconds).
+  pub const fn duration(&self) -> f64 {
+    self.duration
+  }
+
+  /// Stride between consecutive frame centers (seconds).
+  pub const fn step(&self) -> f64 {
+    self.step
+  }
+
+  /// Builder: replace `start`.
+  #[must_use]
+  pub const fn with_start(mut self, start: f64) -> Self {
+    self.start = start;
+    self
+  }
+
+  /// Builder: replace `duration`.
+  #[must_use]
+  pub const fn with_duration(mut self, duration: f64) -> Self {
+    self.duration = duration;
+    self
+  }
+
+  /// Builder: replace `step`.
+  #[must_use]
+  pub const fn with_step(mut self, step: f64) -> Self {
+    self.step = step;
+    self
+  }
+
   /// `pyannote.core.SlidingWindow.closest_frame(t)` — round to the
   /// nearest frame index whose center is at `t`. Frame `i`'s center
   /// is at `start + duration / 2 + i * step`.
@@ -43,35 +88,102 @@ impl SlidingWindow {
 /// Inputs to [`reconstruct`].
 #[derive(Debug, Clone)]
 pub struct ReconstructInput<'a> {
-  /// Per-chunk per-frame per-speaker segmentation activity, flattened
-  /// `[c][f][s]` to length `num_chunks * num_frames_per_chunk *
-  /// num_speakers`.
-  pub segmentations: &'a [f64],
-  pub num_chunks: usize,
-  pub num_frames_per_chunk: usize,
-  pub num_speakers: usize,
-  /// Per-chunk hard cluster assignment (output of `diarization::pipeline`).
-  /// Length `num_chunks`; each inner vector has length `num_speakers`
-  /// with `-2` indicating an unmatched speaker.
-  pub hard_clusters: &'a [Vec<i32>],
-  /// Per-output-frame instantaneous speaker count (from pyannote's
-  /// segmentation binarization). Length `num_output_frames`.
-  pub count: &'a [u8],
-  pub num_output_frames: usize,
-  /// Outer (chunk-level) sliding window — defines chunk start times.
-  pub chunks_sw: SlidingWindow,
-  /// Inner (frame-level) sliding window — defines per-output-frame
-  /// timing. Used to compute `closest_frame(chunk_time)`.
-  pub frames_sw: SlidingWindow,
-  /// Optional temporal smoothing epsilon for top-k selection.
-  /// `None` (default) = strict descending-activation argmax (matches
-  /// pyannote bit-exact). `Some(eps)` = when comparing two clusters
-  /// whose activations differ by `< eps`, prefer the one that was
-  /// selected at frame `t - 1`. Mirrors speakrs's
-  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }`. Reduces flicker
-  /// between near-tied speakers without over-smoothing high-confidence
-  /// transitions.
-  pub smoothing_epsilon: Option<f32>,
+  segmentations: &'a [f64],
+  num_chunks: usize,
+  num_frames_per_chunk: usize,
+  num_speakers: usize,
+  hard_clusters: &'a [Vec<i32>],
+  count: &'a [u8],
+  num_output_frames: usize,
+  chunks_sw: SlidingWindow,
+  frames_sw: SlidingWindow,
+  smoothing_epsilon: Option<f32>,
+}
+
+impl<'a> ReconstructInput<'a> {
+  /// Construct. All shape preconditions are re-verified by
+  /// [`reconstruct`] — see its doc-comment for the validation rules.
+  ///
+  /// Field meaning:
+  /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
+  ///   `[c][f][s]`. Length `num_chunks * num_frames_per_chunk * num_speakers`.
+  /// - `hard_clusters`: per-chunk hard cluster assignment (output of
+  ///   `diarization::pipeline`). Length `num_chunks`; each inner vec has
+  ///   length `num_speakers` with `-2` indicating an unmatched speaker.
+  /// - `count`: per-output-frame instantaneous speaker count.
+  ///   Length `num_output_frames`.
+  /// - `chunks_sw` / `frames_sw`: outer / inner sliding windows.
+  /// - `smoothing_epsilon`: optional smoothing epsilon for top-k
+  ///   selection. `None` = strict descending-activation argmax (matches
+  ///   pyannote bit-exact). `Some(eps)` = prefer the previous frame's
+  ///   selection when two clusters are within `eps` activation.
+  #[allow(clippy::too_many_arguments)]
+  pub const fn new(
+    segmentations: &'a [f64],
+    num_chunks: usize,
+    num_frames_per_chunk: usize,
+    num_speakers: usize,
+    hard_clusters: &'a [Vec<i32>],
+    count: &'a [u8],
+    num_output_frames: usize,
+    chunks_sw: SlidingWindow,
+    frames_sw: SlidingWindow,
+    smoothing_epsilon: Option<f32>,
+  ) -> Self {
+    Self {
+      segmentations,
+      num_chunks,
+      num_frames_per_chunk,
+      num_speakers,
+      hard_clusters,
+      count,
+      num_output_frames,
+      chunks_sw,
+      frames_sw,
+      smoothing_epsilon,
+    }
+  }
+
+  /// Per-`(chunk, frame, speaker)` activity, flattened `[c][f][s]`.
+  pub const fn segmentations(&self) -> &'a [f64] {
+    self.segmentations
+  }
+  /// Number of chunks.
+  pub const fn num_chunks(&self) -> usize {
+    self.num_chunks
+  }
+  /// Frames per chunk (segmentation model output).
+  pub const fn num_frames_per_chunk(&self) -> usize {
+    self.num_frames_per_chunk
+  }
+  /// Speaker slots per chunk.
+  pub const fn num_speakers(&self) -> usize {
+    self.num_speakers
+  }
+  /// Per-chunk hard cluster assignment.
+  pub const fn hard_clusters(&self) -> &'a [Vec<i32>] {
+    self.hard_clusters
+  }
+  /// Per-output-frame instantaneous speaker count.
+  pub const fn count(&self) -> &'a [u8] {
+    self.count
+  }
+  /// Output-frame grid length.
+  pub const fn num_output_frames(&self) -> usize {
+    self.num_output_frames
+  }
+  /// Outer (chunk-level) sliding window.
+  pub const fn chunks_sw(&self) -> SlidingWindow {
+    self.chunks_sw
+  }
+  /// Inner (frame-level) sliding window.
+  pub const fn frames_sw(&self) -> SlidingWindow {
+    self.frames_sw
+  }
+  /// Optional smoothing epsilon for top-k selection.
+  pub const fn smoothing_epsilon(&self) -> Option<f32> {
+    self.smoothing_epsilon
+  }
 }
 
 /// Run pyannote's reconstruction.

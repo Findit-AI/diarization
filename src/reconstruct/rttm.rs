@@ -5,13 +5,42 @@ use crate::reconstruct::algo::SlidingWindow;
 /// One contiguous turn from the discrete diarization grid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RttmSpan {
-  /// Cluster index (0-indexed). Mapped to `SPEAKER_{cluster:02}` in
+  cluster: usize,
+  start: f64,
+  duration: f64,
+}
+
+impl RttmSpan {
+  /// Construct a span. `start` and `duration` in seconds; `cluster`
+  /// is the 0-indexed cluster id mapped to `SPEAKER_{cluster:02}` in
   /// [`spans_to_rttm_lines`].
-  pub cluster: usize,
-  /// Start time in seconds.
-  pub start: f64,
-  /// Duration in seconds.
-  pub duration: f64,
+  pub const fn new(cluster: usize, start: f64, duration: f64) -> Self {
+    Self {
+      cluster,
+      start,
+      duration,
+    }
+  }
+
+  /// Cluster id (0-indexed).
+  pub const fn cluster(&self) -> usize {
+    self.cluster
+  }
+
+  /// Span start time in seconds.
+  pub const fn start(&self) -> f64 {
+    self.start
+  }
+
+  /// Span duration in seconds.
+  pub const fn duration(&self) -> f64 {
+    self.duration
+  }
+
+  /// Span end time in seconds (`start + duration`).
+  pub fn end(&self) -> f64 {
+    self.start + self.duration
+  }
 }
 
 /// Walk a `(num_frames * num_clusters)` flat binary grid and emit one
@@ -42,7 +71,9 @@ pub fn discrete_to_spans(
   min_duration_off: f64,
 ) -> Vec<RttmSpan> {
   assert_eq!(grid.len(), num_frames * num_clusters);
-  let center_offset = frames_sw.duration / 2.0;
+  let center_offset = frames_sw.duration() / 2.0;
+  let frame_start = frames_sw.start();
+  let frame_step = frames_sw.step();
   let mut spans: Vec<RttmSpan> = Vec::new();
   for k in 0..num_clusters {
     let mut per_cluster: Vec<(f64, f64)> = Vec::new(); // (start, end)
@@ -52,8 +83,8 @@ pub fn discrete_to_spans(
       match (v, active_start) {
         (true, None) => active_start = Some(t),
         (false, Some(s)) => {
-          let start = frames_sw.start + s as f64 * frames_sw.step + center_offset;
-          let end = frames_sw.start + t as f64 * frames_sw.step + center_offset;
+          let start = frame_start + s as f64 * frame_step + center_offset;
+          let end = frame_start + t as f64 * frame_step + center_offset;
           per_cluster.push((start, end));
           active_start = None;
         }
@@ -68,8 +99,8 @@ pub fn discrete_to_spans(
     // final-frame run into a non-empty span where pyannote emits
     // none. Codex review MEDIUM round 3 of Phase 5.
     if let Some(s) = active_start {
-      let start = frames_sw.start + s as f64 * frames_sw.step + center_offset;
-      let end = frames_sw.start + (num_frames - 1) as f64 * frames_sw.step + center_offset;
+      let start = frame_start + s as f64 * frame_step + center_offset;
+      let end = frame_start + (num_frames - 1) as f64 * frame_step + center_offset;
       if end > start {
         per_cluster.push((start, end));
       }
@@ -91,18 +122,14 @@ pub fn discrete_to_spans(
       per_cluster = merged;
     }
     for (s, e) in per_cluster {
-      spans.push(RttmSpan {
-        cluster: k,
-        start: s,
-        duration: e - s,
-      });
+      spans.push(RttmSpan::new(k, s, e - s));
     }
   }
   spans.sort_by(|a, b| {
-    a.start
-      .partial_cmp(&b.start)
+    a.start()
+      .partial_cmp(&b.start())
       .unwrap_or(std::cmp::Ordering::Equal)
-      .then(a.cluster.cmp(&b.cluster))
+      .then(a.cluster().cmp(&b.cluster()))
   });
   spans
 }
@@ -133,7 +160,7 @@ pub fn discrete_to_spans(
 /// slices — zero heap allocation.
 pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   use std::collections::HashMap;
-  let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster).collect();
+  let mut unique_ids: Vec<usize> = spans.iter().map(|s| s.cluster()).collect();
   unique_ids.sort_unstable_by(|a, b| cmp_cluster_id_str(*a, *b));
   unique_ids.dedup();
   let id_to_label: HashMap<usize, usize> = unique_ids
@@ -144,10 +171,12 @@ pub fn spans_to_rttm_lines(spans: &[RttmSpan], uri: &str) -> Vec<String> {
   spans
     .iter()
     .map(|s| {
-      let label = id_to_label[&s.cluster];
+      let label = id_to_label[&s.cluster()];
       format!(
         "SPEAKER {uri} 1 {:.3} {:.3} <NA> <NA> SPEAKER_{:02} <NA> <NA>",
-        s.start, s.duration, label
+        s.start(),
+        s.duration(),
+        label
       )
     })
     .collect()

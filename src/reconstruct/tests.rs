@@ -10,16 +10,8 @@ use crate::{
 
 fn default_swins() -> (SlidingWindow, SlidingWindow) {
   // Reasonable defaults: 1s chunk step over 5s chunks, ~17ms output frames.
-  let chunks = SlidingWindow {
-    start: 0.0,
-    duration: 5.0,
-    step: 1.0,
-  };
-  let frames = SlidingWindow {
-    start: 0.0,
-    duration: 0.062,
-    step: 0.0169,
-  };
+  let chunks = SlidingWindow::new(0.0, 5.0, 1.0);
+  let frames = SlidingWindow::new(0.0, 0.062, 0.0169);
   (chunks, frames)
 }
 
@@ -38,18 +30,18 @@ fn rejects_nan_segmentation() {
   segmentations[3] = f64::NAN;
   let hard_clusters = vec![vec![0i32, 1i32]];
   let count = vec![1u8; 4];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks,
-    num_frames_per_chunk,
-    num_speakers,
-    hard_clusters: &hard_clusters,
-    count: &count,
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      num_chunks,
+      num_frames_per_chunk,
+      num_speakers,
+      &hard_clusters,
+      &count,
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
 
@@ -59,18 +51,18 @@ fn rejects_pos_inf_segmentation() {
   let mut segmentations = vec![0.5_f64; 8];
   segmentations[0] = f64::INFINITY;
   let hard_clusters = vec![vec![0i32, 1i32]];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[1u8; 4],
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[1u8; 4],
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
 
@@ -82,11 +74,7 @@ fn rejects_pos_inf_segmentation() {
 /// round 3 of Phase 5.
 #[test]
 fn rttm_eof_active_span_closes_at_last_frame_center() {
-  let frames_sw = SlidingWindow {
-    start: 0.0,
-    duration: 0.062,
-    step: 0.0169,
-  };
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
   // 4-frame grid, single cluster, all active. The active region runs
   // through the last frame, so `discrete_to_spans` must close at the
   // center of frame 3 (last index), not frame 4 (one past).
@@ -97,20 +85,20 @@ fn rttm_eof_active_span_closes_at_last_frame_center() {
   let expected_start = 0.0 + 0.0 * 0.0169 + 0.062 / 2.0; // timestamps[0]
   let expected_end = 0.0 + 3.0 * 0.0169 + 0.062 / 2.0; // timestamps[3]
   assert!(
-    (span.start - expected_start).abs() < 1e-12,
+    (span.start() - expected_start).abs() < 1e-12,
     "start: got {}, want {expected_start}",
-    span.start
+    span.start()
   );
   assert!(
-    (span.start + span.duration - expected_end).abs() < 1e-12,
+    (span.start() + span.duration() - expected_end).abs() < 1e-12,
     "end: got {}, want {expected_end}",
-    span.start + span.duration
+    span.start() + span.duration()
   );
   // duration = (num_frames - 1 - 0) * step = 3 * 0.0169.
   assert!(
-    (span.duration - 3.0 * 0.0169).abs() < 1e-12,
+    (span.duration() - 3.0 * 0.0169).abs() < 1e-12,
     "duration: got {}, want {:.6}",
-    span.duration,
+    span.duration(),
     3.0 * 0.0169
   );
 }
@@ -121,11 +109,7 @@ fn rttm_eof_active_span_closes_at_last_frame_center() {
 /// our fix returns no span when `end == start`.
 #[test]
 fn rttm_eof_single_final_frame_active_emits_no_span() {
-  let frames_sw = SlidingWindow {
-    start: 0.0,
-    duration: 0.062,
-    step: 0.0169,
-  };
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
   // 4-frame grid, only the LAST frame active.
   // active_start = Some(3) at end of loop; close at timestamps[3].
   // start = end → no span.
@@ -147,18 +131,18 @@ fn rejects_negative_cluster_id_other_than_unmatched() {
   // hard_clusters with a -1 entry (NOT the UNMATCHED -2 sentinel).
   let hard_clusters = vec![vec![0i32, -1i32]];
   let segmentations = vec![0.5_f64; 8];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[1u8; 4],
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[1u8; 4],
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -169,18 +153,18 @@ fn accepts_unmatched_sentinel() {
   let (chunks_sw, frames_sw) = default_swins();
   let hard_clusters = vec![vec![0i32, UNMATCHED]];
   let segmentations = vec![0.5_f64; 8];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[1u8; 4],
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[1u8; 4],
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(reconstruct(&input).is_ok());
 }
 
@@ -193,18 +177,18 @@ fn rejects_cluster_id_above_max() {
   let (chunks_sw, frames_sw) = default_swins();
   let hard_clusters = vec![vec![0i32, MAX_CLUSTER_ID + 1]];
   let segmentations = vec![0.5_f64; 8];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[1u8; 4],
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[1u8; 4],
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -219,18 +203,18 @@ fn rejects_count_above_max_cluster_id() {
   count[2] = 255;
   let segmentations = vec![0.5_f64; 8];
   let hard_clusters = vec![vec![0i32, 1i32]];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &count,
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &count,
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -241,21 +225,9 @@ fn rejects_count_above_max_cluster_id() {
 #[test]
 fn rttm_relabels_by_str_sorted_cluster_id() {
   let spans = vec![
-    RttmSpan {
-      cluster: 1,
-      start: 0.0,
-      duration: 1.0,
-    },
-    RttmSpan {
-      cluster: 0,
-      start: 1.0,
-      duration: 1.0,
-    },
-    RttmSpan {
-      cluster: 1,
-      start: 2.0,
-      duration: 1.0,
-    },
+    RttmSpan::new(1, 0.0, 1.0),
+    RttmSpan::new(0, 1.0, 1.0),
+    RttmSpan::new(1, 2.0, 1.0),
   ];
   let lines = spans_to_rttm_lines(&spans, "uri");
   // Sorted by str: "0" < "1", so cluster 0 → SPEAKER_00, cluster 1 → SPEAKER_01.
@@ -282,16 +254,8 @@ fn rttm_relabels_by_str_sorted_cluster_id() {
 #[test]
 fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
   let spans = vec![
-    RttmSpan {
-      cluster: 0,
-      start: 0.0,
-      duration: 1.0,
-    },
-    RttmSpan {
-      cluster: 1,
-      start: 1.0,
-      duration: 1.0,
-    },
+    RttmSpan::new(0, 0.0, 1.0),
+    RttmSpan::new(1, 1.0, 1.0),
   ];
   let lines = spans_to_rttm_lines(&spans, "uri");
   assert!(lines[0].contains("SPEAKER_00"));
@@ -305,16 +269,8 @@ fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
 #[test]
 fn rttm_relabel_str_sort_orders_10_before_2() {
   let spans = vec![
-    RttmSpan {
-      cluster: 2,
-      start: 0.0,
-      duration: 1.0,
-    },
-    RttmSpan {
-      cluster: 10,
-      start: 1.0,
-      duration: 1.0,
-    },
+    RttmSpan::new(2, 0.0, 1.0),
+    RttmSpan::new(10, 1.0, 1.0),
   ];
   let lines = spans_to_rttm_lines(&spans, "uri");
   // Str-sort: "10" < "2", so cluster 10 → SPEAKER_00, cluster 2 → SPEAKER_01.
@@ -340,18 +296,18 @@ fn rejects_zero_output_frames() {
   let (chunks_sw, frames_sw) = default_swins();
   let segmentations = vec![0.5_f64; 8];
   let hard_clusters = vec![vec![0i32, 1i32]];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[],
-    num_output_frames: 0,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[],
+      0,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -361,17 +317,17 @@ fn rejects_neg_inf_segmentation() {
   let mut segmentations = vec![0.5_f64; 8];
   segmentations[5] = f64::NEG_INFINITY;
   let hard_clusters = vec![vec![0i32, 1i32]];
-  let input = ReconstructInput {
-    segmentations: &segmentations,
-    num_chunks: 1,
-    num_frames_per_chunk: 4,
-    num_speakers: 2,
-    hard_clusters: &hard_clusters,
-    count: &[1u8; 4],
-    num_output_frames: 4,
-    chunks_sw,
-    frames_sw,
-    smoothing_epsilon: None,
-  };
+  let input = ReconstructInput::new(
+      &segmentations,
+      1,
+      4,
+      2,
+      &hard_clusters,
+      &[1u8; 4],
+      4,
+      chunks_sw,
+      frames_sw,
+      None,
+    );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }

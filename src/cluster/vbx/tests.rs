@@ -114,7 +114,7 @@ fn vbx_elbo_is_monotonically_non_decreasing() {
   let phi = DVector::<f64>::from_element(d, 2.0);
   let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
-  for w in out.elbo_trajectory.windows(2) {
+  for w in out.elbo_trajectory().windows(2) {
     // Allow tiny float wobble at convergence (≤ 1e-6) before the
     // epsilon-based stop fires.
     assert!(
@@ -143,7 +143,7 @@ fn vbx_gamma_rows_sum_to_one() {
   let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.1, 0.5, 10).expect("vbx_iterate");
   for r in 0..t {
-    let row_sum: f64 = (0..s).map(|c| out.gamma[(r, c)]).sum();
+    let row_sum: f64 = (0..s).map(|c| out.gamma()[(r, c)]).sum();
     assert!(
       (row_sum - 1.0).abs() < 1e-12,
       "gamma row {r} sums to {row_sum}"
@@ -161,7 +161,7 @@ fn vbx_pi_sums_to_one() {
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
-  let pi_sum: f64 = out.pi.iter().sum();
+  let pi_sum: f64 = out.pi().iter().sum();
   assert!((pi_sum - 1.0).abs() < 1e-12, "pi sums to {pi_sum}");
 }
 
@@ -179,14 +179,14 @@ fn vbx_is_deterministic() {
   let qinit = deterministic_qinit(t, s);
   let a = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("a");
   let b = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("b");
-  assert_eq!(a.elbo_trajectory, b.elbo_trajectory);
+  assert_eq!(a.elbo_trajectory(), b.elbo_trajectory());
   for r in 0..t {
     for c in 0..s {
-      assert_eq!(a.gamma[(r, c)], b.gamma[(r, c)]);
+      assert_eq!(a.gamma()[(r, c)], b.gamma()[(r, c)]);
     }
   }
   for c in 0..s {
-    assert_eq!(a.pi[c], b.pi[c]);
+    assert_eq!(a.pi()[c], b.pi()[c]);
   }
 }
 
@@ -388,7 +388,7 @@ fn vbx_accepts_single_speaker_qinit() {
   let out =
     vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("S=1 single-speaker qinit must pass");
   // With S=1 there is only one cluster; pi[0] should be 1.0.
-  assert!((out.pi[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi[0]);
+  assert!((out.pi()[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi()[0]);
 }
 
 // ── X / Phi non-finite hardening (Codex review MEDIUM round 5 of Phase 2) ─
@@ -634,11 +634,11 @@ fn vbx_reports_max_iterations_reached_when_cap_is_one() {
   let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 1).expect("vbx_iterate");
   assert_eq!(
-    out.stop_reason,
+    out.stop_reason(),
     StopReason::MaxIterationsReached,
     "max_iters=1 cannot fire convergence (check requires ii > 0)"
   );
-  assert_eq!(out.elbo_trajectory.len(), 1, "ran exactly 1 iteration");
+  assert_eq!(out.elbo_trajectory().len(), 1, "ran exactly 1 iteration");
 }
 
 /// On a small input that converges quickly, the same call with a
@@ -660,16 +660,16 @@ fn vbx_reports_converged_on_easy_input() {
   let qinit = deterministic_qinit(t, s);
   let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 50).expect("vbx_iterate");
   assert_eq!(
-    out.stop_reason,
+    out.stop_reason(),
     StopReason::Converged,
     "easy input with generous cap must converge before exhaustion; \
      ran {} iterations",
-    out.elbo_trajectory.len()
+    out.elbo_trajectory().len()
   );
   // Convergence on a trivial input is fast (well below the cap).
   assert!(
-    out.elbo_trajectory.len() < 50,
+    out.elbo_trajectory().len() < 50,
     "expected early convergence, ran {} iters",
-    out.elbo_trajectory.len()
+    out.elbo_trajectory().len()
   );
 }

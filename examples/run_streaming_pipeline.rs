@@ -95,11 +95,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .and_then(|s| s.to_str())
     .unwrap_or("audio");
   for span in &spans {
-    let start = span.start_sample as f64 / 16_000.0;
-    let dur = (span.end_sample - span.start_sample) as f64 / 16_000.0;
+    let start = span.start_sample() as f64 / 16_000.0;
+    let dur = (span.end_sample() - span.start_sample()) as f64 / 16_000.0;
     println!(
       "SPEAKER {} 1 {:.3} {:.3} <NA> <NA> SPEAKER_{:02} <NA> <NA>",
-      uri, start, dur, span.speaker_id
+      uri, start, dur, span.speaker_id()
     );
   }
 

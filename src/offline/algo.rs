@@ -29,74 +29,198 @@ pub enum Error {
 /// via their own ONNX inference. Tensors must follow the pyannote
 /// community-1 layout.
 pub struct OfflineInput<'a> {
-  /// Pre-PLDA WeSpeaker raw embeddings, shape `(num_chunks,
-  /// num_speakers, EMBEDDING_DIM = 256)`, flattened in row-major
-  /// `[c][s][d]` order. Captured by pyannote as
-  /// `raw_embeddings.npz["embeddings"]`. f32 to match ONNX output.
-  pub raw_embeddings: &'a [f32],
-  pub num_chunks: usize,
-  pub num_speakers: usize,
+  raw_embeddings: &'a [f32],
+  num_chunks: usize,
+  num_speakers: usize,
+  segmentations: &'a [f64],
+  num_frames_per_chunk: usize,
+  count: &'a [u8],
+  num_output_frames: usize,
+  chunks_sw: SlidingWindow,
+  frames_sw: SlidingWindow,
+  plda: &'a PldaTransform,
+  threshold: f64,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
+  min_duration_off: f64,
+  smoothing_epsilon: Option<f32>,
+}
 
-  /// Per-chunk per-frame per-speaker segmentation activity, shape
-  /// `(num_chunks, num_frames_per_chunk, num_speakers)`, flattened
-  /// `[c][f][s]`. f64 to match pyannote's internal precision.
-  pub segmentations: &'a [f64],
-  pub num_frames_per_chunk: usize,
+impl<'a> OfflineInput<'a> {
+  /// Construct.
+  ///
+  /// Field meaning:
+  /// - `raw_embeddings`: pre-PLDA WeSpeaker raw embeddings, flattened
+  ///   `[c][s][d]`. Length `num_chunks * num_speakers * EMBEDDING_DIM`.
+  /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
+  ///   `[c][f][s]`. Length `num_chunks * num_frames_per_chunk * num_speakers`.
+  /// - `count`: per-output-frame instantaneous speaker count.
+  ///   Length `num_output_frames`.
+  /// - `chunks_sw` / `frames_sw`: sliding-window timing.
+  /// - `plda`: PLDA model.
+  /// - `threshold` / `fa` / `fb` / `max_iters`: AHC + VBx hyperparameters.
+  ///   Community-1 defaults: 0.6 / 0.07 / 0.8 / 20.
+  /// - `min_duration_off`: gap merging threshold for span post-processing.
+  /// - `smoothing_epsilon`: optional temporal smoothing for reconstruct.
+  ///   `None` = bit-exact pyannote (argmax). `Some(0.1)` recommended
+  ///   for `OwnedDiarizationPipeline`.
+  #[allow(clippy::too_many_arguments)]
+  pub const fn new(
+    raw_embeddings: &'a [f32],
+    num_chunks: usize,
+    num_speakers: usize,
+    segmentations: &'a [f64],
+    num_frames_per_chunk: usize,
+    count: &'a [u8],
+    num_output_frames: usize,
+    chunks_sw: SlidingWindow,
+    frames_sw: SlidingWindow,
+    plda: &'a PldaTransform,
+    threshold: f64,
+    fa: f64,
+    fb: f64,
+    max_iters: usize,
+    min_duration_off: f64,
+    smoothing_epsilon: Option<f32>,
+  ) -> Self {
+    Self {
+      raw_embeddings,
+      num_chunks,
+      num_speakers,
+      segmentations,
+      num_frames_per_chunk,
+      count,
+      num_output_frames,
+      chunks_sw,
+      frames_sw,
+      plda,
+      threshold,
+      fa,
+      fb,
+      max_iters,
+      min_duration_off,
+      smoothing_epsilon,
+    }
+  }
 
-  /// Per-output-frame instantaneous speaker count from pyannote's
-  /// segmentation binarization. Length `num_output_frames`. Drives
-  /// reconstruction's top-`count` selection.
-  pub count: &'a [u8],
-  pub num_output_frames: usize,
-
-  /// Sliding-window timing, both axes (chunk-level + frame-level).
-  /// pyannote community-1 default: chunks `(0, 10s, 1s)`, frames
-  /// derived from the segmentation model's frame rate.
-  pub chunks_sw: SlidingWindow,
-  pub frames_sw: SlidingWindow,
-
-  /// PLDA model. Loaded via [`PldaTransform::new`]; weights are
-  /// embedded in the binary via `include_bytes!`.
-  pub plda: &'a PldaTransform,
-
-  /// AHC linkage threshold (community-1 default: `0.6`).
-  pub threshold: f64,
-  /// VBx Fa (community-1 default: `0.07`).
-  pub fa: f64,
-  /// VBx Fb (community-1 default: `0.8`).
-  pub fb: f64,
-  /// VBx max iterations (community-1 hardcodes `20`).
-  pub max_iters: usize,
-
-  /// `min_duration_off` (seconds) for span post-processing — merge
-  /// adjacent same-cluster spans separated by a gap `≤
-  /// min_duration_off`. Community-1 default: `0.0` (no merging).
-  pub min_duration_off: f64,
-
-  /// Optional temporal smoothing epsilon for the reconstruct top-k
-  /// selection. `None` = bit-exact pyannote (descending-activation
-  /// argmax). `Some(0.1)` matches speakrs's
-  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }` default — when
-  /// two clusters' activations differ by `< eps`, prefer the one
-  /// selected at the previous frame. Reduces flicker between
-  /// near-tied speakers; recommended for `OwnedDiarizationPipeline`
-  /// since ONNX numerical drift produces more near-ties than
-  /// pyannote's pure-PyTorch path.
-  pub smoothing_epsilon: Option<f32>,
+  /// Pre-PLDA WeSpeaker raw embeddings.
+  pub const fn raw_embeddings(&self) -> &'a [f32] {
+    self.raw_embeddings
+  }
+  /// Number of chunks.
+  pub const fn num_chunks(&self) -> usize {
+    self.num_chunks
+  }
+  /// Speaker slots per chunk.
+  pub const fn num_speakers(&self) -> usize {
+    self.num_speakers
+  }
+  /// Per-`(chunk, frame, speaker)` segmentation activity.
+  pub const fn segmentations(&self) -> &'a [f64] {
+    self.segmentations
+  }
+  /// Frames per chunk.
+  pub const fn num_frames_per_chunk(&self) -> usize {
+    self.num_frames_per_chunk
+  }
+  /// Per-output-frame speaker count.
+  pub const fn count(&self) -> &'a [u8] {
+    self.count
+  }
+  /// Output-frame grid length.
+  pub const fn num_output_frames(&self) -> usize {
+    self.num_output_frames
+  }
+  /// Outer (chunk-level) sliding window.
+  pub const fn chunks_sw(&self) -> SlidingWindow {
+    self.chunks_sw
+  }
+  /// Inner (frame-level) sliding window.
+  pub const fn frames_sw(&self) -> SlidingWindow {
+    self.frames_sw
+  }
+  /// PLDA model.
+  pub const fn plda(&self) -> &'a PldaTransform {
+    self.plda
+  }
+  /// AHC linkage threshold.
+  pub const fn threshold(&self) -> f64 {
+    self.threshold
+  }
+  /// VBx Fa.
+  pub const fn fa(&self) -> f64 {
+    self.fa
+  }
+  /// VBx Fb.
+  pub const fn fb(&self) -> f64 {
+    self.fb
+  }
+  /// VBx max iterations.
+  pub const fn max_iters(&self) -> usize {
+    self.max_iters
+  }
+  /// Gap merging threshold for span post-processing.
+  pub const fn min_duration_off(&self) -> f64 {
+    self.min_duration_off
+  }
+  /// Optional smoothing epsilon for reconstruct.
+  pub const fn smoothing_epsilon(&self) -> Option<f32> {
+    self.smoothing_epsilon
+  }
 }
 
 /// Output of [`diarize_offline`].
 pub struct OfflineOutput {
+  hard_clusters: Vec<Vec<i32>>,
+  discrete_diarization: Vec<f32>,
+  num_clusters: usize,
+  spans: Vec<RttmSpan>,
+}
+
+impl OfflineOutput {
+  /// Construct.
+  pub fn new(
+    hard_clusters: Vec<Vec<i32>>,
+    discrete_diarization: Vec<f32>,
+    num_clusters: usize,
+    spans: Vec<RttmSpan>,
+  ) -> Self {
+    Self {
+      hard_clusters,
+      discrete_diarization,
+      num_clusters,
+      spans,
+    }
+  }
+
   /// Hard speaker assignment per (chunk, speaker_slot). `-2` for
   /// unmatched. Length `num_chunks`; each inner vec has length
   /// `num_speakers`.
-  pub hard_clusters: Vec<Vec<i32>>,
+  pub fn hard_clusters(&self) -> &[Vec<i32>] {
+    &self.hard_clusters
+  }
+
   /// Frame-level binary diarization grid `(num_output_frames,
   /// num_clusters)`, flattened row-major `[t][k]`.
-  pub discrete_diarization: Vec<f32>,
-  pub num_clusters: usize,
+  pub fn discrete_diarization(&self) -> &[f32] {
+    &self.discrete_diarization
+  }
+
+  /// Number of clusters in the output diarization grid.
+  pub const fn num_clusters(&self) -> usize {
+    self.num_clusters
+  }
+
   /// RTTM spans (uri-agnostic). Caller wraps with file id to format.
-  pub spans: Vec<RttmSpan>,
+  pub fn spans(&self) -> &[RttmSpan] {
+    &self.spans
+  }
+
+  /// Move the spans out without cloning.
+  pub fn into_spans(self) -> Vec<RttmSpan> {
+    self.spans
+  }
 }
 
 /// Run the offline pyannote-equivalent diarization pipeline.
@@ -258,21 +382,21 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   let phi = DVector::<f64>::from_iterator(plda_dim, plda.phi().iter().copied());
 
   // ── Stage 4: assign_embeddings (AHC + VBx + centroid + Hungarian) ─
-  let pipeline_input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
+  let pipeline_input = AssignEmbeddingsInput::new(
+    &embeddings,
     num_chunks,
     num_speakers,
     segmentations,
-    num_frames: num_frames_per_chunk,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &train_chunk_idx,
-    train_speaker_idx: &train_speaker_idx,
+    num_frames_per_chunk,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
     threshold,
     fa,
     fb,
     max_iters,
-  };
+  );
   let hard_clusters = assign_embeddings(&pipeline_input)?;
   let _ = SP_ALIVE_THRESHOLD; // doc reference
 
@@ -299,18 +423,18 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   };
   let max_count = count.iter().copied().max().unwrap_or(0) as usize;
   let num_clusters = num_clusters_from_hard.max(max_count.max(1));
-  let recon_input = ReconstructInput {
+  let recon_input = ReconstructInput::new(
     segmentations,
     num_chunks,
     num_frames_per_chunk,
     num_speakers,
-    hard_clusters: &hard_clusters,
+    &hard_clusters,
     count,
     num_output_frames,
     chunks_sw,
     frames_sw,
     smoothing_epsilon,
-  };
+  );
   let discrete_diarization = reconstruct(&recon_input)?;
 
   // ── Stage 6: discrete diarization → RTTM spans ─────────────────
@@ -322,10 +446,10 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     min_duration_off,
   );
 
-  Ok(OfflineOutput {
+  Ok(OfflineOutput::new(
     hard_clusters,
     discrete_diarization,
     num_clusters,
     spans,
-  })
+  ))
 }

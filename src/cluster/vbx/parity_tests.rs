@@ -105,7 +105,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   // pyannote-equivalent should hit the convergence branch, not
   // exhaust max_iters.
   assert_eq!(
-    out.stop_reason,
+    out.stop_reason(),
     StopReason::Converged,
     "captured pyannote run converged within max_iters=20 in 16 iterations; \
      parity should also converge"
@@ -121,7 +121,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let mut gamma_max_err_want = 0.0f64;
   for tt in 0..t {
     for sj in 0..s {
-      let got = out.gamma[(tt, sj)];
+      let got = out.gamma()[(tt, sj)];
       let want = q_final[(tt, sj)];
       let err = (got - want).abs();
       if err > gamma_max_err {
@@ -153,7 +153,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let mut pi_max_err_got = 0.0f64;
   let mut pi_max_err_want = 0.0f64;
   for (sj, want) in sp_final_flat.iter().enumerate() {
-    let got = out.pi[sj];
+    let got = out.pi()[sj];
     let err = (got - want).abs();
     if err > pi_max_err {
       pi_max_err = err;
@@ -174,17 +174,17 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let (elbo_flat, elbo_shape) = read_npz_array::<f64>(&vbx_path, "elbo_trajectory");
   assert_eq!(elbo_shape.len(), 1);
   assert_eq!(
-    out.elbo_trajectory.len(),
+    out.elbo_trajectory().len(),
     elbo_flat.len(),
     "ELBO iteration count mismatch: rust={} pyannote={}",
-    out.elbo_trajectory.len(),
+    out.elbo_trajectory().len(),
     elbo_flat.len()
   );
   let mut elbo_max_err = 0.0f64;
   let mut elbo_max_err_iter = 0usize;
   let mut elbo_max_err_got = 0.0f64;
   let mut elbo_max_err_want = 0.0f64;
-  for (ii, (got, want)) in out.elbo_trajectory.iter().zip(elbo_flat.iter()).enumerate() {
+  for (ii, (got, want)) in out.elbo_trajectory().iter().zip(elbo_flat.iter()).enumerate() {
     let err = (got - want).abs();
     if err > elbo_max_err {
       elbo_max_err = err;

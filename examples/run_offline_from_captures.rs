@@ -61,16 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let (frame_dur, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "frame_duration")?;
   let (frame_step, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "frame_step")?;
   let (min_dur_off, _) = read_npz::<f64>(&base.join("reconstruction.npz"), "min_duration_off")?;
-  let chunks_sw = SlidingWindow {
-    start: chunk_start[0],
-    duration: chunk_dur[0],
-    step: chunk_step[0],
-  };
-  let frames_sw = SlidingWindow {
-    start: frame_start[0],
-    duration: frame_dur[0],
-    step: frame_step[0],
-  };
+  let chunks_sw = SlidingWindow::new(chunk_start[0], chunk_dur[0], chunk_step[0]);
+  let frames_sw = SlidingWindow::new(frame_start[0], frame_dur[0], frame_step[0]);
 
   let (threshold, _) = read_npz::<f64>(&base.join("ahc_state.npz"), "threshold")?;
   let (fa, _) = read_npz::<f64>(&base.join("vbx_state.npz"), "fa")?;
@@ -79,32 +71,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   let plda = PldaTransform::new()?;
 
-  let input = OfflineInput {
-    raw_embeddings: &raw_flat,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames_per_chunk,
-    count: &count_u8,
-    num_output_frames,
-    chunks_sw,
-    frames_sw,
-    plda: &plda,
-    threshold: threshold[0],
-    fa: fa[0],
-    fb: fb[0],
-    max_iters: max_iters[0] as usize,
-    min_duration_off: min_dur_off[0],
-    smoothing_epsilon: None,
-  };
+  let input = OfflineInput::new(
+      &raw_flat,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames_per_chunk,
+      &count_u8,
+      num_output_frames,
+      chunks_sw,
+      frames_sw,
+      &plda,
+      threshold[0],
+      fa[0],
+      fb[0],
+      max_iters[0] as usize,
+      min_dur_off[0],
+      None,
+    );
   let out = diarize_offline(&input)?;
-  for line in spans_to_rttm_lines(&out.spans, "clip_16k") {
+  for line in spans_to_rttm_lines(&out.spans(), "clip_16k") {
     println!("{line}");
   }
   eprintln!(
     "# offline (Phase 5c, captured tensors): {} spans, {} clusters",
-    out.spans.len(),
-    out.num_clusters
+    out.spans().len(),
+    out.num_clusters()
   );
   Ok(())
 }

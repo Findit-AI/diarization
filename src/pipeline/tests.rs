@@ -24,21 +24,21 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let train_chunk_idx = vec![0usize];
   let train_speaker_idx = vec![0usize];
-  let input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &train_chunk_idx,
-    train_speaker_idx: &train_speaker_idx,
-    threshold: 0.6,
-    fa: 0.07,
-    fb: 0.8,
-    max_iters: 20,
-  };
+  let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames,
+      &post_plda,
+      &phi,
+      &train_chunk_idx,
+      &train_speaker_idx,
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
   let got = assign_embeddings(&input).expect("fast path must succeed, not error");
   assert_eq!(got.len(), num_chunks);
   for chunk_row in &got {
@@ -66,21 +66,21 @@ fn rejects_zero_column_post_plda() {
   let phi = DVector::<f64>::zeros(0);
   let train_chunk_idx = vec![0usize, 1];
   let train_speaker_idx = vec![0usize, 1];
-  let input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &train_chunk_idx,
-    train_speaker_idx: &train_speaker_idx,
-    threshold: 0.6,
-    fa: 0.07,
-    fb: 0.8,
-    max_iters: 20,
-  };
+  let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames,
+      &post_plda,
+      &phi,
+      &train_chunk_idx,
+      &train_speaker_idx,
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
   let result = assign_embeddings(&input);
   assert!(
     matches!(result, Err(crate::pipeline::Error::Shape(_))),
@@ -103,21 +103,21 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
   let post_plda = DMatrix::<f64>::zeros(0, plda_dim);
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
-  let input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &[],
-    train_speaker_idx: &[],
-    threshold: 0.6,
-    fa: 0.07,
-    fb: 0.8,
-    max_iters: 20,
-  };
+  let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames,
+      &post_plda,
+      &phi,
+      &[],
+      &[],
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
   let got = assign_embeddings(&input).expect("zero-train fast path must succeed");
   for chunk_row in &got {
     for &k in chunk_row {
@@ -145,21 +145,21 @@ fn rejects_nan_in_non_train_embedding_row() {
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
   let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
-  let input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &[0usize, 1],
-    train_speaker_idx: &[0usize, 1],
-    threshold: 0.6,
-    fa: 0.07,
-    fb: 0.8,
-    max_iters: 20,
-  };
+  let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames,
+      &post_plda,
+      &phi,
+      &[0usize, 1],
+      &[0usize, 1],
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
   let result = assign_embeddings(&input);
   assert!(
     matches!(result, Err(crate::pipeline::Error::NonFinite("embeddings"))),
@@ -211,21 +211,21 @@ fn assign_embeddings_scalar_and_simd_produce_identical_hard_clusters() {
     let post_plda =
       DMatrix::<f64>::from_fn(num_train, plda_dim, |_, _| rng.random::<f64>() * 2.0 - 1.0);
     let phi = DVector::<f64>::from_fn(plda_dim, |_, _| rng.random::<f64>() + 0.1);
-    let input = AssignEmbeddingsInput {
-      embeddings: &embeddings,
+    let input = AssignEmbeddingsInput::new(
+      &embeddings,
       num_chunks,
       num_speakers,
-      segmentations: &segmentations,
+      &segmentations,
       num_frames,
-      post_plda: &post_plda,
-      phi: &phi,
-      train_chunk_idx: &train_chunk_idx,
-      train_speaker_idx: &train_speaker_idx,
-      threshold: 0.6,
-      fa: 0.07,
-      fb: 0.8,
-      max_iters: 20,
-    };
+      &post_plda,
+      &phi,
+      &train_chunk_idx,
+      &train_speaker_idx,
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
     let scalar = crate::pipeline::algo::assign_embeddings_with_simd(&input, false)
       .expect("scalar assign_embeddings");
     let simd = crate::pipeline::algo::assign_embeddings_with_simd(&input, true)
@@ -254,21 +254,21 @@ fn rejects_nan_in_segmentations() {
   segmentations[10] = f64::INFINITY;
   let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
-  let input = AssignEmbeddingsInput {
-    embeddings: &embeddings,
-    num_chunks,
-    num_speakers,
-    segmentations: &segmentations,
-    num_frames,
-    post_plda: &post_plda,
-    phi: &phi,
-    train_chunk_idx: &[0usize, 1],
-    train_speaker_idx: &[0usize, 1],
-    threshold: 0.6,
-    fa: 0.07,
-    fb: 0.8,
-    max_iters: 20,
-  };
+  let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      num_chunks,
+      num_speakers,
+      &segmentations,
+      num_frames,
+      &post_plda,
+      &phi,
+      &[0usize, 1],
+      &[0usize, 1],
+      0.6,
+      0.07,
+      0.8,
+      20,
+    );
   let result = assign_embeddings(&input);
   assert!(
     matches!(

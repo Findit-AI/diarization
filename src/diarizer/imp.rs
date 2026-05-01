@@ -820,13 +820,13 @@ impl Diarizer {
 
       // Optional collected_embeddings.
       if self.opts.collect_embeddings() {
-        self.collected_embeddings.push(CollectedEmbedding {
-          range: activity.range(),
+        self.collected_embeddings.push(CollectedEmbedding::new(
+          activity.range(),
           embedding,
-          online_speaker_id: cluster_id,
-          speaker_slot: s,
-          used_clean_mask: used_clean,
-        });
+          cluster_id,
+          s,
+          used_clean,
+        ));
       }
     }
     Ok(())

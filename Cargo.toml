@@ -99,6 +99,11 @@ tempfile = "3"
 # does not depend on npyz.
 npyz = { version = "0.9", features = ["npz"] }
 
+[[example]]
+path = "examples/run_owned_pipeline_tch.rs"
+name = "run_owned_pipeline_tch"
+required-features = ["tch", "ort"]
+
 [[bench]]
 path = "benches/segment.rs"
 name = "segment"

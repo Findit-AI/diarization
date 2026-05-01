@@ -24,14 +24,59 @@ pub enum StopReason {
 /// Output of [`vbx_iterate`].
 #[derive(Debug, Clone)]
 pub struct VbxOutput {
+  gamma: nalgebra::DMatrix<f64>,
+  pi: nalgebra::DVector<f64>,
+  elbo_trajectory: Vec<f64>,
+  stop_reason: StopReason,
+}
+
+impl VbxOutput {
+  /// Construct.
+  pub fn new(
+    gamma: nalgebra::DMatrix<f64>,
+    pi: nalgebra::DVector<f64>,
+    elbo_trajectory: Vec<f64>,
+    stop_reason: StopReason,
+  ) -> Self {
+    Self {
+      gamma,
+      pi,
+      elbo_trajectory,
+      stop_reason,
+    }
+  }
+
   /// Final responsibilities, shape `(T, S)`.
-  pub gamma: nalgebra::DMatrix<f64>,
+  pub const fn gamma(&self) -> &nalgebra::DMatrix<f64> {
+    &self.gamma
+  }
+
   /// Final speaker priors, shape `(S,)`. Sums to 1.0.
-  pub pi: nalgebra::DVector<f64>,
+  pub const fn pi(&self) -> &nalgebra::DVector<f64> {
+    &self.pi
+  }
+
   /// ELBO at each iteration (length ≤ `max_iters`).
-  pub elbo_trajectory: Vec<f64>,
+  pub fn elbo_trajectory(&self) -> &[f64] {
+    &self.elbo_trajectory
+  }
+
   /// Why the loop stopped — converged vs. hit `max_iters`.
-  pub stop_reason: StopReason,
+  pub const fn stop_reason(&self) -> StopReason {
+    self.stop_reason
+  }
+
+  /// Decompose into the four owned fields.
+  pub fn into_parts(
+    self,
+  ) -> (
+    nalgebra::DMatrix<f64>,
+    nalgebra::DVector<f64>,
+    Vec<f64>,
+    StopReason,
+  ) {
+    (self.gamma, self.pi, self.elbo_trajectory, self.stop_reason)
+  }
 }
 
 /// Absolute floor for the ELBO regression tolerance. Caps the band

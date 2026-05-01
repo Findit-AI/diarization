@@ -51,30 +51,19 @@ pub const SLOTS_PER_CHUNK: usize = 3;
 /// from the community-1 config.
 #[derive(Debug, Clone, Copy)]
 pub struct OwnedPipelineConfig {
-  /// Sliding-window step in samples. Community-1 uses 16_000 (1 s).
-  pub step_samples: u32,
-  /// Frame-level binarization onset (default: 0.5).
-  pub onset: f32,
-  /// AHC linkage threshold (community-1: 0.6).
-  pub threshold: f64,
-  /// VBx Fa (community-1: 0.07).
-  pub fa: f64,
-  /// VBx Fb (community-1: 0.8).
-  pub fb: f64,
-  /// VBx max iterations (community-1 hardcodes 20).
-  pub max_iters: usize,
-  /// Span post-processing min_duration_off (seconds). Community-1: 0.0.
-  pub min_duration_off: f64,
-  /// Temporal smoothing epsilon for top-k reconstruction. Community-1
-  /// default `Some(0.1)` matches speakrs's
-  /// `ReconstructMethod::Smoothed { epsilon: 0.1 }` — reduces flicker
-  /// between near-tied speakers. Set to `None` for bit-exact
-  /// pyannote argmax behavior.
-  pub smoothing_epsilon: Option<f32>,
+  step_samples: u32,
+  onset: f32,
+  threshold: f64,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
+  min_duration_off: f64,
+  smoothing_epsilon: Option<f32>,
 }
 
-impl Default for OwnedPipelineConfig {
-  fn default() -> Self {
+impl OwnedPipelineConfig {
+  /// Construct with `community-1` defaults.
+  pub const fn new() -> Self {
     Self {
       step_samples: 16_000, // 1 s — community-1 config
       onset: 0.5,
@@ -85,6 +74,100 @@ impl Default for OwnedPipelineConfig {
       min_duration_off: 0.0,
       smoothing_epsilon: Some(0.1),
     }
+  }
+
+  // ── Getters ─────────────────────────────────────────────────────
+
+  /// Sliding-window step in samples. Community-1 uses 16_000 (1 s).
+  pub const fn step_samples(&self) -> u32 {
+    self.step_samples
+  }
+  /// Frame-level binarization onset (default: 0.5).
+  pub const fn onset(&self) -> f32 {
+    self.onset
+  }
+  /// AHC linkage threshold (community-1: 0.6).
+  pub const fn threshold(&self) -> f64 {
+    self.threshold
+  }
+  /// VBx Fa (community-1: 0.07).
+  pub const fn fa(&self) -> f64 {
+    self.fa
+  }
+  /// VBx Fb (community-1: 0.8).
+  pub const fn fb(&self) -> f64 {
+    self.fb
+  }
+  /// VBx max iterations (community-1 hardcodes 20).
+  pub const fn max_iters(&self) -> usize {
+    self.max_iters
+  }
+  /// Span post-processing min_duration_off (seconds).
+  pub const fn min_duration_off(&self) -> f64 {
+    self.min_duration_off
+  }
+  /// Temporal smoothing epsilon for top-k reconstruction.
+  pub const fn smoothing_epsilon(&self) -> Option<f32> {
+    self.smoothing_epsilon
+  }
+
+  // ── Builders ────────────────────────────────────────────────────
+
+  /// Builder: sliding-window step in samples.
+  #[must_use]
+  pub const fn with_step_samples(mut self, v: u32) -> Self {
+    self.step_samples = v;
+    self
+  }
+  /// Builder: frame-level binarization onset.
+  #[must_use]
+  pub const fn with_onset(mut self, v: f32) -> Self {
+    self.onset = v;
+    self
+  }
+  /// Builder: AHC linkage threshold.
+  #[must_use]
+  pub const fn with_threshold(mut self, v: f64) -> Self {
+    self.threshold = v;
+    self
+  }
+  /// Builder: VBx Fa.
+  #[must_use]
+  pub const fn with_fa(mut self, v: f64) -> Self {
+    self.fa = v;
+    self
+  }
+  /// Builder: VBx Fb.
+  #[must_use]
+  pub const fn with_fb(mut self, v: f64) -> Self {
+    self.fb = v;
+    self
+  }
+  /// Builder: VBx max iterations.
+  #[must_use]
+  pub const fn with_max_iters(mut self, v: usize) -> Self {
+    self.max_iters = v;
+    self
+  }
+  /// Builder: span post-processing `min_duration_off` (seconds).
+  #[must_use]
+  pub const fn with_min_duration_off(mut self, v: f64) -> Self {
+    self.min_duration_off = v;
+    self
+  }
+  /// Builder: temporal smoothing epsilon. Pass `None` for bit-exact
+  /// pyannote argmax behavior, `Some(0.1)` for `community-1` smoothed
+  /// reconstruction.
+  #[must_use]
+  pub const fn with_smoothing_epsilon(mut self, v: Option<f32>) -> Self {
+    self.smoothing_epsilon = v;
+    self
+  }
+}
+
+impl Default for OwnedPipelineConfig {
+  fn default() -> Self {
+    Self::new()
   }
 }
 
@@ -102,16 +185,7 @@ impl OwnedDiarizationPipeline {
   /// Construct with the community-1 default config.
   pub const fn new() -> Self {
     Self {
-      config: OwnedPipelineConfig {
-        step_samples: 16_000,
-        onset: 0.5,
-        threshold: 0.6,
-        fa: 0.07,
-        fb: 0.8,
-        max_iters: 20,
-        min_duration_off: 0.0,
-        smoothing_epsilon: Some(0.1),
-      },
+      config: OwnedPipelineConfig::new(),
     }
   }
 
@@ -149,7 +223,7 @@ impl OwnedDiarizationPipeline {
       return Err(Error::Shape("samples is empty"));
     }
     let win = WINDOW_SAMPLES as usize;
-    let step = cfg.step_samples as usize;
+    let step = cfg.step_samples() as usize;
     if step == 0 {
       return Err(Error::Shape("step_samples must be > 0"));
     }
@@ -223,7 +297,7 @@ impl OwnedDiarizationPipeline {
         let mut any_active = false;
         for f in 0..FRAMES_PER_WINDOW {
           let active =
-            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset as f64;
+            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset() as f64;
           frame_mask[f] = active;
           any_active |= active;
         }
@@ -288,13 +362,13 @@ impl OwnedDiarizationPipeline {
     // see `aggregate::count_pyannote` source for the algorithm and
     // `aggregate::parity_tests` for the bit-exact fixture parity.
     let chunk_duration_s = WINDOW_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
-    let chunk_step_s = cfg.step_samples as f64 / SAMPLE_RATE_HZ as f64;
+    let chunk_step_s = cfg.step_samples() as f64 / SAMPLE_RATE_HZ as f64;
     let (count, frames_sw) = count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
       SLOTS_PER_CHUNK,
-      cfg.onset as f64,
+      cfg.onset() as f64,
       chunk_duration_s,
       chunk_step_s,
       PYANNOTE_FRAME_DURATION_S,
@@ -302,31 +376,27 @@ impl OwnedDiarizationPipeline {
     );
     let num_output_frames = count.len();
 
-    let chunks_sw = SlidingWindow {
-      start: 0.0,
-      duration: chunk_duration_s,
-      step: chunk_step_s,
-    };
+    let chunks_sw = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
 
     // ── Stage 4: dispatch to diarize_offline ───────────────────────
-    let input = OfflineInput {
-      raw_embeddings: &raw_embeddings,
+    let input = OfflineInput::new(
+      &raw_embeddings,
       num_chunks,
-      num_speakers: SLOTS_PER_CHUNK,
-      segmentations: &segmentations,
-      num_frames_per_chunk: FRAMES_PER_WINDOW,
-      count: &count,
+      SLOTS_PER_CHUNK,
+      &segmentations,
+      FRAMES_PER_WINDOW,
+      &count,
       num_output_frames,
       chunks_sw,
       frames_sw,
       plda,
-      threshold: cfg.threshold,
-      fa: cfg.fa,
-      fb: cfg.fb,
-      max_iters: cfg.max_iters,
-      min_duration_off: cfg.min_duration_off,
-      smoothing_epsilon: cfg.smoothing_epsilon,
-    };
+      cfg.threshold(),
+      cfg.fa(),
+      cfg.fb(),
+      cfg.max_iters(),
+      cfg.min_duration_off(),
+      cfg.smoothing_epsilon(),
+    );
     diarize_offline(&input)
   }
 }

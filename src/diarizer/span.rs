@@ -15,23 +15,59 @@ use crate::embed::Embedding;
 /// per closed cluster run). The two views are reconciled via
 /// `online_speaker_id`.
 ///
-/// Style note: `pub` fields, not accessors. Matches [`crate::embed::EmbeddingMeta`]
-/// — this type is a debug/audit bag of pre-computed values, not a
-/// type with internal invariants.
 #[derive(Debug, Clone)]
 pub struct CollectedEmbedding {
+  range: TimeRange,
+  embedding: Embedding,
+  online_speaker_id: u64,
+  speaker_slot: u8,
+  used_clean_mask: bool,
+}
+
+impl CollectedEmbedding {
+  /// Construct.
+  pub const fn new(
+    range: TimeRange,
+    embedding: Embedding,
+    online_speaker_id: u64,
+    speaker_slot: u8,
+    used_clean_mask: bool,
+  ) -> Self {
+    Self {
+      range,
+      embedding,
+      online_speaker_id,
+      speaker_slot,
+      used_clean_mask,
+    }
+  }
+
   /// Sample range of the source activity, in `crate::segment::SAMPLE_RATE_TB`.
-  pub range: TimeRange,
+  pub const fn range(&self) -> TimeRange {
+    self.range
+  }
+
   /// L2-normalized embedding extracted from the activity.
-  pub embedding: Embedding,
+  pub const fn embedding(&self) -> &Embedding {
+    &self.embedding
+  }
+
   /// Online speaker id assigned by `Clusterer::submit` during streaming.
-  pub online_speaker_id: u64,
+  pub const fn online_speaker_id(&self) -> u64 {
+    self.online_speaker_id
+  }
+
   /// Window-local slot from `diarization::segment::SpeakerActivity` (`0..MAX_SPEAKER_SLOTS`).
-  pub speaker_slot: u8,
+  pub const fn speaker_slot(&self) -> u8 {
+    self.speaker_slot
+  }
+
   /// Whether the embedding used the `exclude_overlap` clean mask
   /// (`true`) or fell back to the speaker-only mask (`false`).
   /// See spec §5.8 for fallback semantics.
-  pub used_clean_mask: bool,
+  pub const fn used_clean_mask(&self) -> bool {
+    self.used_clean_mask
+  }
 }
 
 /// One closed speaker turn after reconstruction.

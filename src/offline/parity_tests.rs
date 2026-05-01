@@ -50,16 +50,8 @@ fn run_offline_parity(fixture_dir: &str) {
   let (frame_dur_arr, _) = read_npz_array::<f64>(&recon_path, "frame_duration");
   let (frame_step_arr, _) = read_npz_array::<f64>(&recon_path, "frame_step");
   let (min_dur_off_arr, _) = read_npz_array::<f64>(&recon_path, "min_duration_off");
-  let chunks_sw = SlidingWindow {
-    start: chunk_start_arr[0],
-    duration: chunk_dur_arr[0],
-    step: chunk_step_arr[0],
-  };
-  let frames_sw = SlidingWindow {
-    start: frame_start_arr[0],
-    duration: frame_dur_arr[0],
-    step: frame_step_arr[0],
-  };
+  let chunks_sw = SlidingWindow::new(chunk_start_arr[0], chunk_dur_arr[0], chunk_step_arr[0]);
+  let frames_sw = SlidingWindow::new(frame_start_arr[0], frame_dur_arr[0], frame_step_arr[0]);
 
   let ahc_path = fixture(&format!("{base}/ahc_state.npz"));
   let (threshold_arr, _) = read_npz_array::<f64>(&ahc_path, "threshold");
@@ -70,25 +62,25 @@ fn run_offline_parity(fixture_dir: &str) {
 
   let plda = PldaTransform::new().expect("PldaTransform");
 
-  let input = OfflineInput {
-    raw_embeddings: &raw_flat,
+  let input = OfflineInput::new(
+    &raw_flat,
     num_chunks,
     num_speakers,
-    segmentations: &segmentations,
+    &segmentations,
     num_frames_per_chunk,
-    count: &count_u8,
+    &count_u8,
     num_output_frames,
     chunks_sw,
     frames_sw,
-    plda: &plda,
-    threshold: threshold_arr[0],
-    fa: fa_arr[0],
-    fb: fb_arr[0],
-    max_iters: max_iters_arr[0] as usize,
-    min_duration_off: min_dur_off_arr[0],
+    &plda,
+    threshold_arr[0],
+    fa_arr[0],
+    fb_arr[0],
+    max_iters_arr[0] as usize,
+    min_dur_off_arr[0],
     // Phase 5c parity: bit-exact pyannote argmax (no smoothing).
-    smoothing_epsilon: None,
-  };
+    None,
+  );
 
   let out = diarize_offline(&input).expect("diarize_offline");
 
@@ -100,7 +92,7 @@ fn run_offline_parity(fixture_dir: &str) {
     .filter(|l| !l.is_empty() && l.starts_with("SPEAKER"))
     .collect();
 
-  let our_lines = spans_to_rttm_lines(&out.spans, "clip_16k");
+  let our_lines = spans_to_rttm_lines(out.spans(), "clip_16k");
   // The offline path projects PLDA itself from raw_embeddings, while
   // pyannote's captured `post_plda` was computed by its own
   // `_xvec_tf + _plda_tf` chain. Both implementations match within

@@ -253,11 +253,7 @@ pub fn count_pyannote(
     }
   }
 
-  let frames_sw = SlidingWindow {
-    start: 0.0,
-    duration: frame_duration,
-    step: frame_step,
-  };
+  let frames_sw = SlidingWindow::new(0.0, frame_duration, frame_step);
 
   (count, frames_sw)
 }

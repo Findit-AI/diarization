@@ -20,41 +20,121 @@ const QINIT_SMOOTHING: f64 = 7.0;
 /// signature manageable.
 #[derive(Debug, Clone)]
 pub struct AssignEmbeddingsInput<'a> {
-  /// Raw per-chunk per-speaker embeddings, flattened to
-  /// `(num_chunks * num_speakers, embed_dim)`. Row
-  /// `c * num_speakers + s` is the embedding for `(chunk c, speaker s)`.
-  /// These feed stages 5 (centroid) and 6 (cdist).
-  pub embeddings: &'a DMatrix<f64>,
-  pub num_chunks: usize,
-  pub num_speakers: usize,
-  /// Per-chunk per-frame per-speaker activity. Flattened to a length
-  /// `num_chunks * num_frames * num_speakers` slice with stride order
-  /// `[c][f][s]`. Used to derive the inactive `(chunk, speaker)` mask
-  /// that pyannote's constrained_assignment overrides at stage 7.
-  pub segmentations: &'a [f64],
-  pub num_frames: usize,
-  /// Post-PLDA features for the active training subset, shape
-  /// `(num_train, plda_dim)`. Pyannote computes this via
-  /// `self.plda(train_embeddings)`. Phase 1's PLDA parity test
-  /// already validates the projection; this pipeline accepts
-  /// pre-projected features.
-  pub post_plda: &'a DMatrix<f64>,
-  /// Eigenvalue diagonal `phi` (`PldaTransform::phi()`). Length
-  /// `plda_dim`. Consumed by VBx.
-  pub phi: &'a DVector<f64>,
-  /// Indices of active `(chunk, speaker)` pairs in row-major order
-  /// matching `post_plda` rows. Length `num_train`. Pyannote
-  /// computes these via `filter_embeddings`.
-  pub train_chunk_idx: &'a [usize],
-  pub train_speaker_idx: &'a [usize],
-  /// AHC linkage threshold. Pyannote community-1 default: `0.6`.
-  pub threshold: f64,
-  /// VBx Fa (sufficient-statistics scale). Community-1: `0.07`.
-  pub fa: f64,
-  /// VBx Fb (speaker regularization). Community-1: `0.8`.
-  pub fb: f64,
-  /// VBx max iterations. Pyannote hardcodes `20`.
-  pub max_iters: usize,
+  embeddings: &'a DMatrix<f64>,
+  num_chunks: usize,
+  num_speakers: usize,
+  segmentations: &'a [f64],
+  num_frames: usize,
+  post_plda: &'a DMatrix<f64>,
+  phi: &'a DVector<f64>,
+  train_chunk_idx: &'a [usize],
+  train_speaker_idx: &'a [usize],
+  threshold: f64,
+  fa: f64,
+  fb: f64,
+  max_iters: usize,
+}
+
+impl<'a> AssignEmbeddingsInput<'a> {
+  /// Construct.
+  ///
+  /// Field meaning:
+  /// - `embeddings`: raw per-(chunk, speaker) embeddings flattened to
+  ///   `(num_chunks * num_speakers, embed_dim)`.
+  /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
+  ///   `[c][f][s]`. Length `num_chunks * num_frames * num_speakers`.
+  /// - `post_plda`: post-PLDA features for the active training subset,
+  ///   shape `(num_train, plda_dim)`.
+  /// - `phi`: eigenvalue diagonal (length `plda_dim`).
+  /// - `train_chunk_idx` / `train_speaker_idx`: row-major active
+  ///   indices, length `num_train`.
+  /// - `threshold`/`fa`/`fb`/`max_iters`: AHC and VBx hyperparameters.
+  ///   Community-1 defaults: 0.6, 0.07, 0.8, 20.
+  #[allow(clippy::too_many_arguments)]
+  pub const fn new(
+    embeddings: &'a DMatrix<f64>,
+    num_chunks: usize,
+    num_speakers: usize,
+    segmentations: &'a [f64],
+    num_frames: usize,
+    post_plda: &'a DMatrix<f64>,
+    phi: &'a DVector<f64>,
+    train_chunk_idx: &'a [usize],
+    train_speaker_idx: &'a [usize],
+    threshold: f64,
+    fa: f64,
+    fb: f64,
+    max_iters: usize,
+  ) -> Self {
+    Self {
+      embeddings,
+      num_chunks,
+      num_speakers,
+      segmentations,
+      num_frames,
+      post_plda,
+      phi,
+      train_chunk_idx,
+      train_speaker_idx,
+      threshold,
+      fa,
+      fb,
+      max_iters,
+    }
+  }
+
+  /// Raw per-`(chunk, speaker)` embeddings.
+  pub const fn embeddings(&self) -> &'a DMatrix<f64> {
+    self.embeddings
+  }
+  /// Number of chunks.
+  pub const fn num_chunks(&self) -> usize {
+    self.num_chunks
+  }
+  /// Speaker slots per chunk.
+  pub const fn num_speakers(&self) -> usize {
+    self.num_speakers
+  }
+  /// Per-`(chunk, frame, speaker)` activity.
+  pub const fn segmentations(&self) -> &'a [f64] {
+    self.segmentations
+  }
+  /// Frames per chunk.
+  pub const fn num_frames(&self) -> usize {
+    self.num_frames
+  }
+  /// Post-PLDA features for the active training subset.
+  pub const fn post_plda(&self) -> &'a DMatrix<f64> {
+    self.post_plda
+  }
+  /// PLDA eigenvalue diagonal.
+  pub const fn phi(&self) -> &'a DVector<f64> {
+    self.phi
+  }
+  /// Active chunk indices (length `num_train`).
+  pub const fn train_chunk_idx(&self) -> &'a [usize] {
+    self.train_chunk_idx
+  }
+  /// Active speaker indices (length `num_train`).
+  pub const fn train_speaker_idx(&self) -> &'a [usize] {
+    self.train_speaker_idx
+  }
+  /// AHC linkage threshold.
+  pub const fn threshold(&self) -> f64 {
+    self.threshold
+  }
+  /// VBx Fa.
+  pub const fn fa(&self) -> f64 {
+    self.fa
+  }
+  /// VBx Fb.
+  pub const fn fb(&self) -> f64 {
+    self.fb
+  }
+  /// VBx max iterations.
+  pub const fn max_iters(&self) -> usize {
+    self.max_iters
+  }
 }
 
 /// Run pyannote's `cluster_vbx` flow (stages 2–7).
@@ -263,7 +343,7 @@ fn assign_embeddings_inner(
   )?;
   #[cfg(not(test))]
   let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
-  if vbx_out.stop_reason == StopReason::MaxIterationsReached {
+  if vbx_out.stop_reason() == StopReason::MaxIterationsReached {
     // Pyannote silently accepts max_iters reached — it's the common
     // case in real data (16 of 20 captured iters converged but pyannote
     // doesn't check). The Rust port follows suit; downstream consumers
@@ -273,16 +353,16 @@ fn assign_embeddings_inner(
   // ── Stage 5: drop sp-squashed clusters, compute centroids ───────
   #[cfg(test)]
   let centroids = crate::cluster::centroid::algo::weighted_centroids_with_simd(
-    &vbx_out.gamma,
-    &vbx_out.pi,
+    vbx_out.gamma(),
+    vbx_out.pi(),
     &train_embeddings,
     SP_ALIVE_THRESHOLD,
     use_simd,
   )?;
   #[cfg(not(test))]
   let centroids = weighted_centroids(
-    &vbx_out.gamma,
-    &vbx_out.pi,
+    vbx_out.gamma(),
+    vbx_out.pi(),
     &train_embeddings,
     SP_ALIVE_THRESHOLD,
   )?;

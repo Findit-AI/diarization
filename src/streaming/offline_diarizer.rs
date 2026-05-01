@@ -51,7 +51,7 @@
 use crate::{
   aggregate::count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
-  offline::{OfflineInput, OfflineOutput, OwnedPipelineConfig, diarize_offline},
+  offline::{OfflineInput, OwnedPipelineConfig, diarize_offline},
   plda::PldaTransform,
   reconstruct::{
     ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans, reconstruct as reconstruct_grid,
@@ -86,24 +86,64 @@ pub enum StreamingError {
 /// Configuration for [`StreamingOfflineDiarizer`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StreamingOfflineConfig {
-  /// Pyannote diarization parameters. The `step_samples`,
-  /// `onset`, `threshold`, `fa`, `fb`, `max_iters`,
-  /// `min_duration_off`, and `smoothing_epsilon` fields are used
-  /// directly. Defaults match `community-1`.
-  pub diarization: OwnedPipelineConfig,
+  diarization: OwnedPipelineConfig,
+}
+
+impl StreamingOfflineConfig {
+  /// Construct with `community-1` diarization defaults.
+  pub const fn new() -> Self {
+    Self {
+      diarization: OwnedPipelineConfig::new(),
+    }
+  }
+
+  /// Borrow the inner diarization parameters.
+  pub const fn diarization(&self) -> &OwnedPipelineConfig {
+    &self.diarization
+  }
+
+  /// Builder: replace the diarization parameters.
+  #[must_use]
+  pub const fn with_diarization(mut self, diarization: OwnedPipelineConfig) -> Self {
+    self.diarization = diarization;
+    self
+  }
 }
 
 /// One diarized span in the original audio timeline.
 #[derive(Debug, Clone)]
 pub struct DiarizedSpan {
+  start_sample: u64,
+  end_sample: u64,
+  speaker_id: u32,
+}
+
+impl DiarizedSpan {
+  /// Construct.
+  pub const fn new(start_sample: u64, end_sample: u64, speaker_id: u32) -> Self {
+    Self {
+      start_sample,
+      end_sample,
+      speaker_id,
+    }
+  }
+
   /// Absolute start sample (relative to the start of the input
   /// audio stream that drove `push_voice_range`).
-  pub start_sample: u64,
+  pub const fn start_sample(&self) -> u64 {
+    self.start_sample
+  }
+
   /// Absolute end sample.
-  pub end_sample: u64,
+  pub const fn end_sample(&self) -> u64 {
+    self.end_sample
+  }
+
   /// Globally-tracked speaker id, consistent across all voice
   /// ranges pushed before `finalize`.
-  pub speaker_id: u32,
+  pub const fn speaker_id(&self) -> u32 {
+    self.speaker_id
+  }
 }
 
 /// Voice-range-driven streaming diarizer.
@@ -185,7 +225,7 @@ impl StreamingOfflineDiarizer {
       return Err(StreamingError::Shape("voice range samples is empty"));
     }
     let win = WINDOW_SAMPLES as usize;
-    let step = cfg.step_samples as usize;
+    let step = cfg.step_samples() as usize;
     if step == 0 {
       return Err(StreamingError::Shape("step_samples must be > 0"));
     }
@@ -247,7 +287,7 @@ impl StreamingOfflineDiarizer {
         let mut any_active = false;
         for f in 0..FRAMES_PER_WINDOW {
           let active =
-            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset as f64;
+            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset() as f64;
           frame_mask[f] = active;
           any_active |= active;
         }
@@ -283,23 +323,19 @@ impl StreamingOfflineDiarizer {
 
     // ── Stage 3: count tensor (local to this range) ────────────────
     let chunk_duration_s = WINDOW_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
-    let chunk_step_s = cfg.step_samples as f64 / SAMPLE_RATE_HZ as f64;
+    let chunk_step_s = cfg.step_samples() as f64 / SAMPLE_RATE_HZ as f64;
     let (count, frames_sw_local) = count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
       SLOTS_PER_CHUNK,
-      cfg.onset as f64,
+      cfg.onset() as f64,
       chunk_duration_s,
       chunk_step_s,
       PYANNOTE_FRAME_DURATION_S,
       PYANNOTE_FRAME_STEP_S,
     );
-    let chunks_sw_local = SlidingWindow {
-      start: 0.0,
-      duration: chunk_duration_s,
-      step: chunk_step_s,
-    };
+    let chunks_sw_local = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
 
     self.ranges.push(AccumulatedRange {
       abs_start_sample,
@@ -375,29 +411,27 @@ impl StreamingOfflineDiarizer {
     let cfg = &self.config.diarization;
     let chunks_sw_global = self.ranges[0].chunks_sw_local;
     let frames_sw_global = self.ranges[0].frames_sw_local;
-    let input = OfflineInput {
-      raw_embeddings: &all_emb,
-      num_chunks: total_chunks,
-      num_speakers: SLOTS_PER_CHUNK,
-      segmentations: &all_segs,
-      num_frames_per_chunk: FRAMES_PER_WINDOW,
-      count: &all_count,
-      num_output_frames: total_output_frames,
-      chunks_sw: chunks_sw_global,
-      frames_sw: frames_sw_global,
+    let input = OfflineInput::new(
+      &all_emb,
+      total_chunks,
+      SLOTS_PER_CHUNK,
+      &all_segs,
+      FRAMES_PER_WINDOW,
+      &all_count,
+      total_output_frames,
+      chunks_sw_global,
+      frames_sw_global,
       plda,
-      threshold: cfg.threshold,
-      fa: cfg.fa,
-      fb: cfg.fb,
-      max_iters: cfg.max_iters,
-      min_duration_off: cfg.min_duration_off,
-      smoothing_epsilon: cfg.smoothing_epsilon,
-    };
-    let OfflineOutput {
-      hard_clusters,
-      num_clusters,
-      ..
-    } = diarize_offline(&input)?;
+      cfg.threshold(),
+      cfg.fa(),
+      cfg.fb(),
+      cfg.max_iters(),
+      cfg.min_duration_off(),
+      cfg.smoothing_epsilon(),
+    );
+    let offline_out = diarize_offline(&input)?;
+    let hard_clusters = offline_out.hard_clusters();
+    let num_clusters = offline_out.num_clusters();
     debug_assert_eq!(hard_clusters.len(), total_chunks);
 
     // ── 4. Per-range reconstruct → spans → original timeline ───────
@@ -417,18 +451,18 @@ impl StreamingOfflineDiarizer {
       let hc_slice = &hard_clusters[chunk_offset..chunk_offset + r.num_chunks];
       chunk_offset += r.num_chunks;
 
-      let recon_input = ReconstructInput {
-        segmentations: &r.segmentations,
-        num_chunks: r.num_chunks,
-        num_frames_per_chunk: FRAMES_PER_WINDOW,
-        num_speakers: SLOTS_PER_CHUNK,
-        hard_clusters: hc_slice,
-        count: &r.count,
-        num_output_frames: r.count.len(),
-        chunks_sw: r.chunks_sw_local,
-        frames_sw: r.frames_sw_local,
-        smoothing_epsilon: cfg.smoothing_epsilon,
-      };
+      let recon_input = ReconstructInput::new(
+        &r.segmentations,
+        r.num_chunks,
+        FRAMES_PER_WINDOW,
+        SLOTS_PER_CHUNK,
+        hc_slice,
+        &r.count,
+        r.count.len(),
+        r.chunks_sw_local,
+        r.frames_sw_local,
+        cfg.smoothing_epsilon(),
+      );
       let discrete = reconstruct_grid(&recon_input)?;
 
       let max_cluster_local = hc_slice
@@ -456,19 +490,19 @@ impl StreamingOfflineDiarizer {
         r.count.len(),
         num_clusters_local,
         r.frames_sw_local,
-        cfg.min_duration_off,
+        cfg.min_duration_off(),
       );
 
       for span in local_spans {
-        let start_off_samples = (span.start * sr).max(0.0) as u64;
-        let dur_samples = (span.duration * sr).max(0.0) as u64;
+        let start_off_samples = (span.start() * sr).max(0.0) as u64;
+        let dur_samples = (span.duration() * sr).max(0.0) as u64;
         all_spans.push(DiarizedSpan {
           start_sample: r.abs_start_sample.saturating_add(start_off_samples),
           end_sample: r
             .abs_start_sample
             .saturating_add(start_off_samples)
             .saturating_add(dur_samples),
-          speaker_id: span.cluster as u32,
+          speaker_id: span.cluster() as u32,
         });
       }
     }

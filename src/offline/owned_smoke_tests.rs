@@ -64,13 +64,13 @@ fn owned_smoke_02_pyannote_sample() {
 
   // Sanity: at least one span emitted, all timestamps finite + ordered.
   assert!(
-    !out.spans.is_empty(),
+    !out.spans().is_empty(),
     "expected non-empty spans; got 0 spans (num_clusters={})",
-    out.num_clusters
+    out.num_clusters()
   );
-  for span in &out.spans {
-    let s = span.start;
-    let d = span.duration;
+  for span in out.spans() {
+    let s = span.start();
+    let d = span.duration();
     assert!(
       s.is_finite() && d.is_finite() && d > 0.0,
       "bad span: {s} dur {d}"
