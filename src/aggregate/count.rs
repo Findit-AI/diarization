@@ -178,7 +178,8 @@ pub fn count_pyannote(
   // mismatch tolerance).
   let mut chunk_count: Vec<f64> = vec![0.0; num_chunks * num_frames_per_chunk];
   for c in 0..num_chunks {
-    let chunk_count_row = &mut chunk_count[c * num_frames_per_chunk..(c + 1) * num_frames_per_chunk];
+    let chunk_count_row =
+      &mut chunk_count[c * num_frames_per_chunk..(c + 1) * num_frames_per_chunk];
     for s in 0..num_speakers {
       let seg_base = c * num_frames_per_chunk * num_speakers + s;
       let stride = num_speakers;
