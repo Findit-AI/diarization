@@ -293,10 +293,7 @@ mod differential_tests {
         #[cfg(not(target_arch = "aarch64"))]
         {
           let rel = ((sv - vv) / sv.abs().max(1.0)).abs();
-          assert!(
-            rel < 1.0e-14,
-            "pdist[{idx}] (d={d}) divergence {rel:e}"
-          );
+          assert!(rel < 1.0e-14, "pdist[{idx}] (d={d}) divergence {rel:e}");
           let _ = idx;
         }
       }
