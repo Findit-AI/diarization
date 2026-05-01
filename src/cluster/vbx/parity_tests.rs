@@ -206,3 +206,114 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
     "ELBO parity failed: max_abs_err = {elbo_max_err:.3e} at iter {elbo_max_err_iter} got={elbo_max_err_got:.6e} want={elbo_max_err_want:.6e}",
   );
 }
+
+/// CI guard for Codex round 9 finding (MEDIUM): VBx reductions feed
+/// the discrete `sp > SP_ALIVE_THRESHOLD` filter. AVX2/AVX-512
+/// reductions diverge from scalar/NEON by O(1e-15) relative; if any
+/// produced `pi[k]` lands inside that drift band of `SP_ALIVE_THRESHOLD
+/// = 1e-7`, the alive-cluster set could differ across CPU families
+/// → CPU-dependent speaker count → downstream Hungarian assignment
+/// changes.
+///
+/// This test runs production `vbx_iterate` (SIMD via `ops::dot`) on
+/// every captured fixture and asserts that for every produced `pi[k]`,
+/// the value is at least `MIN_RATIO_TO_THRESHOLD`× larger or smaller
+/// than `SP_ALIVE_THRESHOLD`. Empirically captured fixtures have alive
+/// `pi` in O(0.1) and squashed `pi` in O(1e-14) — the closest value
+/// to threshold is at least 1e6× away. With ulp drift bounded by
+/// O(1e-15) relative (i.e. ~1e-22 absolute on the squashed values
+/// and ~1e-16 absolute on alive), there is no realistic floating-point
+/// path that flips the discrete decision. This test makes that
+/// margin explicit and CI-checked: if a future model retraining or
+/// algorithm change pushed any cluster's `pi` near the threshold,
+/// the failure here would force us to re-evaluate whether SIMD is
+/// safe for the VBx path.
+#[test]
+fn vbx_pi_has_safe_margin_from_sp_alive_threshold() {
+  use crate::cluster::centroid::SP_ALIVE_THRESHOLD;
+
+  // pi must be at least this much away from the threshold (ratio).
+  // 1e3 is generous: alive pi are in O(0.1), squashed in O(1e-14),
+  // so realistic margins are O(1e6). 1e3 still catches any drift
+  // worse than ~1e-10 absolute, which is far above any plausible
+  // SIMD-induced ulp shift on these magnitudes.
+  const MIN_RATIO_TO_THRESHOLD: f64 = 1.0e3;
+  const ALIVE_FLOOR: f64 = SP_ALIVE_THRESHOLD * MIN_RATIO_TO_THRESHOLD; // 1e-4
+  const SQUASHED_CEILING: f64 = SP_ALIVE_THRESHOLD / MIN_RATIO_TO_THRESHOLD; // 1e-10
+
+  for fixture_dir in &[
+    "01_dialogue",
+    "02_pyannote_sample",
+    "03_dual_speaker",
+    "04_three_speaker",
+    "05_four_speaker",
+    "06_long_recording",
+  ] {
+    let plda_path = fixture(&format!(
+      "tests/parity/fixtures/{fixture_dir}/plda_embeddings.npz"
+    ));
+    let vbx_path = fixture(&format!(
+      "tests/parity/fixtures/{fixture_dir}/vbx_state.npz"
+    ));
+    if !plda_path.exists() || !vbx_path.exists() {
+      panic!("fixture {fixture_dir} missing required npz files");
+    }
+
+    let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
+    let t = post_plda_shape[0] as usize;
+    let d = post_plda_shape[1] as usize;
+    let x = DMatrix::<f64>::from_row_slice(t, d, &post_plda_flat);
+    let (phi_flat, _) = read_npz_array::<f64>(&plda_path, "phi");
+    let phi = DVector::<f64>::from_vec(phi_flat);
+
+    let (qinit_flat, qinit_shape) = read_npz_array::<f64>(&vbx_path, "qinit");
+    let s = qinit_shape[1] as usize;
+    let qinit = DMatrix::<f64>::from_row_slice(t, s, &qinit_flat);
+
+    let (fa_flat, _) = read_npz_array::<f64>(&vbx_path, "fa");
+    let (fb_flat, _) = read_npz_array::<f64>(&vbx_path, "fb");
+    let (max_iters_flat, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
+    let fa = fa_flat[0];
+    let fb = fb_flat[0];
+    let max_iters = max_iters_flat[0] as usize;
+
+    let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
+
+    for sj in 0..out.pi().len() {
+      let p = out.pi()[sj];
+      assert!(p.is_finite(), "{fixture_dir}: pi[{sj}] = {p} is non-finite");
+      let alive = p > SP_ALIVE_THRESHOLD;
+      if alive {
+        assert!(
+          p >= ALIVE_FLOOR,
+          "{fixture_dir}: alive pi[{sj}] = {p:.3e} too close to SP_ALIVE_THRESHOLD ({SP_ALIVE_THRESHOLD:.0e}); \
+           bound = {ALIVE_FLOOR:.0e}. SIMD vs scalar ulp drift could flip the alive decision."
+        );
+      } else {
+        assert!(
+          p <= SQUASHED_CEILING,
+          "{fixture_dir}: squashed pi[{sj}] = {p:.3e} too close to SP_ALIVE_THRESHOLD ({SP_ALIVE_THRESHOLD:.0e}); \
+           bound = {SQUASHED_CEILING:.0e}. SIMD vs scalar ulp drift could flip the squashed decision."
+        );
+      }
+    }
+    eprintln!(
+      "[parity_vbx_margin] {fixture_dir}: {} pi values, alive ratio = {:.0e}× above threshold, squashed ratio = {:.0e}× below threshold",
+      out.pi().len(),
+      out
+        .pi()
+        .iter()
+        .filter(|&&p| p > SP_ALIVE_THRESHOLD)
+        .fold(f64::INFINITY, |a, &p| a.min(p))
+        / SP_ALIVE_THRESHOLD,
+      SP_ALIVE_THRESHOLD
+        / out
+          .pi()
+          .iter()
+          .filter(|&&p| p <= SP_ALIVE_THRESHOLD)
+          .copied()
+          .fold(f64::NEG_INFINITY, f64::max)
+          .max(f64::MIN_POSITIVE),
+    );
+  }
+}

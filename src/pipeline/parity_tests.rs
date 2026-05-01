@@ -111,22 +111,20 @@ fn assign_embeddings_matches_pyannote_hard_clusters_05_four_speaker() {
 /// numpy's BLAS-backed GEMM over more EM iterations on larger T,
 /// eventually flipping a discrete cluster decision.
 ///
-/// **Coverage of 06_long_recording is NOT lost — it shifts to
-/// `offline::parity_tests::diarize_offline_matches_pyannote_06_long_recording`**,
-/// which runs the full offline pipeline end-to-end and asserts
-/// total span-duration is within 5% of pyannote's reference RTTM.
-/// That tolerance absorbs the GEMM-roundoff label flip while still
-/// catching catastrophic regressions (the streaming-offline parity
-/// at `tests/parity/run.sh` independently confirms DER ≤ 0.19% on
-/// this fixture). Codex review HIGH round 6.
+/// **Tolerant per-frame coverage of 06_long_recording lives in
+/// [`crate::reconstruct::parity_tests::reconstruct_within_tolerance_06_long_recording`]**,
+/// which compares post-reconstruct discrete labels against the
+/// captured pyannote grid via Hungarian permutation + bounded
+/// per-cell mismatch fraction. That's the right metric (user-visible
+/// per-frame speaker label) for catching catastrophic regressions
+/// without false-failing on the documented chunk-level partition
+/// drift. Codex review HIGH rounds 6 → 9.
 ///
-/// This test stays `#[ignore]` (rather than deleted) because the
-/// strict bit-exact partition contract is real for the 5 short
-/// fixtures and we want to keep the test wired so a future
-/// nalgebra/matrixmultiply bump that fixes the drift would surface
-/// here as a green test on `cargo test -- --ignored`.
+/// This strict bit-exact pipeline-level test stays `#[ignore]` so a
+/// future nalgebra/matrixmultiply bump that fixes the GEMM-roundoff
+/// drift surfaces as a green test on `cargo test -- --ignored`.
 #[test]
-#[ignore = "T=1004 GEMM-roundoff divergence vs pyannote; covered by offline::parity_tests with 5% tolerance"]
+#[ignore = "T=1004 GEMM-roundoff partition drift; CI coverage in reconstruct::parity_tests::reconstruct_within_tolerance_06_long_recording"]
 fn assign_embeddings_matches_pyannote_hard_clusters_06_long_recording() {
   run_pipeline_parity("06_long_recording");
 }

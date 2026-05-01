@@ -84,15 +84,39 @@ fn reconstruct_matches_pyannote_discrete_diarization_05_four_speaker() {
   run_reconstruct_parity("05_four_speaker");
 }
 
-/// 06_long_recording: see `pipeline::parity_tests::assign_embeddings_
-/// matches_pyannote_hard_clusters_06_long_recording` for the
-/// rationale. This test goes through the same `assign_embeddings`
-/// path, so it inherits the same length-dependent divergence at
-/// T=1004.
+/// 06_long_recording: bit-exact discrete grid match is `#[ignore]`d
+/// because chunk-level cluster IDs diverge from pyannote's at T=1004
+/// (see `pipeline::parity_tests::assign_embeddings_matches_pyannote_hard_clusters_06_long_recording`).
+/// CI coverage moved to
+/// [`reconstruct_within_tolerance_06_long_recording`] below — same
+/// data flow, but compares per-frame discrete labels under a
+/// Hungarian-optimal cluster permutation with a bounded mismatch
+/// fraction. Codex review HIGH round 9.
 #[test]
-#[ignore = "T=1004 GEMM-roundoff divergence vs pyannote; tracked separately"]
+#[ignore = "T=1004 GEMM-roundoff partition drift; CI coverage in reconstruct_within_tolerance_06_long_recording"]
 fn reconstruct_matches_pyannote_discrete_diarization_06_long_recording() {
   run_reconstruct_parity("06_long_recording");
+}
+
+/// CI-enforced per-frame parity for 06_long_recording.
+///
+/// Runs the full pipeline (`assign_embeddings → reconstruct`),
+/// builds a `(num_clusters × num_clusters)` confusion matrix between
+/// our discrete grid and pyannote's captured grid, finds the
+/// max-trace cluster permutation by brute-force enumeration (small
+/// N, typically ≤ 5), and asserts the post-permutation per-cell
+/// mismatch fraction is below a small bound. Catches catastrophic
+/// regressions while permitting cluster-id relabeling and the
+/// documented O(1e-15) GEMM-roundoff drift.
+///
+/// Bound chosen with headroom over the observed mismatch rate
+/// (streaming-offline DER on this fixture is 0.19 % — per-frame
+/// label confusion is typically slightly higher because DER applies
+/// a 0.5 s collar; 5 % is a comfortable bound). Codex review HIGH
+/// round 9.
+#[test]
+fn reconstruct_within_tolerance_06_long_recording() {
+  run_reconstruct_parity_with_tolerance("06_long_recording", 0.05);
 }
 
 fn run_reconstruct_parity(fixture_dir: &str) {
@@ -229,5 +253,189 @@ fn run_reconstruct_parity(fixture_dir: &str) {
     mismatch == 0,
     "discrete_diarization parity failed: {mismatch}/{total_cells} cells diverge ({mismatch_pct:.4}%); \
      first: {first_mismatch:?}"
+  );
+}
+
+/// Same as [`run_reconstruct_parity`] but compares under a
+/// max-trace cluster-id permutation and asserts a bounded per-cell
+/// mismatch fraction instead of bit-exact. For long fixtures where
+/// chunk-level cluster ids diverge from pyannote's by GEMM-roundoff
+/// drift but the per-frame label content is still essentially
+/// equivalent. Codex review HIGH round 9.
+fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f64) {
+  require_fixtures(fixture_dir);
+  let base = format!("tests/parity/fixtures/{fixture_dir}");
+
+  // Reuse the data-loading + pipeline run from `run_reconstruct_parity`.
+  // We can't share via a helper without a wide return tuple, so the
+  // load is inlined here. Any update to the strict variant must mirror.
+
+  let raw_path = fixture(&format!("{base}/raw_embeddings.npz"));
+  let (raw_flat, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
+  let num_chunks = raw_shape[0] as usize;
+  let num_speakers = raw_shape[1] as usize;
+  let embed_dim = raw_shape[2] as usize;
+  let mut embeddings = DMatrix::<f64>::zeros(num_chunks * num_speakers, embed_dim);
+  for c in 0..num_chunks {
+    for s in 0..num_speakers {
+      let row = c * num_speakers + s;
+      let bx = (c * num_speakers + s) * embed_dim;
+      for d in 0..embed_dim {
+        embeddings[(row, d)] = raw_flat[bx + d] as f64;
+      }
+    }
+  }
+
+  let seg_path = fixture(&format!("{base}/segmentations.npz"));
+  let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(&seg_path, "segmentations");
+  let num_frames_per_chunk = seg_shape[1] as usize;
+  let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
+
+  let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
+  let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
+  let num_train = post_plda_shape[0] as usize;
+  let plda_dim = post_plda_shape[1] as usize;
+  let post_plda = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
+  let (phi_flat, _) = read_npz_array::<f64>(&plda_path, "phi");
+  let phi = DVector::<f64>::from_vec(phi_flat);
+  let (chunk_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_chunk_idx");
+  let (speaker_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_speaker_idx");
+  let train_chunk_idx: Vec<usize> = chunk_idx_i64.iter().map(|&v| v as usize).collect();
+  let train_speaker_idx: Vec<usize> = speaker_idx_i64.iter().map(|&v| v as usize).collect();
+
+  let ahc_path = fixture(&format!("{base}/ahc_state.npz"));
+  let (threshold_data, _) = read_npz_array::<f64>(&ahc_path, "threshold");
+  let vbx_path = fixture(&format!("{base}/vbx_state.npz"));
+  let (fa_arr, _) = read_npz_array::<f64>(&vbx_path, "fa");
+  let (fb_arr, _) = read_npz_array::<f64>(&vbx_path, "fb");
+  let (max_iters_arr, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
+
+  let pipeline_input = AssignEmbeddingsInput::new(
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames_per_chunk,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
+    threshold_data[0],
+    fa_arr[0],
+    fb_arr[0],
+    max_iters_arr[0] as usize,
+  );
+  let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
+
+  let recon_path = fixture(&format!("{base}/reconstruction.npz"));
+  let (count_u8, count_shape) = read_npz_array::<u8>(&recon_path, "count");
+  let num_output_frames = count_shape[0] as usize;
+  let (chunk_start_arr, _) = read_npz_array::<f64>(&recon_path, "chunk_start");
+  let (chunk_dur_arr, _) = read_npz_array::<f64>(&recon_path, "chunk_duration");
+  let (chunk_step_arr, _) = read_npz_array::<f64>(&recon_path, "chunk_step");
+  let (frame_start_arr, _) = read_npz_array::<f64>(&recon_path, "frame_start");
+  let (frame_dur_arr, _) = read_npz_array::<f64>(&recon_path, "frame_duration");
+  let (frame_step_arr, _) = read_npz_array::<f64>(&recon_path, "frame_step");
+  let chunks_sw = SlidingWindow::new(chunk_start_arr[0], chunk_dur_arr[0], chunk_step_arr[0]);
+  let frames_sw = SlidingWindow::new(frame_start_arr[0], frame_dur_arr[0], frame_step_arr[0]);
+
+  let recon_input = ReconstructInput::new(
+    &segmentations,
+    num_chunks,
+    num_frames_per_chunk,
+    num_speakers,
+    &hard_clusters,
+    &count_u8,
+    num_output_frames,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
+  let got = reconstruct(&recon_input).expect("reconstruct");
+
+  let (want_f32, want_shape) = read_npz_array::<f32>(&recon_path, "discrete_diarization");
+  assert_eq!(want_shape.len(), 2);
+  let want_frames = want_shape[0] as usize;
+  let want_clusters = want_shape[1] as usize;
+  assert_eq!(want_frames, num_output_frames);
+  let got_clusters = got.len() / num_output_frames;
+  assert_eq!(
+    got_clusters, want_clusters,
+    "cluster count mismatch: got {got_clusters}, want {want_clusters}"
+  );
+
+  // Confusion matrix: confusion[i][j] = number of frames where got
+  // column i is active AND want column j is active. Per-frame both
+  // grids are 0/1 (binarized).
+  let k = want_clusters;
+  let mut confusion = vec![vec![0usize; k]; k];
+  for t in 0..num_output_frames {
+    for i in 0..k {
+      let gi = got[t * k + i] != 0.0;
+      if !gi {
+        continue;
+      }
+      for j in 0..k {
+        let wj = want_f32[t * k + j] != 0.0;
+        if wj {
+          confusion[i][j] += 1;
+        }
+      }
+    }
+  }
+
+  // Brute-force max-trace permutation. K is small (≤ 5 in our
+  // fixtures); enumeration is fine. Heap's algorithm — generates all
+  // K! permutations of [0..K).
+  let mut perm: Vec<usize> = (0..k).collect();
+  let mut best_perm: Vec<usize> = perm.clone();
+  let mut best_score: usize = perm.iter().enumerate().map(|(i, &p)| confusion[i][p]).sum();
+  let mut counters = vec![0usize; k];
+  let mut idx = 0usize;
+  while idx < k {
+    if counters[idx] < idx {
+      if idx.is_multiple_of(2) {
+        perm.swap(0, idx);
+      } else {
+        perm.swap(counters[idx], idx);
+      }
+      let score: usize = (0..k).map(|i| confusion[i][perm[i]]).sum();
+      if score > best_score {
+        best_score = score;
+        best_perm.clone_from(&perm);
+      }
+      counters[idx] += 1;
+      idx = 0;
+    } else {
+      counters[idx] = 0;
+      idx += 1;
+    }
+  }
+
+  // Mismatch count under best permutation.
+  let mut mismatch = 0usize;
+  for t in 0..num_output_frames {
+    for i in 0..k {
+      let g = got[t * k + i];
+      let w = want_f32[t * k + best_perm[i]];
+      if g != w {
+        mismatch += 1;
+      }
+    }
+  }
+  let total = num_output_frames * k;
+  let frac = mismatch as f64 / total as f64;
+  assert!(
+    frac <= max_mismatch_frac,
+    "[parity_reconstruct_tolerant] {fixture_dir}: {mismatch}/{total} ({:.3}%) cells diverge \
+     under best permutation {best_perm:?}; bound = {:.3}%",
+    frac * 100.0,
+    max_mismatch_frac * 100.0,
+  );
+  eprintln!(
+    "[parity_reconstruct_tolerant] {fixture_dir}: {mismatch}/{total} ({:.4}%) mismatches \
+     under permutation {best_perm:?} (bound {:.3}%)",
+    frac * 100.0,
+    max_mismatch_frac * 100.0,
   );
 }
