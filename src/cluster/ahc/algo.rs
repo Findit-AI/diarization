@@ -2,29 +2,34 @@
 //!
 //! ## Determinism contract w.r.t. `pdist_euclidean`
 //!
-//! AHC's pairwise-distance computation runs through
-//! [`crate::ops::pdist_euclidean`] with `use_simd = true` in
-//! production. On aarch64 (the deployment target) scalar and the
-//! NEON kernel produce **bit-identical f64 outputs** — Codex
-//! adversarial review (multiple rounds 2026-04-30) flagged the hard
-//! `<= threshold` cut as a discrete-decision risk under the previous
-//! "1e-12 relative tolerance" SIMD contract. The fix replaced
-//! scalar's serial `acc += a*b` with `f64::mul_add` and a 4-acc
-//! reduction tree matching NEON's lane structure exactly; see
-//! [`crate::ops::scalar::dot`] / [`crate::ops::scalar::pdist_euclidean`]
-//! module docs.
+//! Production [`ahc_init`] calls [`crate::ops::pdist_euclidean`] with
+//! `use_simd = false` on every architecture. AHC's `<= threshold`
+//! dendrogram cut is the one threshold-sensitive discrete decision in
+//! the cluster_vbx pipeline; using scalar pdist makes the AHC
+//! partition bit-equal across NEON / AVX2 / AVX-512 / scalar hosts.
+//! Codex review MEDIUM round 7 flagged that AVX2/AVX-512 reductions
+//! diverge from scalar by O(1e-15) ulps and any pair landing in that
+//! drift band would merge on one CPU family and split on another —
+//! the scalar-by-default policy here removes the risk without
+//! affecting downstream stages.
 //!
-//! Cross-architecture (NEON 2-lane vs AVX2 4-lane vs AVX-512 8-lane)
-//! the lane-width reduction trees still differ by O(1e-15) relative
-//! on well-conditioned inputs — the per-element FMA is bit-identical
-//! everywhere, but the horizontal reduce structure is lane-bound.
-//! [`crate::ops::differential_tests`] enforces the bit-identical
-//! contract on aarch64 and a 1e-14 relative bound elsewhere.
+//! ### Earlier rounds (now superseded)
 //!
-//! [`crate::cluster::ahc::tests::simd_partition_stability`] additionally
-//! verifies that for 50 random seeds (N=20, D=128) and constructed
-//! threshold-adjacent inputs, the AHC partition is identical between
-//! scalar and SIMD even at threshold offsets of ±1e-13.
+//! Rounds 2-5 chased a SIMD-on-everywhere policy with various
+//! cross-arch determinism claims. NEON ≡ scalar bit-exact (verified
+//! by [`crate::ops::differential_tests`]) makes that workable on
+//! aarch64, but AVX2/AVX-512 wider-lane reductions don't match the
+//! scalar 4-acc tree and the matrixmultiply GEMM under VBx is
+//! independently SIMD-driven. Round 5 dropped the `cfg!(target_arch
+//! = "aarch64")` gate on the grounds that cross-arch ulp determinism
+//! was never deliverable end-to-end. Round 7 then narrowed the fix
+//! to AHC specifically — where the threshold cut makes determinism
+//! both desirable AND achievable (no nalgebra GEMM in AHC's hot
+//! path).
+//!
+//! Test entrypoint [`ahc_init_with_simd`] exposes the use_simd flag
+//! so [`crate::cluster::ahc::tests`] can still A/B scalar vs SIMD
+//! pdist on identical inputs.
 
 use std::collections::HashMap;
 
@@ -60,19 +65,32 @@ use nalgebra::DMatrix;
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
-  // SIMD always on. Earlier review rounds added a `cfg!(target_arch
-  // = "aarch64")` gate to chase cross-arch bit-equality, but a
-  // later round caught that nalgebra/matrixmultiply already runs
-  // its own AVX/FMA/NEON GEMM under `pipeline::assign_embeddings`,
-  // outside this gate. Cross-arch ulp determinism was never
-  // actually deliverable, so the gate was theatre. NEON matches
-  // scalar bit-exact at the primitive level (verified by
-  // `ops::differential_tests`); x86 SIMD diverges by ulps from
-  // scalar but tracks matrixmultiply's GEMM precision. Algorithm
-  // robustness against those ulp drifts is validated empirically
-  // by the per-fixture parity tests vs pyannote (DER ≤ 0.4% on
-  // captured fixtures across both arches).
-  ahc_init_inner(embeddings, threshold, true)
+  // Scalar pdist in production, on every arch. AHC is the one place
+  // in the cluster_vbx pipeline where SIMD determinism actually
+  // matters: the dendrogram cut is a hard `<= threshold` decision,
+  // so a pair landing inside the AVX2/AVX-512-vs-scalar ulp drift
+  // band could merge on one CPU family and split on another, giving
+  // CPU-dependent speaker counts that are nearly impossible to
+  // reproduce. NEON matches scalar bit-exact (verified by
+  // `ops::differential_tests`), but AVX2/AVX-512 use wider lane
+  // reductions and diverge by O(1e-15) relative. Codex review
+  // MEDIUM round 7.
+  //
+  // Why this is OK to "give up" SIMD here specifically: AHC's hot
+  // path is exactly one `pdist_euclidean` (O(N² × D)), then scalar
+  // `kodama::linkage` + scalar fcluster. There is no nalgebra GEMM
+  // anywhere in this function — unlike `vbx::vbx_iterate`, where
+  // `matrixmultiply`'s own SIMD dispatch is uncontrolled and made
+  // cross-arch determinism unachievable in round 5. So forcing
+  // scalar here actually delivers cross-arch bit-equal AHC
+  // partitions, with a one-shot cost on the order of a few ms on
+  // the largest captured fixture (T=1004) — not user-perceptible.
+  //
+  // VBx, centroid, pipeline GEMMs etc. continue to use SIMD where
+  // the dispatcher chooses it (they're EM/iterative/continuous, not
+  // discrete-decision, so ulp drift smooths out instead of flipping
+  // partitions).
+  ahc_init_inner(embeddings, threshold, false)
 }
 
 /// Test-only entrypoint: identical to [`ahc_init`] but with the

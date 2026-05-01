@@ -233,7 +233,15 @@ fn assign_embeddings_inner(
   if embed_dim == 0 {
     return Err(Error::Shape("embeddings must have at least one column"));
   }
-  if embeddings.nrows() != num_chunks * num_speakers {
+  // Use checked arithmetic at the public boundary: enormous dimension
+  // products would otherwise wrap silently in release builds, letting
+  // a malformed caller match the equality check with a tiny buffer
+  // and reach allocation/index code with bogus shape metadata. Mirrors
+  // `offline::algo`. Codex review HIGH round 7.
+  let expected_emb_rows = num_chunks
+    .checked_mul(num_speakers)
+    .ok_or(Error::Shape("num_chunks * num_speakers overflows usize"))?;
+  if embeddings.nrows() != expected_emb_rows {
     return Err(Error::Shape(
       "embeddings.nrows() must equal num_chunks * num_speakers",
     ));
@@ -241,7 +249,13 @@ fn assign_embeddings_inner(
   if num_frames == 0 {
     return Err(Error::Shape("num_frames must be at least 1"));
   }
-  if segmentations.len() != num_chunks * num_frames * num_speakers {
+  let expected_seg_len = num_chunks
+    .checked_mul(num_frames)
+    .and_then(|n| n.checked_mul(num_speakers))
+    .ok_or(Error::Shape(
+      "num_chunks * num_frames * num_speakers overflows usize",
+    ))?;
+  if segmentations.len() != expected_seg_len {
     return Err(Error::Shape(
       "segmentations.len() must equal num_chunks * num_frames * num_speakers",
     ));

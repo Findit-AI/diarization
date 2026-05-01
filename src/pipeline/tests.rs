@@ -49,6 +49,87 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   }
 }
 
+/// Dimension products at the public boundary use `checked_mul` —
+/// otherwise `num_chunks * num_speakers` (or
+/// `num_chunks * num_frames * num_speakers`) would wrap silently in
+/// release builds, letting a malformed caller match the equality
+/// checks with a tiny buffer and reach the `num_train < 2` fast
+/// path with bogus shape metadata. Codex review HIGH round 7.
+#[test]
+fn rejects_overflowing_chunks_times_speakers() {
+  let num_chunks = usize::MAX / 2 + 2;
+  let num_speakers = 2;
+  let embed_dim = 4;
+  let plda_dim = 4;
+  let num_frames = 8;
+  // We never actually allocate `num_chunks * num_speakers` rows —
+  // we expect the boundary check to fail first. nalgebra DMatrix
+  // construction must succeed with some small shape so we can hand
+  // it to the validator; the validator rejects on
+  // `embeddings.nrows() != checked_mul(...)?`.
+  let embeddings = DMatrix::<f64>::from_element(4, embed_dim, 0.5);
+  let segmentations = vec![0.5; 4 * num_frames];
+  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let phi = DVector::<f64>::from_element(plda_dim, 1.0);
+  let train_chunk_idx = vec![0usize, 1];
+  let train_speaker_idx = vec![0usize, 1];
+  let input = AssignEmbeddingsInput::new(
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
+    0.6,
+    0.07,
+    0.8,
+    20,
+  );
+  let result = assign_embeddings(&input);
+  assert!(
+    matches!(result, Err(crate::pipeline::Error::Shape(_))),
+    "got {result:?}"
+  );
+}
+
+#[test]
+fn rejects_overflowing_chunks_times_frames_times_speakers() {
+  let num_chunks = 1 << 30;
+  let num_frames = 1 << 30;
+  let num_speakers = 1 << 30; // product overflows usize on 64-bit
+  let embed_dim = 4;
+  let plda_dim = 4;
+  let embeddings = DMatrix::<f64>::from_element(4, embed_dim, 0.5);
+  let segmentations = vec![0.5; 4]; // tiny; never matches the overflowed product
+  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let phi = DVector::<f64>::from_element(plda_dim, 1.0);
+  let train_chunk_idx = vec![0usize, 1];
+  let train_speaker_idx = vec![0usize, 1];
+  let input = AssignEmbeddingsInput::new(
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
+    0.6,
+    0.07,
+    0.8,
+    20,
+  );
+  let result = assign_embeddings(&input);
+  assert!(
+    matches!(result, Err(crate::pipeline::Error::Shape(_))),
+    "got {result:?}"
+  );
+}
+
 /// Zero-column `post_plda` is rejected at the boundary — a schema drift
 /// or wrong array fed to the pipeline would otherwise let VBx iterate
 /// on no PLDA evidence and produce plausible hard_clusters from prior
