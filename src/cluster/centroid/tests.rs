@@ -6,6 +6,56 @@
 use crate::cluster::centroid::{Error, SP_ALIVE_THRESHOLD, weighted_centroids};
 use nalgebra::{DMatrix, DVector};
 
+/// Regression: the public `weighted_centroids` entrypoint must apply
+/// the arch-gated SIMD policy. If a future change reverts it to
+/// `weighted_centroids_inner(..., true)`, x86 production builds
+/// would silently take AVX2/AVX-512 axpy that diverges from scalar
+/// in the FMA accumulation, shifting centroid coordinates by ulps
+/// and flipping the downstream `sp > sp_threshold` dropout +
+/// Hungarian argmax cosine ranking. Codex adversarial review HIGH.
+#[test]
+fn weighted_centroids_public_entrypoint_matches_scalar_on_all_archs() {
+  let t = 6usize;
+  let s = 3usize;
+  let d = 8usize;
+  let q = DMatrix::<f64>::from_fn(t, s, |i, j| 0.1 + 0.05 * (i + j) as f64);
+  // Normalize each row of q so it's a valid posterior.
+  let mut q_norm = q.clone();
+  for r in 0..t {
+    let row_sum: f64 = (0..s).map(|c| q[(r, c)]).sum();
+    for c in 0..s {
+      q_norm[(r, c)] /= row_sum;
+    }
+  }
+  let sp = DVector::<f64>::from_element(s, 1.0); // all alive
+  let embeddings = DMatrix::<f64>::from_fn(t, d, |i, j| (i as f64).cos() + (j as f64).sin());
+
+  let public_out = weighted_centroids(&q_norm, &sp, &embeddings, SP_ALIVE_THRESHOLD)
+    .expect("public weighted_centroids");
+  let scalar_out = crate::cluster::centroid::algo::weighted_centroids_with_simd(
+    &q_norm,
+    &sp,
+    &embeddings,
+    SP_ALIVE_THRESHOLD,
+    false,
+  )
+  .expect("scalar");
+  assert_eq!(
+    public_out.shape(),
+    scalar_out.shape(),
+    "shape mismatch implies a different cluster set survived sp dropout"
+  );
+  for k in 0..public_out.nrows() {
+    for col in 0..public_out.ncols() {
+      assert_eq!(
+        public_out[(k, col)],
+        scalar_out[(k, col)],
+        "centroid divergence at ({k}, {col}) — production routing dropped the arch gate"
+      );
+    }
+  }
+}
+
 #[test]
 fn rejects_empty_q() {
   let q = DMatrix::<f64>::zeros(0, 2);

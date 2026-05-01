@@ -223,6 +223,46 @@ mod differential_tests {
     }
   }
 
+  /// `pdist_euclidean` differential at odd / non-vector-aligned
+  /// dimensions. Locks the scalar-tail FMA contract: every backend's
+  /// scalar tail must use `f64::mul_add`. Without this, an odd-d
+  /// run drifts by ½ ulp per tail step on the SIMD path, which
+  /// can flip AHC merges around the threshold for embeddings whose
+  /// dim isn't a multiple of the vector width. Codex adversarial
+  /// review MEDIUM.
+  #[test]
+  fn pdist_euclidean_odd_dim_match() {
+    let mut rng = ChaCha20Rng::seed_from_u64(0x2031);
+    // Pick a few non-power-of-2 dims that exercise the tail loop in
+    // each backend (NEON: 2-wide; AVX2: 4-wide; AVX-512: 8-wide).
+    for &d in &[1, 3, 5, 7, 9, 17, 33, 65, 129] {
+      let n = 8usize;
+      let rows: Vec<f64> = (0..n * d)
+        .map(|_| rng.random::<f64>() * 2.0 - 1.0)
+        .collect();
+      let s = super::scalar::pdist_euclidean(&rows, n, d);
+      let v = super::dispatch::pdist_euclidean(&rows, n, d, true);
+      assert_eq!(s.len(), v.len(), "pdist length mismatch (d={d})");
+      for (idx, (sv, vv)) in s.iter().zip(v.iter()).enumerate() {
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(
+          sv.to_bits(),
+          vv.to_bits(),
+          "pdist[{idx}] (d={d}) scalar/NEON not bit-identical (s={sv}, v={vv})"
+        );
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+          let rel = ((sv - vv) / sv.abs().max(1.0)).abs();
+          assert!(
+            rel < 1.0e-14,
+            "pdist[{idx}] (d={d}) divergence {rel:e}"
+          );
+          let _ = idx;
+        }
+      }
+    }
+  }
+
   /// Mismatched `dot` lengths must `panic!` (not UB) even with
   /// `use_simd = true`. The dispatcher enforces `a.len() == b.len()`
   /// unconditionally before routing to the unsafe SIMD kernel — this

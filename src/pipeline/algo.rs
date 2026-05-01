@@ -171,14 +171,19 @@ impl<'a> AssignEmbeddingsInput<'a> {
 ///      does this to avoid artificial cluster inflation).
 ///   4. A new fixture captured with `num_clusters` forcing != auto.
 pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
-  // Match `cluster::ahc::ahc_init`'s arch-gated SIMD policy. NEON
-  // matches scalar bit-exact (verified by
-  // `ops::differential_tests`), so aarch64 keeps SIMD on. x86 AVX2
-  // / AVX-512 reductions diverge from scalar, which can flip
-  // threshold-sensitive decisions (AHC merge cut, VBx alive-cluster
-  // count, centroid weighted-sum dropouts). Force scalar on x86 to
-  // keep the cluster_vbx output cross-architecture deterministic.
-  // Codex adversarial review HIGH.
+  // Arch-gated SIMD policy. NEON matches scalar bit-exact (verified
+  // by `ops::differential_tests`); x86 AVX2 / AVX-512 reductions
+  // diverge from scalar, which can flip threshold-sensitive
+  // decisions (AHC merge cut, VBx alive-cluster count, centroid
+  // dropouts, Hungarian argmax). Force scalar on x86 to keep the
+  // cluster_vbx output cross-architecture deterministic.
+  //
+  // The flag here only governs the inline `ops::dot` /
+  // `cosine_distance_pre_norm` calls in this file's stages 6-7. The
+  // public entrypoints we delegate to (`ahc_init`, `vbx_iterate`,
+  // `weighted_centroids`) each apply their OWN arch gate
+  // internally — they used to silently take SIMD on x86 even when
+  // this caller asked for scalar (Codex adversarial review HIGH).
   let use_simd = cfg!(target_arch = "aarch64");
   assign_embeddings_inner(input, use_simd)
 }

@@ -55,9 +55,14 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
         let hi = _mm256_extractf128_pd::<1>(acc);
         let sum2 = _mm_add_pd(lo, hi);
         let mut sq = _mm_cvtsd_f64(_mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2)));
+        // Scalar tail must use `f64::mul_add` to match the scalar
+        // reference's single-rounding FMA. `sq += diff * diff` is
+        // two roundings — every odd-tail step would drift by ½ ulp,
+        // which can flip AHC threshold cuts on non-vector-aligned
+        // dimensions. Codex adversarial review MEDIUM.
         while k < d {
           let diff = *row_i_ptr.add(k) - *row_j_ptr.add(k);
-          sq += diff * diff;
+          sq = f64::mul_add(diff, diff, sq);
           k += 1;
         }
         out.push(sq.sqrt());

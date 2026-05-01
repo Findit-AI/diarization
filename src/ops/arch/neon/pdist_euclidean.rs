@@ -57,10 +57,16 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
         }
         let acc = vaddq_f64(acc0, acc1);
         let mut sq = vaddvq_f64(acc);
-        // Scalar tail.
+        // Scalar tail. Must match the scalar reference's
+        // `f64::mul_add` accumulator exactly — `sq += diff * diff`
+        // is two roundings (mul, then add); `mul_add` is one. For
+        // odd `d`, every odd-tail step would otherwise drift by ½
+        // ulp from `ops::scalar::pdist_euclidean`, breaking the
+        // bit-identical contract that the AHC threshold-merge test
+        // relies on. Codex adversarial review MEDIUM.
         while k < d {
           let diff = *row_i_ptr.add(k) - *row_j_ptr.add(k);
-          sq += diff * diff;
+          sq = f64::mul_add(diff, diff, sq);
           k += 1;
         }
         out.push(sq.sqrt());

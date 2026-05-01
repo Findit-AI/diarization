@@ -52,9 +52,11 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
         }
         let acc = _mm512_add_pd(acc0, acc1);
         let mut sq = _mm512_reduce_add_pd(acc);
+        // Scalar tail must use `f64::mul_add` to match the scalar
+        // reference. Codex adversarial review MEDIUM.
         while k < d {
           let diff = *row_i_ptr.add(k) - *row_j_ptr.add(k);
-          sq += diff * diff;
+          sq = f64::mul_add(diff, diff, sq);
           k += 1;
         }
         out.push(sq.sqrt());
