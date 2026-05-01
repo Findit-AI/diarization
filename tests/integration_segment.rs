@@ -1,19 +1,16 @@
-//! Smoke test against a real pyannote/segmentation-3.0 ONNX model. Skipped
-//! by default (`#[ignore]`); run with:
+//! Smoke test against the bundled pyannote/segmentation-3.0 ONNX model.
+//! Skipped by default (`#[ignore]`); run with:
 //!
 //!     cargo test --test integration_segment -- --ignored
-//!
-//! Requires `models/segmentation-3.0.onnx` next to this repo's root.
 
-#![cfg(feature = "ort")]
+#![cfg(all(feature = "ort", feature = "bundled-segmentation"))]
 
 use diarization::segment::{SegmentModel, SegmentOptions, Segmenter};
 
 #[test]
-#[ignore = "requires model file at models/segmentation-3.0.onnx"]
+#[ignore = "exercises ONNX runtime"]
 fn smoke_test_runs_inference_on_synthetic_audio() {
-  let mut model =
-    SegmentModel::from_file("models/segmentation-3.0.onnx").expect("model file present");
+  let mut model = SegmentModel::bundled().expect("bundled model loads");
   let mut seg = Segmenter::new(SegmentOptions::default());
 
   // 12 seconds of low-amplitude noise — exercise tail anchoring.

@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   };
 
   let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-  let mut seg = SegmentModel::from_file(crate_root.join("models/segmentation-3.0.onnx"))?;
+  let mut seg = SegmentModel::bundled()?;
   let mut emb = EmbedModel::from_file(crate_root.join("models/wespeaker_resnet34_lm.onnx"))?;
   let plda = PldaTransform::new()?;
   let mut vad_session = VadSession::from_memory(silero::BUNDLED_MODEL)?;

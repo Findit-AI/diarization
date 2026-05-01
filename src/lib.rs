@@ -33,14 +33,16 @@
 //! ## Quick start (streaming-offline)
 //!
 //! ```no_run
-//! # #[cfg(feature = "ort")]
+//! # #[cfg(all(feature = "ort", feature = "bundled-segmentation"))]
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! use diarization::embed::EmbedModel;
 //! use diarization::plda::PldaTransform;
 //! use diarization::segment::SegmentModel;
 //! use diarization::streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer};
 //!
-//! let mut seg = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
+//! // Segmentation + PLDA ship bundled in the crate; only the WeSpeaker
+//! // embedding model (27 MB) is BYO.
+//! let mut seg = SegmentModel::bundled()?;
 //! let mut emb = EmbedModel::from_file("models/wespeaker_resnet34_lm.onnx")?;
 //! let plda = PldaTransform::new()?;
 //! let mut d = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());

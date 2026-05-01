@@ -143,6 +143,28 @@ impl SegmentModel {
     Ok(Self::new_from_session(session))
   }
 
+  /// Load the bundled `pyannote/segmentation-3.0` ONNX with default options.
+  ///
+  /// The model bytes are embedded into the compiled artifact via
+  /// `include_bytes!` (gated on the `bundled-segmentation` cargo feature,
+  /// which is on by default). No filesystem path or env var needed.
+  ///
+  /// Source: `pyannote/segmentation-3.0` on HuggingFace, MIT-licensed —
+  /// see `NOTICE` for attribution requirements.
+  #[cfg(feature = "bundled-segmentation")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "bundled-segmentation")))]
+  pub fn bundled() -> Result<Self, Error> {
+    Self::bundled_with_options(SegmentModelOptions::default())
+  }
+
+  /// Load the bundled segmentation model with custom options.
+  #[cfg(feature = "bundled-segmentation")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "bundled-segmentation")))]
+  pub fn bundled_with_options(opts: SegmentModelOptions) -> Result<Self, Error> {
+    const BUNDLED_BYTES: &[u8] = include_bytes!("../../models/segmentation-3.0.onnx");
+    Self::from_memory_with_options(BUNDLED_BYTES, opts)
+  }
+
   fn new_from_session(session: OrtSession) -> Self {
     Self {
       inner: session,

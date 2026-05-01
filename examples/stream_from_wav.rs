@@ -1,11 +1,9 @@
 //! Streams a 16 kHz mono WAV file through the segmenter using the bundled
-//! ort driver. Run with:
+//! pyannote/segmentation-3.0 model. Run with:
 //!
 //!     cargo run --example stream_from_wav -- path/to/audio.wav
-//!
-//! Requires `models/segmentation-3.0.onnx` (run `scripts/download-model.sh`).
 
-#[cfg(feature = "ort")]
+#[cfg(all(feature = "ort", feature = "bundled-segmentation"))]
 fn main() -> anyhow::Result<()> {
   use diarization::segment::{Event, SegmentModel, SegmentOptions, Segmenter};
 
@@ -13,7 +11,7 @@ fn main() -> anyhow::Result<()> {
     .nth(1)
     .expect("usage: stream_from_wav <file.wav>");
   let pcm = read_wav_mono_16k(&path)?;
-  let mut model = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
+  let mut model = SegmentModel::bundled()?;
   let mut seg = Segmenter::new(SegmentOptions::default());
 
   // Feed in 100 ms chunks (1_600 samples) to simulate streaming.
@@ -40,7 +38,7 @@ fn main() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(feature = "ort")]
+#[cfg(all(feature = "ort", feature = "bundled-segmentation"))]
 fn read_wav_mono_16k(path: &str) -> anyhow::Result<Vec<f32>> {
   let mut reader = hound::WavReader::open(path)?;
   let spec = reader.spec();
@@ -60,7 +58,10 @@ fn read_wav_mono_16k(path: &str) -> anyhow::Result<Vec<f32>> {
   Ok(samples?)
 }
 
-#[cfg(not(feature = "ort"))]
+#[cfg(not(all(feature = "ort", feature = "bundled-segmentation")))]
 fn main() {
-  eprintln!("This example requires the `ort` feature: cargo run --example stream_from_wav");
+  eprintln!(
+    "This example requires the `ort` and `bundled-segmentation` features (default): \
+     cargo run --example stream_from_wav"
+  );
 }

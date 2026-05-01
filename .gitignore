@@ -19,6 +19,9 @@ Cargo.lock
 /models/*.onnx
 /models/*.onnx.data
 /models/*.pt
+# Segmentation model is committed to git so it ships with the crate
+# (`SegmentModel::bundled` under feature `bundled-segmentation`).
+!/models/segmentation-3.0.onnx
 **.claude/
 
 # Spike-specific (kaldi-native-fbank parity)

@@ -1,78 +1,87 @@
 # dia
 
-Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
+Sans-I/O speaker diarization with pyannote-equivalent accuracy.
 
-[![Crates.io](https://img.shields.io/crates/v/dia.svg)](https://crates.io/crates/dia)
-[![Documentation](https://docs.rs/dia/badge.svg)](https://docs.rs/dia)
-[![License](https://img.shields.io/badge/license-(MIT_OR_Apache--2.0)_AND_CC--BY--4.0-blue.svg)](https://github.com/al8n/dia)
+[![Crates.io](https://img.shields.io/crates/v/diarization.svg)](https://crates.io/crates/diarization)
+[![Documentation](https://docs.rs/diarization/badge.svg)](https://docs.rs/diarization)
+[![License](https://img.shields.io/badge/license-(MIT_OR_Apache--2.0)_AND_MIT_AND_CC--BY--4.0-blue.svg)](https://github.com/al8n/diarization)
 
 ## Status
 
 v0.1.0 ships:
 
-- `diarization::segment` — speaker segmentation (pyannote/segmentation-3.0 ONNX)
-- `diarization::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX + kaldi fbank)
-- `diarization::cluster` — online streaming + offline (spectral + agglomerative)
-- `diarization::Diarizer` — top-level orchestrator with pyannote-style per-frame
-  reconstruction (overlap-add cluster activations, count-bounded argmax,
-  per-cluster RLE-to-spans)
+- `diarization::segment` — speaker segmentation (pyannote/segmentation-3.0).
+  **Bundled by default** (~6 MB, MIT) via `SegmentModel::bundled()`.
+- `diarization::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX +
+  kaldi fbank). **Not bundled** — 27 MB exceeds the crates.io 10 MB cap;
+  caller fetches via `scripts/download-embed-model.sh` or sets
+  `DIA_EMBED_MODEL_PATH`.
+- `diarization::plda` — pyannote/speaker-diarization-community-1 PLDA
+  whitening. **Bundled by default** (CC-BY-4.0) via `PldaTransform::new()`.
+- `diarization::cluster` + `pipeline` — pyannote `cluster_vbx` primitives
+  (PLDA → AHC → VBx → centroid → cosine → Hungarian → reconstruct).
+- `diarization::offline::OwnedDiarizationPipeline` — owned-audio batch
+  entrypoint.
+- `diarization::streaming::StreamingOfflineDiarizer` — voice-range-driven
+  streaming entrypoint with the same per-fixture DER as offline (caller
+  drives a VAD; heavy stages 1+2 run eagerly, global clustering deferred
+  to `finalize`).
 
 ## Pipeline
 
 ```
-audio decoder → resample to 16 kHz → VAD → diarization::Diarizer → downstream services
+audio decoder → resample to 16 kHz → VAD → diarization → downstream services
 ```
 
-VAD-filtered, variable-length pushes are first-class. See
-[`docs/superpowers/specs/`](docs/superpowers/specs/) for the design spec.
+See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the design
+spec.
 
 ## Quick start
 
 ```sh
-./scripts/download-model.sh         # pyannote/segmentation-3.0
-./scripts/download-embed-model.sh   # WeSpeaker ResNet34
-cargo run --release --features ort --example diarize_from_wav -- path/to/clip.wav
+./scripts/download-embed-model.sh   # WeSpeaker ResNet34 (27 MB, BYO)
+cargo run --release --features ort --example run_streaming_pipeline -- path/to/clip.wav
 ```
 
-See `examples/diarize_from_wav.rs` for the full source.
+The segmentation model and PLDA weights ship inside the crate — no
+download needed.
 
 ## License
 
 The `dia` source is dual-licensed: **MIT OR Apache-2.0** (caller's
 choice). See `LICENSE-MIT` / `LICENSE-APACHE`.
 
-### CC-BY-4.0 attribution required
+### Bundled-model attributions propagate to downstream binaries
 
-`dia` embeds a small set of third-party PLDA weight matrices from
-[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
-into every compiled binary via `include_bytes!`. Those matrices are
-licensed under **CC-BY-4.0**, and the attribution requirement
-**propagates to any downstream binary that links `dia`**.
+`dia` embeds two third-party model artifacts into every compiled
+binary via `include_bytes!`:
 
-The full SPDX expression is therefore `(MIT OR Apache-2.0) AND CC-BY-4.0`.
+| File | License | Source |
+|---|---|---|
+| `models/segmentation-3.0.onnx` (bundled when `bundled-segmentation` feature is on, default) | **MIT** | [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) |
+| `models/plda/*.bin` | **CC-BY-4.0** | [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) |
 
-When you redistribute a binary that depends on `dia` (e.g. as part of a
-larger application), you must reproduce the attribution from
+The full SPDX expression is therefore
+`(MIT OR Apache-2.0) AND MIT AND CC-BY-4.0`. When you redistribute a
+binary that depends on `dia`, reproduce the attributions from
 [`NOTICE`](NOTICE) somewhere a recipient can find — for instance, in
-your application's "About" or third-party-licenses page. The full
-provenance, including the upstream snapshot revision and the
-`models/plda/*.bin` layout, lives in
-[`models/plda/SOURCE.md`](models/plda/SOURCE.md).
+your application's "About" or third-party-licenses page. Full
+provenance: [`models/SOURCE.md`](models/SOURCE.md) (segmentation),
+[`models/plda/SOURCE.md`](models/plda/SOURCE.md) (PLDA).
 
-Note: in v0.1.0 the `diarization::plda` module is crate-private (no
-public-API caller can construct a `RawEmbedding`, by design — see
-`src/lib.rs:62-72`), but `include_bytes!` still embeds the
-weights into every linked binary, so the attribution requirement
-above applies regardless of which `dia` modules you actually
-call. The module flips back to `pub` once the Phase-2/3 VBx +
-constrained Hungarian work lands with a typed entry from
-`EmbedModel`.
+To opt out of the segmentation bundling (e.g. to ship a fine-tuned
+variant), disable default features: `diarization = { version = "...",
+default-features = false, features = ["ort"] }`. You then load via
+`SegmentModel::from_file` / `from_memory` directly.
 
 ## Cargo features
 
 | Feature | Default | What it enables |
 |---------|---------|-----------------|
 | `ort` | yes | The ONNX-runtime-backed `SegmentModel` and `EmbedModel` types. |
+| `bundled-segmentation` | yes | Embeds `models/segmentation-3.0.onnx` (~6 MB) into the binary. Exposes `SegmentModel::bundled()`. Implies `ort`. Disable to ship a fine-tuned segmentation model separately. |
+| `tch` | no | TorchScript embedding backend (libtorch ≈600 MB). Bit-exact pyannote on heavy-overlap fixtures where ONNX→ORT diverges. |
+| `silero-vad` | no | Path-dep on the sister `silero` crate; only used by `examples/run_streaming_pipeline.rs`. |
 
 The PLDA parity test runs as part of the regular test suite — no
 feature flag required:

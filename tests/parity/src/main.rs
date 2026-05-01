@@ -49,11 +49,11 @@ fn main() -> Result<()> {
     ),
   };
 
-  let seg_path = std::env::var("DIA_SEGMENT_MODEL_PATH")
-    .unwrap_or_else(|_| "models/segmentation-3.0.onnx".into());
+  // Segmentation ships bundled in the crate. Embedding model is BYO
+  // (27 MB, doesn't fit under the crates.io 10 MB cap).
+  let mut seg = SegmentModel::bundled().context("load bundled segment model")?;
   let emb_path = std::env::var("DIA_EMBED_MODEL_PATH")
     .unwrap_or_else(|_| "models/wespeaker_resnet34_lm.onnx".into());
-  let mut seg = SegmentModel::from_file(&seg_path).context("load segment model")?;
   let mut emb = EmbedModel::from_file(&emb_path).context("load embed model")?;
   let plda = PldaTransform::new().context("load plda")?;
 

@@ -6,19 +6,35 @@ rust-version = "1.95"
 # `dia` source is MIT OR Apache-2.0 (caller's choice).
 # `models/plda/*.bin` are embedded into the compiled artifact via
 # `include_bytes!` (see `src/plda/loader.rs`); those weights are
-# CC-BY-4.0 with attribution required (see `NOTICE` and
-# `models/plda/SOURCE.md`). Downstream redistributors of any binary
-# linking `dia` MUST reproduce the CC-BY-4.0 attribution.
-license = "(MIT OR Apache-2.0) AND CC-BY-4.0"
+# CC-BY-4.0 with attribution required.
+# `models/segmentation-3.0.onnx` is embedded under the
+# `bundled-segmentation` feature (default-on) via `include_bytes!`
+# (see `src/segment/model.rs`); upstream license is MIT (BUT/Bohdal et
+# al., pyannote/segmentation-3.0). See `NOTICE` and `models/SOURCE.md`
+# for attribution. Downstream redistributors of any binary linking `dia`
+# MUST reproduce both the MIT segmentation attribution and the CC-BY-4.0
+# PLDA attribution.
+license = "(MIT OR Apache-2.0) AND MIT AND CC-BY-4.0"
 repository = "https://github.com/al8n/diarization"
 homepage = "https://github.com/al8n/diarization"
 documentation = "https://docs.rs/diarization"
-description = "Sans-I/O speaker diarization for streaming audio (segmentation; embedding to follow)."
+description = "Sans-I/O speaker diarization for streaming audio. Bundles the pyannote/segmentation-3.0 model and the speaker-diarization-community-1 PLDA weights — only the WeSpeaker embedding ONNX is BYO."
 readme = "README.md"
 
 [features]
-default = ["ort"]
+default = ["ort", "bundled-segmentation"]
 ort = ["dep:ort"]
+# Embed `models/segmentation-3.0.onnx` (~6 MB) into the compiled artifact
+# via `include_bytes!` so callers can construct `SegmentModel::bundled()`
+# without provisioning the file on disk. Off-switch for callers who BYO a
+# different segmentation model (e.g. a fine-tuned variant) — they go
+# through `SegmentModel::from_file` / `from_memory` as before. Adds
+# ~6 MB to the dia binary; turn off with `default-features = false`
+# if you ship the model separately. Requires `ort` (not gated separately
+# because the bundled bytes are useless without the inference runtime
+# they feed into). Source: pyannote/segmentation-3.0 on HuggingFace
+# (MIT — see NOTICE for attribution).
+bundled-segmentation = ["ort"]
 # Alternative embedding inference backend via tch (libtorch C++ bindings).
 # Off by default — pulls in libtorch (≈600 MB shared library) and
 # typically requires `LIBTORCH` env var pointing at a libtorch install.
