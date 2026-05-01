@@ -168,7 +168,7 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
     for c in 0..cols {
       row_buf.push(m[(r, c)]);
     }
-    out[r] = crate::ops::logsumexp_row(&row_buf, true);
+    out[r] = crate::ops::logsumexp_row(&row_buf);
   }
   out
 }
@@ -215,44 +215,6 @@ pub fn vbx_iterate(
   fa: f64,
   fb: f64,
   max_iters: usize,
-) -> Result<VbxOutput, Error> {
-  // SIMD always on. The cross-arch ulp-determinism gate from
-  // earlier review rounds was incomplete — the `gamma.transpose() *
-  // &rho` and `&rho * alpha.transpose()` GEMMs in this function go
-  // through nalgebra/matrixmultiply, which has its own AVX/FMA/NEON
-  // dispatch outside our `use_simd` flag. With GEMM already arch-
-  // dispatched, gating our explicit `ops::dot` calls bought nothing
-  // for cross-arch determinism. Algorithm robustness against
-  // ulp drift is validated empirically (per-fixture parity tests
-  // pin DER ≤ 0.4% vs pyannote on both arches).
-  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, true)
-}
-
-/// Test-only entrypoint: same as [`vbx_iterate`] with explicit
-/// `use_simd`. Used by the end-to-end backend-forced differential
-/// test in [`crate::pipeline::tests`]. Production code always passes
-/// `true`.
-#[cfg(test)]
-pub(crate) fn vbx_iterate_with_simd(
-  x: &DMatrix<f64>,
-  phi: &DVector<f64>,
-  qinit: &DMatrix<f64>,
-  fa: f64,
-  fb: f64,
-  max_iters: usize,
-  use_simd: bool,
-) -> Result<VbxOutput, Error> {
-  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, use_simd)
-}
-
-fn vbx_iterate_inner(
-  x: &DMatrix<f64>,
-  phi: &DVector<f64>,
-  qinit: &DMatrix<f64>,
-  fa: f64,
-  fb: f64,
-  max_iters: usize,
-  use_simd: bool,
 ) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
   if d == 0 {
@@ -352,7 +314,7 @@ fn vbx_iterate_inner(
   let mut g = DVector::<f64>::zeros(t);
   for r in 0..t {
     let row = &x_row_major[r * d..(r + 1) * d];
-    let row_sq = crate::ops::dot(row, row, use_simd);
+    let row_sq = crate::ops::dot(row, row);
     g[r] = -0.5 * (row_sq + d as f64 * log_2pi);
   }
   // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d]. Column-major DMatrix
@@ -424,7 +386,7 @@ fn vbx_iterate_inner(
         let a = alpha[(sj, dk)];
         sa_buf[dk] = inv + a * a;
       }
-      sa_phi[sj] = crate::ops::dot(&sa_buf, phi_slice, use_simd);
+      sa_phi[sj] = crate::ops::dot(&sa_buf, phi_slice);
     }
     let mut log_p = DMatrix::<f64>::zeros(t, s);
     for tt in 0..t {

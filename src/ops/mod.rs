@@ -28,71 +28,41 @@
 //!   in Step 2.)
 //! - [`arch::wasm_simd128`] — wasm32 simd128. (Empty in Step 2.)
 //!
-//! Each public dispatcher in [`self`] takes a `use_simd: bool` flag
-//! that flips between scalar and the best-available backend. Benches
-//! in `benches/` use this to A/B scalar vs SIMD on identical inputs.
+//! Public dispatchers in [`self`] (`dot`, `axpy`, `pdist_euclidean`,
+//! `exp_inplace`, `logsumexp_row`, `inv_l_row`) always select the
+//! best-available SIMD backend at runtime. Callers needing scalar
+//! output explicitly call [`scalar::dot`], [`scalar::axpy`], etc.
 //!
-//! ## Production SIMD policy: always best-available
+//! ## SIMD selection per call site
 //!
-//! All production entrypoints (`cluster::ahc::ahc_init`,
-//! `cluster::vbx::vbx_iterate`, `cluster::centroid::weighted_centroids`,
-//! `pipeline::assign_embeddings`) pass `use_simd = true` on every
-//! architecture. The dispatch in [`self`] picks NEON on aarch64,
-//! AVX-512 → AVX2 → scalar on x86_64.
+//! - **AHC pdist** ([`crate::cluster::ahc::ahc_init`]): scalar via
+//!   [`scalar::pdist_euclidean`]. The dendrogram cut at `<= threshold`
+//!   is a hard discrete decision; AVX2/AVX-512 ulp drift could flip
+//!   a partition.
+//! - **Hungarian-feeding cosine** ([`crate::pipeline::assign_embeddings`]
+//!   stage 6): scalar via [`scalar::dot`]. Soft scores feed
+//!   `constrained_argmax`, which is also discrete.
+//! - **VBx EM** ([`crate::cluster::vbx::vbx_iterate`]) and centroid
+//!   sums ([`crate::cluster::centroid::weighted_centroids`]): SIMD via
+//!   [`dot`]/[`axpy`]. These stages are continuous/iterative; ulp
+//!   drift smooths instead of flipping discrete decisions.
+//! - **Embed aggregation** ([`crate::embed::embedder`]): SIMD via
+//!   [`axpy_f32`]. Continuous f32 sum.
 //!
-//! ### Cross-architecture determinism is NOT claimed
+//! ## Cross-architecture determinism
 //!
-//! - **NEON ≡ scalar bit-exact on aarch64.** Both use the same
-//!   4-accumulator FMA tree with `f64::mul_add`. Verified end-to-end
-//!   by `pipeline::tests::assign_embeddings_scalar_and_simd_produce_identical_hard_clusters`
-//!   (aarch64-gated) and by `differential_tests::*` at the
-//!   primitive level. So on aarch64 the `use_simd` flag is
-//!   effectively a no-op as far as output bits.
+//! - **NEON ≡ scalar bit-exact** on aarch64 (`f64::mul_add` 4-acc
+//!   tree on both). Verified by [`differential_tests`].
+//! - **AVX2/AVX-512 diverge from scalar** by O(1e-15) relative on
+//!   well-conditioned inputs (different reduction trees).
+//! - **`nalgebra`/matrixmultiply GEMMs** in VBx have their own
+//!   uncontrolled SIMD dispatch — cross-arch bit-equality
+//!   end-to-end is therefore not deliverable. Algorithm robustness
+//!   against ulp drift is validated empirically by `parity_tests`
+//!   modules (DER ≤ 0.4% on all 6 captured fixtures, every arch).
 //!
-//! - **x86 AVX2 / AVX-512 diverge from scalar by ulps.** AVX2 uses
-//!   2 wide-lane accumulators; AVX-512 uses `_mm512_reduce_add_pd`.
-//!   Different reduction trees → different ulp-level results on
-//!   well-conditioned inputs. Algorithm robustness vs those drifts
-//!   is validated empirically by `pipeline::parity_tests` /
-//!   `offline::parity_tests` against captured pyannote fixtures
-//!   (DER ≤ 0.4% on all 6 fixtures across both arches).
-//!
-//! ### Why the `use_simd` flag was kept (and why earlier gating was
-//! ### dropped)
-//!
-//! Earlier review rounds added `cfg!(target_arch = "aarch64")` gates
-//! around the explicit `ops::dot` / `ops::axpy` / `ops::pdist`
-//! callsites in production entrypoints, with the goal of forcing
-//! scalar on x86 for cross-arch bit-equality. That gate was
-//! incomplete: the `gamma.transpose() * &rho` and
-//! `rho * alpha.transpose()` GEMMs in `cluster::vbx::vbx_iterate`
-//! go through `nalgebra` → `matrixmultiply` 0.3.10, which has its
-//! own runtime AVX / FMA / NEON dispatch that we don't control.
-//! Cross-arch bit-equality was never actually deliverable; the gate
-//! was theatre. We dropped the gate (and the misleading
-//! "public ≡ scalar" regression tests it spawned) and switched to
-//! validating algorithm robustness empirically.
-//!
-//! The `use_simd` parameter on the dispatchers stays for two
-//! reasons:
-//!   1. Differential tests in `differential_tests::*` use it to A/B
-//!      scalar vs SIMD on identical inputs at the primitive level.
-//!   2. Benches in `benches/ops.rs` use it to A/B perf.
-//!
-//! Production callers all pass `true`. Test-only `*_with_simd`
-//! variants on AHC / VBx / centroid / `assign_embeddings` plumb the
-//! flag through for the aarch64-gated end-to-end differential test.
-//!
-//! Re-enabling cross-arch bit-equality in the future would need:
-//!   1. matching reduction trees in all three SIMD backends (rewrite
-//!      AVX2 / AVX-512 kernels to use the 4-accumulator FMA tree);
-//!   2. replacing `nalgebra` GEMMs with a controlled `ops::gemm`;
-//!   3. end-to-end x86 SDE differential tests on the cluster_vbx
-//!      flow.
-//!
-//! Codex adversarial review chain (rounds 3 → 5) records the
-//! reasoning. None of that work has shipped — for now, ulp drift
-//! across architectures is the documented contract.
+//! Codex adversarial review chain (rounds 3 → 8) records the
+//! reasoning behind the per-call-site SIMD policy.
 
 pub(crate) mod arch;
 mod dispatch;
@@ -193,7 +163,7 @@ mod differential_tests {
       let a: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let b: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let s = super::scalar::dot(&a, &b);
-      let v = super::dispatch::dot(&a, &b, true);
+      let v = super::dispatch::dot(&a, &b);
       #[cfg(target_arch = "aarch64")]
       assert_eq!(
         s.to_bits(),
@@ -224,7 +194,7 @@ mod differential_tests {
       let a: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let b: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
       let s = super::scalar::dot(&a, &b);
-      let v = super::dispatch::dot(&a, &b, true);
+      let v = super::dispatch::dot(&a, &b);
       #[cfg(target_arch = "aarch64")]
       assert_eq!(
         s.to_bits(),
@@ -249,7 +219,7 @@ mod differential_tests {
     let mut rng = ChaCha20Rng::seed_from_u64(0x101);
     let a: Vec<f64> = (0..256).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
     let s = super::scalar::dot(&a, &a);
-    let v = super::dispatch::dot(&a, &a, true);
+    let v = super::dispatch::dot(&a, &a);
     #[cfg(target_arch = "aarch64")]
     assert_eq!(
       s.to_bits(),
@@ -272,7 +242,7 @@ mod differential_tests {
     let a: [f64; 4] = [1e16, 1.0, -1e16, 1.0];
     let b: [f64; 4] = [1.0; 4];
     let s = super::scalar::dot(&a, &b);
-    let v = super::dispatch::dot(&a, &b, true);
+    let v = super::dispatch::dot(&a, &b);
     let abs_gap = (s - v).abs();
     assert!(
       abs_gap < 10.0,
@@ -290,7 +260,7 @@ mod differential_tests {
       .map(|_| rng.random::<f64>() * 2.0 - 1.0)
       .collect();
     let s = super::scalar::pdist_euclidean(&rows, n, d);
-    let v = super::dispatch::pdist_euclidean(&rows, n, d, true);
+    let v = super::dispatch::pdist_euclidean(&rows, n, d);
     assert_eq!(s.len(), v.len(), "pdist length mismatch");
     for (idx, (sv, vv)) in s.iter().zip(v.iter()).enumerate() {
       #[cfg(target_arch = "aarch64")]
@@ -326,7 +296,7 @@ mod differential_tests {
         .map(|_| rng.random::<f64>() * 2.0 - 1.0)
         .collect();
       let s = super::scalar::pdist_euclidean(&rows, n, d);
-      let v = super::dispatch::pdist_euclidean(&rows, n, d, true);
+      let v = super::dispatch::pdist_euclidean(&rows, n, d);
       assert_eq!(s.len(), v.len(), "pdist length mismatch (d={d})");
       for (idx, (sv, vv)) in s.iter().zip(v.iter()).enumerate() {
         #[cfg(target_arch = "aarch64")]
@@ -345,28 +315,16 @@ mod differential_tests {
     }
   }
 
-  /// Mismatched `dot` lengths must `panic!` (not UB) even with
-  /// `use_simd = true`. The dispatcher enforces `a.len() == b.len()`
-  /// unconditionally before routing to the unsafe SIMD kernel — this
-  /// test would silently OOB-read `b` if that guard were debug-only.
-  /// Codex adversarial review HIGH.
+  /// Mismatched `dot` lengths must `panic!` (not UB). The dispatcher
+  /// enforces `a.len() == b.len()` unconditionally before routing to
+  /// the unsafe SIMD kernel — this test would silently OOB-read `b`
+  /// if that guard were debug-only. Codex adversarial review HIGH.
   #[test]
   #[should_panic(expected = "ops::dot")]
-  fn dot_dispatch_panics_on_length_mismatch_under_simd() {
+  fn dot_dispatch_panics_on_length_mismatch() {
     let a = vec![1.0_f64; 8];
     let b = vec![1.0_f64; 4];
-    let _ = super::dispatch::dot(&a, &b, true);
-  }
-
-  /// Same panic boundary on the scalar path — the precondition is
-  /// asserted *before* the SIMD branch, so both routes reach the
-  /// same panic.
-  #[test]
-  #[should_panic(expected = "ops::dot")]
-  fn dot_dispatch_panics_on_length_mismatch_under_scalar() {
-    let a = vec![1.0_f64; 8];
-    let b = vec![1.0_f64; 4];
-    let _ = super::dispatch::dot(&a, &b, false);
+    let _ = super::dispatch::dot(&a, &b);
   }
 
   /// Mismatched `axpy` lengths must `panic!` not UB.
@@ -375,7 +333,7 @@ mod differential_tests {
   fn axpy_dispatch_panics_on_length_mismatch_under_simd() {
     let mut y = vec![0.0_f64; 8];
     let x = vec![1.0_f64; 4];
-    super::dispatch::axpy(&mut y, 0.5, &x, true);
+    super::dispatch::axpy(&mut y, 0.5, &x);
   }
 
   /// `pdist_euclidean` rejects shape mismatch with a panic.
@@ -384,7 +342,7 @@ mod differential_tests {
   fn pdist_dispatch_panics_on_shape_mismatch_under_simd() {
     let rows = vec![1.0_f64; 100]; // 5 * 20 worth of data
     // claim 10 rows × 20 cols (200 entries) — doesn't match 100.
-    let _ = super::dispatch::pdist_euclidean(&rows, 10, 20, true);
+    let _ = super::dispatch::pdist_euclidean(&rows, 10, 20);
   }
 
   /// `pdist_euclidean` rejects `n * d` overflow before hitting the
@@ -393,7 +351,7 @@ mod differential_tests {
   #[should_panic(expected = "ops::pdist_euclidean")]
   fn pdist_dispatch_panics_on_dim_overflow() {
     let rows: Vec<f64> = vec![];
-    let _ = super::dispatch::pdist_euclidean(&rows, usize::MAX, 2, true);
+    let _ = super::dispatch::pdist_euclidean(&rows, usize::MAX, 2);
   }
 
   /// `axpy` is per-element FMA with no reduction. With scalar using
@@ -410,7 +368,7 @@ mod differential_tests {
     let mut y_scalar = y_init.clone();
     let mut y_simd = y_init.clone();
     super::scalar::axpy(&mut y_scalar, alpha, &x);
-    super::dispatch::axpy(&mut y_simd, alpha, &x, true);
+    super::dispatch::axpy(&mut y_simd, alpha, &x);
     for (i, (s, v)) in y_scalar.iter().zip(y_simd.iter()).enumerate() {
       assert_eq!(
         s.to_bits(),

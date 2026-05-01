@@ -20,9 +20,9 @@
 //! Out-of-range handling: callers in this crate (VBx) pass values in
 //! `[-50, 0]`, so overflow / NaN / infinity never reach this kernel.
 //! Inputs outside `[-700, 700]` may produce nonsense bit patterns from
-//! `(1023 + k) << 52` overflow. The scalar fallback handles those
-//! correctly; if a future caller needs the full f64 range, route
-//! `use_simd = false` for that call.
+//! `(1023 + k) << 52` overflow. The scalar fallback in
+//! [`crate::ops::scalar::exp_inplace`] handles those correctly; a
+//! future caller needing the full f64 range calls scalar directly.
 
 use core::arch::aarch64::{
   float64x2_t, vaddq_s64, vcvtnq_s64_f64, vdupq_n_f64, vdupq_n_s64, vfmaq_f64, vld1q_f64,

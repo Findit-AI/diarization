@@ -248,75 +248,17 @@ fn rejects_nan_in_non_train_embedding_row() {
   );
 }
 
-/// End-to-end backend-forced differential test: scalar and SIMD
-/// builds of `assign_embeddings` must produce **bit-identical**
-/// hard cluster assignments on aarch64 (the deployment target).
-///
-/// Codex adversarial review repeatedly demonstrated that any SIMD
-/// reduction feeding a discrete decision (AHC threshold cut, alive-
-/// cluster count, Hungarian argmax, EM convergence) is a cross-
-/// architecture risk under the previous "1e-12 relative tolerance"
-/// SIMD contract. The fix made scalar use `f64::mul_add` and a
-/// reduction tree mirroring NEON exactly — so on aarch64 every
-/// `ops::dot` / `ops::axpy` / `ops::pdist_euclidean` call returns
-/// the same f64 bits regardless of `use_simd`.
-///
-/// This test is the load-bearing assertion: feeds 5 random seeds
-/// through `assign_embeddings_with_simd(_, false)` and
-/// `assign_embeddings_with_simd(_, true)` and asserts the entire
-/// `Vec<Vec<i32>>` hard-cluster output matches.
-#[cfg(target_arch = "aarch64")]
-#[test]
-fn assign_embeddings_scalar_and_simd_produce_identical_hard_clusters() {
-  use rand::{SeedableRng, prelude::*};
-  use rand_chacha::ChaCha20Rng;
-
-  let num_chunks = 8usize;
-  let num_speakers = 3usize;
-  let embed_dim = 32usize;
-  let plda_dim = 16usize;
-  let num_frames = 24usize;
-  // 4 train indices spread across the chunk-speaker grid.
-  let train_chunk_idx = vec![0usize, 1, 3, 5];
-  let train_speaker_idx = vec![0usize, 1, 0, 2];
-  let num_train = train_chunk_idx.len();
-
-  for seed in 0..5u64 {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let embeddings = DMatrix::<f64>::from_fn(num_chunks * num_speakers, embed_dim, |_, _| {
-      rng.random::<f64>() * 2.0 - 1.0
-    });
-    let segmentations: Vec<f64> = (0..num_chunks * num_frames * num_speakers)
-      .map(|_| rng.random::<f64>())
-      .collect();
-    let post_plda =
-      DMatrix::<f64>::from_fn(num_train, plda_dim, |_, _| rng.random::<f64>() * 2.0 - 1.0);
-    let phi = DVector::<f64>::from_fn(plda_dim, |_, _| rng.random::<f64>() + 0.1);
-    let input = AssignEmbeddingsInput::new(
-      &embeddings,
-      num_chunks,
-      num_speakers,
-      &segmentations,
-      num_frames,
-      &post_plda,
-      &phi,
-      &train_chunk_idx,
-      &train_speaker_idx,
-      0.6,
-      0.07,
-      0.8,
-      20,
-    );
-    let scalar = crate::pipeline::algo::assign_embeddings_with_simd(&input, false)
-      .expect("scalar assign_embeddings");
-    let simd = crate::pipeline::algo::assign_embeddings_with_simd(&input, true)
-      .expect("SIMD assign_embeddings");
-    assert_eq!(
-      scalar, simd,
-      "seed {seed}: scalar/SIMD hard_clusters diverged: scalar={scalar:?}, simd={simd:?}"
-    );
-  }
-}
+// Removed in round 8: `assign_embeddings_with_simd` is gone. The
+// `use_simd` plumbing was deleted because:
+// - AHC pdist is scalar in production (`ahc_init` calls
+//   `ops::scalar::pdist_euclidean` directly) — threshold-sensitive.
+// - Hungarian-feeding cosine is scalar in production
+//   (`assign_embeddings` calls `ops::scalar::dot`) — argmax-sensitive.
+// - VBx + centroid use SIMD (`ops::dot` / `ops::axpy`) but operate
+//   continuously / iteratively, so ulp drift is non-discrete.
+//
+// Backend-differential coverage moved to `ops::differential_tests`
+// at the primitive level.
 
 /// Same precondition for `segmentations`: stage 7 sums all entries
 /// for the inactive-speaker mask. A NaN in segmentations would make

@@ -30,15 +30,18 @@ fn bench_dot(c: &mut Criterion) {
   for &d in DIMS {
     let a = rand_vec(d, 0xa1);
     let b = rand_vec(d, 0xb2);
-    for &use_simd in &[false, true] {
-      let id = BenchmarkId::new(format!("d={d}"), if use_simd { "simd" } else { "scalar" });
-      group.bench_function(id, |bn| {
-        bn.iter(|| {
-          let r = ops::dot(black_box(&a), black_box(&b), use_simd);
-          black_box(r);
-        });
+    group.bench_function(BenchmarkId::new(format!("d={d}"), "simd"), |bn| {
+      bn.iter(|| {
+        let r = ops::dot(black_box(&a), black_box(&b));
+        black_box(r);
       });
-    }
+    });
+    group.bench_function(BenchmarkId::new(format!("d={d}"), "scalar"), |bn| {
+      bn.iter(|| {
+        let r = ops::scalar::dot(black_box(&a), black_box(&b));
+        black_box(r);
+      });
+    });
   }
   group.finish();
 }
@@ -49,20 +52,26 @@ fn bench_axpy(c: &mut Criterion) {
     let x = rand_vec(d, 0xa1);
     let y_init = rand_vec(d, 0xb2);
     let alpha = 0.7_f64;
-    for &use_simd in &[false, true] {
-      let id = BenchmarkId::new(format!("d={d}"), if use_simd { "simd" } else { "scalar" });
-      group.bench_function(id, |bn| {
-        // Clone `y` per iter so axpy doesn't accumulate without bound.
-        bn.iter_batched(
-          || y_init.clone(),
-          |mut y| {
-            ops::axpy(black_box(&mut y), black_box(alpha), black_box(&x), use_simd);
-            black_box(y);
-          },
-          criterion::BatchSize::SmallInput,
-        );
-      });
-    }
+    group.bench_function(BenchmarkId::new(format!("d={d}"), "simd"), |bn| {
+      bn.iter_batched(
+        || y_init.clone(),
+        |mut y| {
+          ops::axpy(black_box(&mut y), black_box(alpha), black_box(&x));
+          black_box(y);
+        },
+        criterion::BatchSize::SmallInput,
+      );
+    });
+    group.bench_function(BenchmarkId::new(format!("d={d}"), "scalar"), |bn| {
+      bn.iter_batched(
+        || y_init.clone(),
+        |mut y| {
+          ops::scalar::axpy(black_box(&mut y), black_box(alpha), black_box(&x));
+          black_box(y);
+        },
+        criterion::BatchSize::SmallInput,
+      );
+    });
   }
   group.finish();
 }
@@ -72,18 +81,18 @@ fn bench_pdist(c: &mut Criterion) {
   for &d in DIMS {
     for &n in PDIST_N {
       let rows = rand_vec(n * d, 0xc3 ^ d as u64 ^ ((n as u64) << 16));
-      for &use_simd in &[false, true] {
-        let id = BenchmarkId::new(
-          format!("n={n},d={d}"),
-          if use_simd { "simd" } else { "scalar" },
-        );
-        group.bench_function(id, |bn| {
-          bn.iter(|| {
-            let v = ops::pdist_euclidean(black_box(&rows), n, d, use_simd);
-            black_box(v);
-          });
+      group.bench_function(BenchmarkId::new(format!("n={n},d={d}"), "simd"), |bn| {
+        bn.iter(|| {
+          let v = ops::pdist_euclidean(black_box(&rows), n, d);
+          black_box(v);
         });
-      }
+      });
+      group.bench_function(BenchmarkId::new(format!("n={n},d={d}"), "scalar"), |bn| {
+        bn.iter(|| {
+          let v = ops::scalar::pdist_euclidean(black_box(&rows), n, d);
+          black_box(v);
+        });
+      });
     }
   }
   group.finish();

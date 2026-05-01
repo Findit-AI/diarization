@@ -49,36 +49,6 @@ pub fn weighted_centroids(
   embeddings: &DMatrix<f64>,
   sp_threshold: f64,
 ) -> Result<DMatrix<f64>, Error> {
-  // SIMD always on; see `cluster::vbx::vbx_iterate` for the
-  // rationale (matrixmultiply GEMM already arch-dispatches inside
-  // VBx, so a use_simd gate here was never sufficient for cross-
-  // arch bit-equality, and algorithm robustness is validated
-  // empirically by parity tests).
-  weighted_centroids_inner(q, sp, embeddings, sp_threshold, true)
-}
-
-/// Test-only entrypoint: identical to [`weighted_centroids`] but with
-/// the `use_simd` flag exposed so end-to-end differential tests can
-/// A/B both backends on identical inputs. Production code goes
-/// through [`weighted_centroids`] which always passes `true`.
-#[cfg(test)]
-pub(crate) fn weighted_centroids_with_simd(
-  q: &DMatrix<f64>,
-  sp: &DVector<f64>,
-  embeddings: &DMatrix<f64>,
-  sp_threshold: f64,
-  use_simd: bool,
-) -> Result<DMatrix<f64>, Error> {
-  weighted_centroids_inner(q, sp, embeddings, sp_threshold, use_simd)
-}
-
-fn weighted_centroids_inner(
-  q: &DMatrix<f64>,
-  sp: &DVector<f64>,
-  embeddings: &DMatrix<f64>,
-  sp_threshold: f64,
-  use_simd: bool,
-) -> Result<DMatrix<f64>, Error> {
   let (num_train, num_init) = q.shape();
   if num_train == 0 {
     return Err(Error::Shape("q must have at least one row"));
@@ -154,7 +124,7 @@ fn weighted_centroids_inner(
       let w = q[(t, k)];
       w_totals[alive_idx] += w;
       let emb_slice = &embed_buf[t * embed_dim..(t + 1) * embed_dim];
-      crate::ops::axpy(centroid_slice, w, emb_slice, use_simd);
+      crate::ops::axpy(centroid_slice, w, emb_slice);
     }
   }
   for &w_total in &w_totals {

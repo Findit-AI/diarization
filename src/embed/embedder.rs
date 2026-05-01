@@ -86,7 +86,7 @@ pub(crate) fn embed_unweighted(
   // `*s += r` chain, which doesn't propagate visibly through
   // L2-normalize / cosine clustering.
   for raw in &raws {
-    ops::axpy_f32(&mut sum, 1.0, raw.as_slice(), true);
+    ops::axpy_f32(&mut sum, 1.0, raw.as_slice());
   }
   Ok((sum, starts.len() as u32))
 }
@@ -137,7 +137,7 @@ pub(crate) fn embed_weighted_inner(
     if w < NORM_EPSILON {
       return Err(Error::AllSilent);
     }
-    ops::axpy_f32(&mut sum, w, raw.as_slice(), true);
+    ops::axpy_f32(&mut sum, w, raw.as_slice());
     return Ok((sum, 1, w));
   }
 
@@ -148,7 +148,7 @@ pub(crate) fn embed_weighted_inner(
   for (i, &start) in starts.iter().enumerate() {
     let weights = &voice_probs[start..start + win];
     let w: f32 = weights.iter().sum::<f32>() / win as f32;
-    ops::axpy_f32(&mut sum, w, raws[i].as_slice(), true);
+    ops::axpy_f32(&mut sum, w, raws[i].as_slice());
     total_weight += w;
   }
   if total_weight < NORM_EPSILON {

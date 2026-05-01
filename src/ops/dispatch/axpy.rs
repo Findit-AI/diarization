@@ -10,8 +10,9 @@ use crate::ops::{avx2_available, avx512_available};
 
 /// `y[i] += alpha * x[i]`.
 ///
-/// `use_simd = false` forces the scalar reference. Otherwise routes
-/// to the best available SIMD backend per arch + runtime detection.
+/// Routes to the best available SIMD backend per arch + runtime
+/// detection. Callers needing scalar output explicitly call
+/// [`crate::ops::scalar::axpy`]. Codex review round 8.
 ///
 /// # Panics
 ///
@@ -20,7 +21,7 @@ use crate::ops::{avx2_available, avx512_available};
 /// SIMD kernel (which only `debug_assert!`s and would OOB-read `x`
 /// otherwise). Codex adversarial review HIGH.
 #[inline]
-pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
+pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
   assert_eq!(
     y.len(),
     x.len(),
@@ -28,29 +29,27 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
     y.len(),
     x.len()
   );
-  if use_simd {
-    cfg_select! {
-      target_arch = "aarch64" => {
-        if neon_available() {
-          // SAFETY: `neon_available()` confirmed NEON is on this CPU.
-          unsafe { arch::neon::axpy(y, alpha, x); }
-          return;
-        }
-      },
-      target_arch = "x86_64" => {
-        if avx512_available() {
-          // SAFETY: `avx512_available()` confirmed AVX-512F.
-          unsafe { arch::x86_avx512::axpy(y, alpha, x); }
-          return;
-        }
-        if avx2_available() {
-          // SAFETY: `avx2_available()` confirmed AVX2 + FMA.
-          unsafe { arch::x86_avx2::axpy(y, alpha, x); }
-          return;
-        }
-      },
-      _ => {}
-    }
+  cfg_select! {
+    target_arch = "aarch64" => {
+      if neon_available() {
+        // SAFETY: `neon_available()` confirmed NEON is on this CPU.
+        unsafe { arch::neon::axpy(y, alpha, x); }
+        return;
+      }
+    },
+    target_arch = "x86_64" => {
+      if avx512_available() {
+        // SAFETY: `avx512_available()` confirmed AVX-512F.
+        unsafe { arch::x86_avx512::axpy(y, alpha, x); }
+        return;
+      }
+      if avx2_available() {
+        // SAFETY: `avx2_available()` confirmed AVX2 + FMA.
+        unsafe { arch::x86_avx2::axpy(y, alpha, x); }
+        return;
+      }
+    },
+    _ => {}
   }
   scalar::axpy(y, alpha, x);
 }
@@ -61,15 +60,14 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64], use_simd: bool) {
 /// WeSpeaker embeddings into a 256-d aggregator. No arch-specific
 /// kernel yet — the scalar `f32::mul_add` loop autovectorizes to
 /// `vfmaq_f32` (NEON) / `_mm256_fmadd_ps` (AVX2 + FMA) with
-/// `--release`. Kept behind the `use_simd` gate for symmetry with
-/// the f64 `axpy` and so we can plug in explicit SIMD kernels later
-/// without touching call sites.
+/// `--release`. Plug in explicit SIMD kernels later without touching
+/// call sites.
 ///
 /// # Panics
 ///
 /// If `y.len() != x.len()`.
 #[inline]
-pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32], use_simd: bool) {
+pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32]) {
   assert_eq!(
     y.len(),
     x.len(),
@@ -77,8 +75,5 @@ pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32], use_simd: bool) {
     y.len(),
     x.len()
   );
-  // Suppress unused-import warning when only the scalar fallback is
-  // reachable on this build.
-  let _ = use_simd;
   scalar::axpy_f32(y, alpha, x);
 }

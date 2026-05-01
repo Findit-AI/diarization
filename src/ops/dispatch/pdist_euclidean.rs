@@ -19,8 +19,12 @@ use crate::ops::{avx2_available, avx512_available};
 /// `i * d` for `i` in `0..n` and would walk off the slice end in
 /// release builds where their `debug_assert!` is a no-op. Codex
 /// adversarial review HIGH.
+// Production AHC uses `ops::scalar::pdist_euclidean` directly for
+// determinism (round 8). The SIMD dispatcher stays for differential
+// tests (`ops::differential_tests`) and benches (`benches/ops.rs`).
 #[inline]
-pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize, use_simd: bool) -> Vec<f64> {
+#[allow(dead_code)]
+pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
   let expected = n
     .checked_mul(d)
     .expect("ops::pdist_euclidean: n * d overflows usize");
@@ -33,26 +37,24 @@ pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize, use_simd: bool) -> Vec<
     d,
     expected
   );
-  if use_simd {
-    cfg_select! {
-      target_arch = "aarch64" => {
-        if neon_available() {
-          // SAFETY: `neon_available()` confirmed NEON.
-          return unsafe { arch::neon::pdist_euclidean(rows, n, d) };
-        }
-      },
-      target_arch = "x86_64" => {
-        if avx512_available() {
-          // SAFETY: `avx512_available()` confirmed AVX-512F.
-          return unsafe { arch::x86_avx512::pdist_euclidean(rows, n, d) };
-        }
-        if avx2_available() {
-          // SAFETY: `avx2_available()` confirmed AVX2 + FMA.
-          return unsafe { arch::x86_avx2::pdist_euclidean(rows, n, d) };
-        }
-      },
-      _ => {}
-    }
+  cfg_select! {
+    target_arch = "aarch64" => {
+      if neon_available() {
+        // SAFETY: `neon_available()` confirmed NEON.
+        return unsafe { arch::neon::pdist_euclidean(rows, n, d) };
+      }
+    },
+    target_arch = "x86_64" => {
+      if avx512_available() {
+        // SAFETY: `avx512_available()` confirmed AVX-512F.
+        return unsafe { arch::x86_avx512::pdist_euclidean(rows, n, d) };
+      }
+      if avx2_available() {
+        // SAFETY: `avx2_available()` confirmed AVX2 + FMA.
+        return unsafe { arch::x86_avx2::pdist_euclidean(rows, n, d) };
+      }
+    },
+    _ => {}
   }
   scalar::pdist_euclidean(rows, n, d)
 }

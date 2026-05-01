@@ -20,13 +20,14 @@
 //! In practice, for diarization's well-conditioned inputs (PLDA
 //! features in O(1), embeddings on the unit sphere, post-softmax
 //! gamma in [0, 1]) the divergence stays under ~1e-12 relative —
-//! see `crate::ops::tests` for the differential bound. AHC / VBx /
-//! pipeline parity tests pass with SIMD on by default. Callers that
-//! need *byte-identical* scalar output (regression diffs against a
-//! reference implementation, golden files captured against the
-//! scalar path) must pass `use_simd = false` at the dispatcher.
+//! see `crate::ops::tests` for the differential bound. Callers that
+//! need *byte-identical* scalar output (threshold-sensitive
+//! discrete decisions, regression diffs against a reference
+//! implementation) call the items in this module directly instead
+//! of the SIMD dispatchers in [`crate::ops`]. Examples in-tree:
+//! AHC pdist, Hungarian-feeding cosine dot.
 //!
-//! Codex adversarial review MEDIUM (this commit).
+//! Codex adversarial review rounds 3 → 8.
 
 mod axpy;
 mod dot;
