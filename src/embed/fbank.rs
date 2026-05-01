@@ -142,6 +142,81 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
   Ok(out)
 }
 
+/// Compute a kaldi-style fbank for an arbitrary-length clip,
+/// returning a flat row-major `(num_frames, FBANK_NUM_MELS)` Vec.
+///
+/// Same kaldi parameters as [`compute_fbank`], same int16 scaling,
+/// same per-(batch, mel) mean centering across frames. Used by the
+/// ORT backend for the 10s chunk + frame-mask path
+/// ([`crate::embed::EmbedModel::embed_chunk_with_frame_mask`]) where
+/// the output frame count varies with the input length and the
+/// fixed-size [`compute_fbank`] return type doesn't fit.
+pub fn compute_full_fbank(samples: &[f32]) -> Result<Vec<f32>, Error> {
+  if samples.len() < MIN_CLIP_SAMPLES as usize {
+    return Err(Error::InvalidClip {
+      len: samples.len(),
+      min: MIN_CLIP_SAMPLES as usize,
+    });
+  }
+  if samples.iter().any(|s| !s.is_finite()) {
+    return Err(Error::NonFiniteInput);
+  }
+
+  let mut opts = FbankOptions::default();
+  opts.frame_opts.samp_freq = 16_000.0;
+  opts.frame_opts.frame_length_ms = 25.0;
+  opts.frame_opts.frame_shift_ms = 10.0;
+  opts.frame_opts.dither = 0.0;
+  opts.frame_opts.preemph_coeff = 0.97;
+  opts.frame_opts.remove_dc_offset = true;
+  opts.frame_opts.window_type = "hamming".to_string();
+  opts.frame_opts.round_to_power_of_two = true;
+  opts.frame_opts.blackman_coeff = 0.42;
+  opts.frame_opts.snip_edges = true;
+  opts.mel_opts.num_bins = 80;
+  opts.mel_opts.low_freq = 20.0;
+  opts.mel_opts.high_freq = 0.0;
+  opts.use_energy = false;
+  opts.raw_energy = true;
+  opts.htk_compat = false;
+  opts.energy_floor = 1.0;
+  opts.use_log_fbank = true;
+  opts.use_power = true;
+
+  let computer = FbankComputer::new(opts).map_err(Error::Fbank)?;
+  let mut online = OnlineFeature::new(FeatureComputer::Fbank(computer));
+  let scaled: Vec<f32> = samples.iter().map(|&x| x * 32_768.0).collect();
+  online.accept_waveform(16_000.0, &scaled);
+  online.input_finished();
+
+  let num_frames = online.num_frames_ready();
+  let mut out: Vec<f32> = Vec::with_capacity(num_frames * FBANK_NUM_MELS);
+  for f in 0..num_frames {
+    let frame = online
+      .get_frame(f)
+      .expect("get_frame within num_frames_ready");
+    out.extend_from_slice(frame);
+  }
+
+  // Mean-subtract per-(batch, mel) across frames.
+  let mut mean_per_mel = [0.0f64; FBANK_NUM_MELS];
+  for f in 0..num_frames {
+    for m in 0..FBANK_NUM_MELS {
+      mean_per_mel[m] += out[f * FBANK_NUM_MELS + m] as f64;
+    }
+  }
+  for m in mean_per_mel.iter_mut() {
+    *m /= num_frames as f64;
+  }
+  for f in 0..num_frames {
+    for m in 0..FBANK_NUM_MELS {
+      out[f * FBANK_NUM_MELS + m] -= mean_per_mel[m] as f32;
+    }
+  }
+
+  Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

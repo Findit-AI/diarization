@@ -17,7 +17,7 @@ mod options;
 mod types;
 
 pub use error::Error;
-pub use fbank::compute_fbank;
+pub use fbank::{compute_fbank, compute_full_fbank};
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
 pub use model::EmbedModel;

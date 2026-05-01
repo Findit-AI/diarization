@@ -78,6 +78,22 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error(transparent)]
   Ort(#[from] ort::Error),
+
+  /// Failed to load a TorchScript module from disk.
+  #[cfg(feature = "tch")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tch")))]
+  #[error("failed to load TorchScript model from {path}: {source}", path = path.display())]
+  LoadTorchScript {
+    path: std::path::PathBuf,
+    #[source]
+    source: tch::TchError,
+  },
+
+  /// Wrap a `tch::TchError` from inference.
+  #[cfg(feature = "tch")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tch")))]
+  #[error(transparent)]
+  Tch(#[from] tch::TchError),
 }
 
 #[cfg(test)]

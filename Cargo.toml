@@ -19,6 +19,16 @@ readme = "README.md"
 [features]
 default = ["ort"]
 ort = ["dep:ort"]
+# Alternative embedding inference backend via tch (libtorch C++ bindings).
+# Off by default — pulls in libtorch (≈600 MB shared library) and
+# typically requires `LIBTORCH` env var pointing at a libtorch install.
+# Enables a TorchScript backend for the WeSpeaker embedding model that
+# matches pyannote's PyTorch inference bit-exactly on hard cases (e.g.
+# heavy-overlap fixtures where ONNX→ORT diverges by O(1) per element).
+# When ON, callers can construct via `EmbedModel::from_torchscript_file`
+# in addition to the existing `from_file` (ONNX). See
+# `scripts/export-wespeaker-torchscript.py` for the model export step.
+tch = ["dep:tch"]
 # Internal feature for benchmarks. Exposes pub(crate) modules
 # (`vbx`, `ahc`, `centroid`, `pipeline`, `reconstruct`, `hungarian`,
 # `plda`) as `pub` so external benches in `benches/*.rs` can call the
@@ -50,6 +60,7 @@ _bench = []
 mediatime = "0.1"
 thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
+tch = { version = "0.24", optional = true }
 
 # New in v0.1.0 phase 2 (spec §7).
 kaldi-native-fbank = "0.1"

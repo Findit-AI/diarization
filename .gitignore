@@ -17,6 +17,8 @@
 /target
 Cargo.lock
 /models/*.onnx
+/models/*.onnx.data
+/models/*.pt
 **.claude/
 
 # Spike-specific (kaldi-native-fbank parity)

@@ -40,14 +40,6 @@ use crate::{
   },
 };
 
-/// Per-frame audio-rate step. Pyannote community-1's segmentation
-/// model emits 589 frames per 10-second window, so each output frame
-/// covers `WINDOW_SAMPLES / FRAMES_PER_WINDOW ≈ 271.6` samples — i.e.
-/// 16.97 ms at 16 kHz. The per-frame timing is documented as
-/// `frame_duration ≈ 0.01697 s` and `frame_step ≈ 0.01697 s` in
-/// pyannote's `Inference.aggregate` metadata.
-const SAMPLES_PER_OUTPUT_FRAME: f64 = WINDOW_SAMPLES as f64 / FRAMES_PER_WINDOW as f64;
-
 /// Number of speaker slots per chunk. Pyannote `segmentation-3.0`
 /// trains on 3 simultaneous speakers (the 7 powerset classes).
 pub const SLOTS_PER_CHUNK: usize = 3;
@@ -247,44 +239,17 @@ impl OwnedDiarizationPipeline {
           continue;
         }
 
-        // Expand per-frame mask to per-sample mask.
-        // Frame f covers samples [f * SAMPLES_PER_OUTPUT_FRAME .. (f+1) * SAMPLES_PER_OUTPUT_FRAME).
-        let mut sample_mask = vec![false; win];
-        for f in 0..FRAMES_PER_WINDOW {
-          if !frame_mask[f] {
-            continue;
-          }
-          let s0 = (f as f64 * SAMPLES_PER_OUTPUT_FRAME).round() as usize;
-          let s1 = ((f + 1) as f64 * SAMPLES_PER_OUTPUT_FRAME).round() as usize;
-          let lo = s0.min(win);
-          let hi = s1.min(win);
-          for i in lo..hi {
-            sample_mask[i] = true;
-          }
-        }
-
-        // Run masked embedding on the un-zeroed portion of the window
-        // (zero-padding samples have keep=false anyway; for the last
-        // chunk, n < win means the padding tail won't have been masked
-        // in by speaker activity since pyannote's segmentation will
-        // not flag silence as active speech).
-        //
-        // Skip-on-degenerate policy: when the masked clip produces an
-        // unusable embedding (mask gathered too few samples, all-NaN
-        // ONNX output, or sub-threshold L2 norm that would fail
-        // `RawEmbedding::from_raw_array`'s degenerate-input guard),
-        // we zero out BOTH `raw_embeddings[c, s]` and `segmentations
-        // [c, :, s]`. The downstream `filter_embeddings` in
-        // `diarize_offline` keys off `sum(seg[c, :, s]) > 0`, so
-        // zeroing the segmentation column drops the (c, s) pair from
-        // the PLDA / VBx training set — matching pyannote's
-        // `filter_embeddings` behavior on degraded slots.
-        let raw = match embed_model.embed_masked_raw(&padded_chunk, &sample_mask) {
+        // Run pyannote-style chunk + frame-mask embedding. The
+        // EmbedModel's `embed_chunk_with_frame_mask` dispatches based
+        // on the active backend: ORT zeroes audio + sliding-window
+        // aggregates (approximate); tch passes (audio, mask) directly
+        // to the TorchScript wrapper which delegates to pyannote's
+        // `WeSpeakerResNet34.forward(waveforms, weights=mask)` —
+        // bit-exact pyannote.
+        let raw = match embed_model.embed_chunk_with_frame_mask(&padded_chunk, &frame_mask) {
           Ok(v) => v,
           Err(crate::embed::Error::InvalidClip { .. })
           | Err(crate::embed::Error::DegenerateEmbedding) => {
-            // Drop this (chunk, slot): zero its segmentation column
-            // so filter_embeddings skips it.
             for f in 0..FRAMES_PER_WINDOW {
               segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
             }

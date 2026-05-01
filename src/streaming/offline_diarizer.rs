@@ -68,12 +68,6 @@ use crate::{
 /// independence.
 const SLOTS_PER_CHUNK: usize = 3;
 
-/// Sample-rate per output frame in the segmentation model's local
-/// chunk timing. Pyannote community-1: ~271.65 samples (16.97 ms).
-/// NOT the same as [`PYANNOTE_FRAME_STEP_S`] — see the long comment
-/// in [`crate::offline::owned`] for why.
-const SAMPLES_PER_OUTPUT_FRAME: f64 = WINDOW_SAMPLES as f64 / FRAMES_PER_WINDOW as f64;
-
 /// Errors from the streaming offline diarizer.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamingError {
@@ -264,21 +258,7 @@ impl StreamingOfflineDiarizer {
           continue;
         }
 
-        let mut sample_mask = vec![false; win];
-        for f in 0..FRAMES_PER_WINDOW {
-          if !frame_mask[f] {
-            continue;
-          }
-          let s0 = (f as f64 * SAMPLES_PER_OUTPUT_FRAME).round() as usize;
-          let s1 = ((f + 1) as f64 * SAMPLES_PER_OUTPUT_FRAME).round() as usize;
-          let lo = s0.min(win);
-          let hi = s1.min(win);
-          for i in lo..hi {
-            sample_mask[i] = true;
-          }
-        }
-
-        let raw = match embed_model.embed_masked_raw(&padded_chunk, &sample_mask) {
+        let raw = match embed_model.embed_chunk_with_frame_mask(&padded_chunk, &frame_mask) {
           Ok(v) => v,
           Err(crate::embed::Error::InvalidClip { .. })
           | Err(crate::embed::Error::DegenerateEmbedding) => {

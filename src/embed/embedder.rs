@@ -8,7 +8,6 @@
 
 use crate::embed::{
   EmbedModel, Error,
-  fbank::compute_fbank,
   options::{EMBED_WINDOW_SAMPLES, EMBEDDING_DIM, HOP_SAMPLES, MIN_CLIP_SAMPLES, NORM_EPSILON},
 };
 
@@ -68,17 +67,15 @@ pub(crate) fn embed_unweighted(
     // Zero-pad to EMBED_WINDOW_SAMPLES (kaldi-fbank's frame budget).
     let mut padded = vec![0.0f32; EMBED_WINDOW_SAMPLES as usize];
     padded[..samples.len()].copy_from_slice(samples);
-    let features = compute_fbank(&padded)?;
-    let raw = model.embed_features(&features)?;
+    let raw = model.embed_audio_clip(&padded)?;
     return Ok((raw, 1));
   }
 
   let starts = plan_starts(samples.len());
   let win = EMBED_WINDOW_SAMPLES as usize;
-  for &start in &starts {
-    let chunk = &samples[start..start + win];
-    let features = compute_fbank(chunk)?;
-    let raw = model.embed_features(&features)?;
+  let clips: Vec<&[f32]> = starts.iter().map(|&s| &samples[s..s + win]).collect();
+  let raws = model.embed_audio_clips_batch(&clips)?;
+  for raw in &raws {
     for (s, r) in sum.iter_mut().zip(raw.iter()) {
       *s += r;
     }
@@ -127,8 +124,7 @@ pub(crate) fn embed_weighted_inner(
     // Zero-pad path. Weight = mean of voice_probs over the (un-padded) range.
     let mut padded = vec![0.0f32; win];
     padded[..samples.len()].copy_from_slice(samples);
-    let features = compute_fbank(&padded)?;
-    let raw = model.embed_features(&features)?;
+    let raw = model.embed_audio_clip(&padded)?;
     let w: f32 = voice_probs.iter().sum::<f32>() / voice_probs.len() as f32;
     if w < NORM_EPSILON {
       return Err(Error::AllSilent);
@@ -140,14 +136,13 @@ pub(crate) fn embed_weighted_inner(
   }
 
   let starts = plan_starts(samples.len());
+  let clips: Vec<&[f32]> = starts.iter().map(|&s| &samples[s..s + win]).collect();
+  let raws = model.embed_audio_clips_batch(&clips)?;
   let mut total_weight = 0.0f32;
-  for &start in &starts {
-    let chunk = &samples[start..start + win];
+  for (i, &start) in starts.iter().enumerate() {
     let weights = &voice_probs[start..start + win];
     let w: f32 = weights.iter().sum::<f32>() / win as f32;
-    let features = compute_fbank(chunk)?;
-    let raw = model.embed_features(&features)?;
-    for (s, r) in sum.iter_mut().zip(raw.iter()) {
+    for (s, r) in sum.iter_mut().zip(raws[i].iter()) {
       *s += w * r;
     }
     total_weight += w;
