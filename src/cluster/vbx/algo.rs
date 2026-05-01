@@ -259,6 +259,17 @@ fn vbx_iterate_inner(
   use_simd: bool,
 ) -> Result<VbxOutput, Error> {
   let (t, d) = x.shape();
+  if d == 0 {
+    // Zero feature columns silently runs the EM loop with no PLDA
+    // evidence — gamma/pi end up driven only by `log_pi` priors and
+    // the `(1 - fa/fb)` regularization term. The result is finite
+    // and looks plausible, so a downstream caller treats it as a
+    // valid clustering instead of a typed shape error. The pipeline
+    // entrypoint has its own zero-PLDA-dim guard, but `vbx_iterate`
+    // is public — direct callers must fail at this boundary too.
+    // Codex adversarial review MEDIUM.
+    return Err(Error::Shape("X must have at least one feature column"));
+  }
   if phi.len() != d {
     return Err(Error::Shape("Phi.len() must equal X.ncols()"));
   }

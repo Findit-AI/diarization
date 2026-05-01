@@ -31,14 +31,54 @@
 //! Each public dispatcher in [`self`] takes a `use_simd: bool` flag
 //! that flips between scalar and the best-available backend. Benches
 //! in `benches/` use this to A/B scalar vs SIMD on identical inputs.
-//! Production callers pass `true`; the scalar reference is kept for
-//! testing and as the byte-identical contract anchor.
 //!
-//! ## Step-2 status (this commit)
+//! ## Production SIMD policy: aarch64 NEON only
 //!
-//! Scaffold + scalar wiring only. All five dispatchers route to
-//! [`scalar`] regardless of `use_simd`. Step 3 fills [`arch`]
-//! backends and flips dispatchers to do real CPU-feature dispatch.
+//! All production entrypoints that consume `ops::*` primitives
+//! (`cluster::ahc::ahc_init`, `cluster::vbx::vbx_iterate`,
+//! `cluster::centroid::weighted_centroids`,
+//! `pipeline::assign_embeddings`) gate SIMD with
+//! `cfg!(target_arch = "aarch64")` — they pass `use_simd = true` only
+//! on aarch64, scalar everywhere else.
+//!
+//! - **NEON** uses the same 4-accumulator FMA tree as the scalar
+//!   reference (`f64::mul_add`). Verified bit-exact by
+//!   `differential_tests::pdist_euclidean_well_conditioned_match`
+//!   and the per-fixture aarch64-gated end-to-end differential test
+//!   in `pipeline::tests`. NEON ≡ scalar in `f64` bits, so SIMD
+//!   speedup is free of cross-architecture determinism risk.
+//!
+//! - **x86 AVX2 / AVX-512** kernels exist in [`arch::x86_avx2`] and
+//!   [`arch::x86_avx512`] but are **NOT routed by production
+//!   entrypoints**. Their reduction trees (2 wide-lane accumulators
+//!   for AVX2; AVX-512 `_mm512_reduce_add_pd`) differ from
+//!   scalar/NEON by ulps on inner-product reductions, which can flip
+//!   the threshold-sensitive decisions that drive AHC merge cuts,
+//!   VBx alive-cluster dropout, centroid sp-survival, and Hungarian
+//!   argmax. Without an SDE-backed end-to-end x86 differential test
+//!   covering all those decision paths we can't validate cross-arch
+//!   determinism on x86, so production stays on scalar.
+//!
+//!   The x86 kernels are still exercised by:
+//!     - `differential_tests::*` (primitive-level scalar≡SIMD on
+//!       well-conditioned inputs at f64 ulp tolerance);
+//!     - SDE jobs in `ci/sde_avx2.sh` / `ci/sde_avx512.sh` (force
+//!       AVX2 / AVX-512 dispatch under emulation);
+//!     - `benches/ops.rs` A/B perf measurement.
+//!
+//!   They are **not** dead code, but they are also not on the
+//!   production path. Re-enabling them in production would need
+//!   either matching their reduction tree to scalar/NEON (rewrite
+//!   the kernels), or end-to-end x86 differential coverage that
+//!   proves cluster ID equivalence on threshold-adjacent inputs.
+//!
+//! Codex adversarial review history:
+//! - Round 1 flagged centroid `use_simd=true` on x86 with no diff
+//!   coverage; round 2 caught the same gap propagating into
+//!   `vbx_iterate` and `weighted_centroids`'s public entrypoints.
+//!   This module-level doc records the resulting policy so a future
+//!   "let's just enable SIMD on x86" change has a clear bar to
+//!   clear.
 
 pub(crate) mod arch;
 mod dispatch;

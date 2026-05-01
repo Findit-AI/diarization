@@ -206,6 +206,24 @@ fn vbx_public_entrypoint_matches_scalar_on_all_archs() {
   }
 }
 
+/// Zero feature columns must error at the boundary rather than
+/// running the EM loop with no PLDA evidence (which produces
+/// finite-looking but meaningless gamma/pi). Codex adversarial
+/// review MEDIUM.
+#[test]
+fn vbx_rejects_zero_feature_dim() {
+  let t = 5;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 0);
+  let phi = DVector::<f64>::zeros(0);
+  let qinit = deterministic_qinit(t, s);
+  let r = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 5);
+  assert!(
+    matches!(r, Err(Error::Shape(msg)) if msg.contains("feature")),
+    "expected Shape(\"...feature...\") for d=0 input, got {r:?}"
+  );
+}
+
 /// `HashMap` ordering or `f64::partial_cmp` tiebreaks leak into the
 /// algorithm.
 #[test]
