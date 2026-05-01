@@ -4,8 +4,6 @@ use core::arch::x86_64::{
   __m512d, _mm512_add_pd, _mm512_fmadd_pd, _mm512_loadu_pd, _mm512_reduce_add_pd, _mm512_setzero_pd,
 };
 
-use crate::ops::scalar;
-
 /// `Σ a[i] * b[i]`. AVX-512F 8-lane f64 + FMA.
 ///
 /// # Safety
@@ -41,8 +39,12 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     }
     let acc = _mm512_add_pd(acc0, acc1);
     let mut sum = _mm512_reduce_add_pd(acc);
-    if i < n {
-      sum += scalar::dot(&a[i..], &b[i..]);
+    // Scalar tail must FMA each element directly into `sum` —
+    // routing through `scalar::dot` rounds twice. Codex adversarial
+    // review HIGH (round 4).
+    while i < n {
+      sum = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), sum);
+      i += 1;
     }
     sum
   }

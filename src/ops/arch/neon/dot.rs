@@ -8,8 +8,6 @@
 
 use core::arch::aarch64::{float64x2_t, vaddq_f64, vaddvq_f64, vdupq_n_f64, vfmaq_f64, vld1q_f64};
 
-use crate::ops::scalar;
-
 /// `Σ a[i] * b[i]`. NEON 2-lane f64.
 ///
 /// # Safety
@@ -48,9 +46,17 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     }
     let acc = vaddq_f64(acc0, acc1);
     let mut sum = vaddvq_f64(acc);
-    // Scalar tail (odd lengths).
-    if i < n {
-      sum += scalar::dot(&a[i..], &b[i..]);
+    // Scalar tail must FMA each element directly into `sum` —
+    // matches `ops::scalar::dot`'s `sum = f64::mul_add(a[i], b[i],
+    // sum)` final loop. Routing through a recursive `scalar::dot`
+    // call would compute its own per-tail sum (one rounding) and
+    // then `sum += that` (a second rounding), drifting by ½ ulp on
+    // odd `n` and breaking the bit-identical contract that AHC /
+    // VBx / centroid / Hungarian rely on. Codex adversarial review
+    // HIGH (round 4).
+    while i < n {
+      sum = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), sum);
+      i += 1;
     }
     sum
   }

@@ -197,6 +197,37 @@ mod differential_tests {
     }
   }
 
+  /// Odd / non-vector-aligned dimensions exercise the scalar-tail
+  /// FMA contract. Without per-tail `f64::mul_add` into the running
+  /// sum, the SIMD kernels would drift by ½ ulp from the scalar
+  /// reference and break VBx + cosine-distance threshold-sensitive
+  /// decisions on odd embedding/PLDA dimensions. Codex adversarial
+  /// review HIGH (round 4).
+  #[test]
+  fn dot_odd_dim_match() {
+    for d in [1usize, 3, 5, 7, 9, 17, 33, 65, 129] {
+      let mut rng = ChaCha20Rng::seed_from_u64(0xb00 + d as u64);
+      let a: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
+      let b: Vec<f64> = (0..d).map(|_| rng.random::<f64>() * 2.0 - 1.0).collect();
+      let s = super::scalar::dot(&a, &b);
+      let v = super::dispatch::dot(&a, &b, true);
+      #[cfg(target_arch = "aarch64")]
+      assert_eq!(
+        s.to_bits(),
+        v.to_bits(),
+        "dot d={d} (odd) scalar/NEON not bit-identical (s={s}, v={v})"
+      );
+      #[cfg(not(target_arch = "aarch64"))]
+      {
+        let rel = ((s - v) / s.abs().max(1.0)).abs();
+        assert!(
+          rel < 1.0e-14,
+          "dot d={d} (odd) scalar/SIMD divergence {rel:e}"
+        );
+      }
+    }
+  }
+
   /// Realistic embedding-dim L2-norm-squared (the AHC + cosine
   /// normalization pattern).
   #[test]

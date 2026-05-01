@@ -8,8 +8,6 @@ use core::arch::x86_64::{
   _mm256_extractf128_pd, _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_setzero_pd,
 };
 
-use crate::ops::scalar;
-
 /// `Σ a[i] * b[i]`. AVX2 4-lane f64 + FMA.
 ///
 /// # Safety
@@ -51,8 +49,13 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     // sum2 = [s0, s1]; horizontal add via unpackhi.
     let sum = _mm_cvtsd_f64(_mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2)));
     let mut total = sum;
-    if i < n {
-      total += scalar::dot(&a[i..], &b[i..]);
+    // Scalar tail must FMA each element directly into `total` —
+    // routing through `scalar::dot(&a[i..], &b[i..])` rounds twice
+    // (per-tail sum, then add into `total`), drifting by ½ ulp on
+    // odd `n`. Codex adversarial review HIGH (round 4).
+    while i < n {
+      total = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), total);
+      i += 1;
     }
     total
   }
