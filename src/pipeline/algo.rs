@@ -171,21 +171,19 @@ impl<'a> AssignEmbeddingsInput<'a> {
 ///      does this to avoid artificial cluster inflation).
 ///   4. A new fixture captured with `num_clusters` forcing != auto.
 pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
-  // Arch-gated SIMD policy. NEON matches scalar bit-exact (verified
-  // by `ops::differential_tests`); x86 AVX2 / AVX-512 reductions
-  // diverge from scalar, which can flip threshold-sensitive
-  // decisions (AHC merge cut, VBx alive-cluster count, centroid
-  // dropouts, Hungarian argmax). Force scalar on x86 to keep the
-  // cluster_vbx output cross-architecture deterministic.
-  //
-  // The flag here only governs the inline `ops::dot` /
-  // `cosine_distance_pre_norm` calls in this file's stages 6-7. The
-  // public entrypoints we delegate to (`ahc_init`, `vbx_iterate`,
-  // `weighted_centroids`) each apply their OWN arch gate
-  // internally — they used to silently take SIMD on x86 even when
-  // this caller asked for scalar (Codex adversarial review HIGH).
-  let use_simd = cfg!(target_arch = "aarch64");
-  assign_embeddings_inner(input, use_simd)
+  // SIMD always on. Earlier review rounds gated this to aarch64 to
+  // chase cross-arch ulp determinism; a later round caught that
+  // nalgebra/matrixmultiply runs its own AVX/FMA/NEON GEMM inside
+  // VBx outside the gate, so cross-arch bit-equality was never
+  // actually deliverable. The gate was theatre. NEON matches
+  // scalar bit-exact at the primitive level (verified end-to-end
+  // by `assign_embeddings_scalar_and_simd_produce_identical_hard_clusters`
+  // on aarch64); x86 SIMD diverges by ulps but tracks
+  // matrixmultiply's GEMM precision. Algorithm robustness against
+  // those ulp drifts is validated empirically by
+  // `pipeline::parity_tests` and `offline::parity_tests` against
+  // pyannote captures (DER ≤ 0.4% on all 6 captured fixtures).
+  assign_embeddings_inner(input, true)
 }
 
 /// Test-only entrypoint: identical to [`assign_embeddings`] but

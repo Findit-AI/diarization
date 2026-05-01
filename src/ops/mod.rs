@@ -32,53 +32,67 @@
 //! that flips between scalar and the best-available backend. Benches
 //! in `benches/` use this to A/B scalar vs SIMD on identical inputs.
 //!
-//! ## Production SIMD policy: aarch64 NEON only
+//! ## Production SIMD policy: always best-available
 //!
-//! All production entrypoints that consume `ops::*` primitives
-//! (`cluster::ahc::ahc_init`, `cluster::vbx::vbx_iterate`,
-//! `cluster::centroid::weighted_centroids`,
-//! `pipeline::assign_embeddings`) gate SIMD with
-//! `cfg!(target_arch = "aarch64")` — they pass `use_simd = true` only
-//! on aarch64, scalar everywhere else.
+//! All production entrypoints (`cluster::ahc::ahc_init`,
+//! `cluster::vbx::vbx_iterate`, `cluster::centroid::weighted_centroids`,
+//! `pipeline::assign_embeddings`) pass `use_simd = true` on every
+//! architecture. The dispatch in [`self`] picks NEON on aarch64,
+//! AVX-512 → AVX2 → scalar on x86_64.
 //!
-//! - **NEON** uses the same 4-accumulator FMA tree as the scalar
-//!   reference (`f64::mul_add`). Verified bit-exact by
-//!   `differential_tests::pdist_euclidean_well_conditioned_match`
-//!   and the per-fixture aarch64-gated end-to-end differential test
-//!   in `pipeline::tests`. NEON ≡ scalar in `f64` bits, so SIMD
-//!   speedup is free of cross-architecture determinism risk.
+//! ### Cross-architecture determinism is NOT claimed
 //!
-//! - **x86 AVX2 / AVX-512** kernels exist in [`arch::x86_avx2`] and
-//!   [`arch::x86_avx512`] but are **NOT routed by production
-//!   entrypoints**. Their reduction trees (2 wide-lane accumulators
-//!   for AVX2; AVX-512 `_mm512_reduce_add_pd`) differ from
-//!   scalar/NEON by ulps on inner-product reductions, which can flip
-//!   the threshold-sensitive decisions that drive AHC merge cuts,
-//!   VBx alive-cluster dropout, centroid sp-survival, and Hungarian
-//!   argmax. Without an SDE-backed end-to-end x86 differential test
-//!   covering all those decision paths we can't validate cross-arch
-//!   determinism on x86, so production stays on scalar.
+//! - **NEON ≡ scalar bit-exact on aarch64.** Both use the same
+//!   4-accumulator FMA tree with `f64::mul_add`. Verified end-to-end
+//!   by `pipeline::tests::assign_embeddings_scalar_and_simd_produce_identical_hard_clusters`
+//!   (aarch64-gated) and by `differential_tests::*` at the
+//!   primitive level. So on aarch64 the `use_simd` flag is
+//!   effectively a no-op as far as output bits.
 //!
-//!   The x86 kernels are still exercised by:
-//!     - `differential_tests::*` (primitive-level scalar≡SIMD on
-//!       well-conditioned inputs at f64 ulp tolerance);
-//!     - SDE jobs in `ci/sde_avx2.sh` / `ci/sde_avx512.sh` (force
-//!       AVX2 / AVX-512 dispatch under emulation);
-//!     - `benches/ops.rs` A/B perf measurement.
+//! - **x86 AVX2 / AVX-512 diverge from scalar by ulps.** AVX2 uses
+//!   2 wide-lane accumulators; AVX-512 uses `_mm512_reduce_add_pd`.
+//!   Different reduction trees → different ulp-level results on
+//!   well-conditioned inputs. Algorithm robustness vs those drifts
+//!   is validated empirically by `pipeline::parity_tests` /
+//!   `offline::parity_tests` against captured pyannote fixtures
+//!   (DER ≤ 0.4% on all 6 fixtures across both arches).
 //!
-//!   They are **not** dead code, but they are also not on the
-//!   production path. Re-enabling them in production would need
-//!   either matching their reduction tree to scalar/NEON (rewrite
-//!   the kernels), or end-to-end x86 differential coverage that
-//!   proves cluster ID equivalence on threshold-adjacent inputs.
+//! ### Why the `use_simd` flag was kept (and why earlier gating was
+//! ### dropped)
 //!
-//! Codex adversarial review history:
-//! - Round 1 flagged centroid `use_simd=true` on x86 with no diff
-//!   coverage; round 2 caught the same gap propagating into
-//!   `vbx_iterate` and `weighted_centroids`'s public entrypoints.
-//!   This module-level doc records the resulting policy so a future
-//!   "let's just enable SIMD on x86" change has a clear bar to
-//!   clear.
+//! Earlier review rounds added `cfg!(target_arch = "aarch64")` gates
+//! around the explicit `ops::dot` / `ops::axpy` / `ops::pdist`
+//! callsites in production entrypoints, with the goal of forcing
+//! scalar on x86 for cross-arch bit-equality. That gate was
+//! incomplete: the `gamma.transpose() * &rho` and
+//! `rho * alpha.transpose()` GEMMs in `cluster::vbx::vbx_iterate`
+//! go through `nalgebra` → `matrixmultiply` 0.3.10, which has its
+//! own runtime AVX / FMA / NEON dispatch that we don't control.
+//! Cross-arch bit-equality was never actually deliverable; the gate
+//! was theatre. We dropped the gate (and the misleading
+//! "public ≡ scalar" regression tests it spawned) and switched to
+//! validating algorithm robustness empirically.
+//!
+//! The `use_simd` parameter on the dispatchers stays for two
+//! reasons:
+//!   1. Differential tests in `differential_tests::*` use it to A/B
+//!      scalar vs SIMD on identical inputs at the primitive level.
+//!   2. Benches in `benches/ops.rs` use it to A/B perf.
+//!
+//! Production callers all pass `true`. Test-only `*_with_simd`
+//! variants on AHC / VBx / centroid / `assign_embeddings` plumb the
+//! flag through for the aarch64-gated end-to-end differential test.
+//!
+//! Re-enabling cross-arch bit-equality in the future would need:
+//!   1. matching reduction trees in all three SIMD backends (rewrite
+//!      AVX2 / AVX-512 kernels to use the 4-accumulator FMA tree);
+//!   2. replacing `nalgebra` GEMMs with a controlled `ops::gemm`;
+//!   3. end-to-end x86 SDE differential tests on the cluster_vbx
+//!      flow.
+//!
+//! Codex adversarial review chain (rounds 3 → 5) records the
+//! reasoning. None of that work has shipped — for now, ulp drift
+//! across architectures is the documented contract.
 
 pub(crate) mod arch;
 mod dispatch;

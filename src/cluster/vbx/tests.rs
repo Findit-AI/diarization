@@ -167,45 +167,6 @@ fn vbx_pi_sums_to_one() {
 
 /// The algorithm has no RNG anywhere, so two calls with the same input
 /// must return bit-identical outputs. Catches regressions where, e.g.,
-/// Regression: the public `vbx_iterate` entrypoint must apply the
-/// arch-gated SIMD policy. If a future change reverts it to
-/// `vbx_iterate_inner(..., true)`, the production x86 build would
-/// silently take a different reduction tree from scalar, which can
-/// flip alive-cluster count + ELBO convergence at threshold
-/// boundaries.
-///
-/// We assert public `vbx_iterate(...)` ≡ `vbx_iterate_with_simd(...,
-/// scalar)` on every arch. On aarch64 this is true because NEON
-/// matches scalar bit-exact (verified elsewhere); on x86 it must be
-/// true because the public entrypoint forces scalar via the arch
-/// gate. Codex adversarial review HIGH.
-#[test]
-fn vbx_public_entrypoint_matches_scalar_on_all_archs() {
-  let t = 12;
-  let d = 4;
-  let s = 3;
-  let x = DMatrix::<f64>::from_fn(t, d, |i, j| (i + j) as f64 * 0.05);
-  let phi = DVector::<f64>::from_element(d, 1.5);
-  let qinit = deterministic_qinit(t, s);
-  let public_out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("public vbx_iterate");
-  let scalar_out =
-    super::algo::vbx_iterate_with_simd(&x, &phi, &qinit, 0.07, 0.8, 10, false).expect("scalar");
-  assert_eq!(
-    public_out.elbo_trajectory(),
-    scalar_out.elbo_trajectory(),
-    "production vbx_iterate must match scalar reference on this arch"
-  );
-  for r in 0..t {
-    for c in 0..s {
-      assert_eq!(
-        public_out.gamma()[(r, c)],
-        scalar_out.gamma()[(r, c)],
-        "gamma divergence at ({r}, {c}) — production routing dropped the arch gate"
-      );
-    }
-  }
-}
-
 /// Zero feature columns must error at the boundary rather than
 /// running the EM loop with no PLDA evidence (which produces
 /// finite-looking but meaningless gamma/pi). Codex adversarial

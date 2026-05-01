@@ -7,35 +7,6 @@
 use crate::cluster::ahc::{Error, ahc_init};
 use nalgebra::DMatrix;
 
-/// Regression: the public `ahc_init` entrypoint must apply the
-/// arch-gated SIMD policy. If a future change reverts to
-/// `ahc_init_inner(..., true)`, the production x86 build would
-/// silently take AVX2/AVX-512 pdist whose reduction tree diverges
-/// from scalar/NEON, flipping merges around the threshold cut.
-/// Codex adversarial review HIGH.
-#[test]
-fn ahc_public_entrypoint_matches_scalar_on_all_archs() {
-  // 6 rows × 8 dims; first 3 cluster around one direction, last 3
-  // around a near-orthogonal direction.
-  let mut data = vec![0.0_f64; 6 * 8];
-  for r in 0..3 {
-    data[r * 8] = 1.0;
-    data[r * 8 + 1] = 0.05 * r as f64;
-  }
-  for r in 3..6 {
-    data[r * 8 + 4] = 1.0;
-    data[r * 8 + 5] = 0.05 * (r - 3) as f64;
-  }
-  let m = DMatrix::<f64>::from_row_slice(6, 8, &data);
-  let public = ahc_init(&m, 1.0).expect("public ahc_init");
-  let scalar =
-    crate::cluster::ahc::algo::ahc_init_with_simd(&m, 1.0, false).expect("scalar ahc_init");
-  assert_eq!(
-    public, scalar,
-    "production ahc_init diverged from scalar — arch gate not applied on this build"
-  );
-}
-
 #[test]
 fn rejects_empty_embeddings() {
   let m = DMatrix::<f64>::zeros(0, 4);

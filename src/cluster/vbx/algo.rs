@@ -216,20 +216,16 @@ pub fn vbx_iterate(
   fb: f64,
   max_iters: usize,
 ) -> Result<VbxOutput, Error> {
-  // Arch-gated SIMD policy. NEON dot/axpy match scalar bit-exact on
-  // aarch64 (verified by `ops::differential_tests`); x86 AVX2 /
-  // AVX-512 reductions diverge from scalar, which can flip:
-  //   - alive-cluster count (`sp > SP_ALIVE_THRESHOLD = 1e-7`)
-  //   - convergence (`elbo[t] - elbo[t-1] < epsilon`)
-  //   - cluster ids in the consumer pipeline (`pi`/`gamma` shifts
-  //     into different consumer thresholds)
-  // All cross-architecture-deterministic decisions. To keep VBx
-  // output cross-arch reproducible, gate SIMD to aarch64. Codex
-  // adversarial review HIGH — the arch gate in
-  // `pipeline::assign_embeddings` had no effect on x86 because this
-  // public entrypoint ignored it.
-  let use_simd = cfg!(target_arch = "aarch64");
-  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, use_simd)
+  // SIMD always on. The cross-arch ulp-determinism gate from
+  // earlier review rounds was incomplete — the `gamma.transpose() *
+  // &rho` and `&rho * alpha.transpose()` GEMMs in this function go
+  // through nalgebra/matrixmultiply, which has its own AVX/FMA/NEON
+  // dispatch outside our `use_simd` flag. With GEMM already arch-
+  // dispatched, gating our explicit `ops::dot` calls bought nothing
+  // for cross-arch determinism. Algorithm robustness against
+  // ulp drift is validated empirically (per-fixture parity tests
+  // pin DER ≤ 0.4% vs pyannote on both arches).
+  vbx_iterate_inner(x, phi, qinit, fa, fb, max_iters, true)
 }
 
 /// Test-only entrypoint: same as [`vbx_iterate`] with explicit

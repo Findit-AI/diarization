@@ -26,6 +26,8 @@
 //! threshold-adjacent inputs, the AHC partition is identical between
 //! scalar and SIMD even at threshold offsets of ±1e-13.
 
+use std::collections::HashMap;
+
 use crate::cluster::ahc::error::Error;
 use kodama::{Method, Step, linkage};
 use nalgebra::DMatrix;
@@ -58,36 +60,19 @@ use nalgebra::DMatrix;
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
-  // ── Threshold-sensitive SIMD gating ────────────────────────────
-  //
-  // `fcluster_distance_remap` cuts merges at `subtree_max[node] <=
-  // threshold` (community-1: 0.6). A one-ulp distance drift around
-  // that boundary can split or merge speakers differently. We have
-  // two SIMD reduction families that produce different bit patterns
-  // for the same input:
-  //   - **scalar + aarch64 NEON**: 4-accumulator FMA tree
-  //     (`f64::mul_add`). Verified bit-identical by
-  //     `ops::differential_tests::pdist_euclidean_well_conditioned_match`.
-  //   - **x86 AVX2 / AVX-512**: 2-accumulator wide-lane FMA + tree
-  //     reduction (`_mm256_fmadd_pd` / `_mm512_reduce_add_pd`).
-  //     Different reduction → different ulps near boundaries.
-  //
-  // Codex adversarial review HIGH (this finding): an AHC partition
-  // computed under x86 SIMD can disagree with the same input run on
-  // aarch64 or scalar. To keep AHC cross-architecture deterministic,
-  // gate SIMD to aarch64 only — NEON matches scalar bit-exact, x86
-  // forces scalar (slower for the N² loop but reproducible).
-  //
-  // VBx / centroid / Hungarian production paths in
-  // `pipeline::assign_embeddings` have analogous concerns
-  // (`sp > SP_ALIVE_THRESHOLD`, alive-cluster count, argmax). They
-  // currently still use `use_simd=true`; tightening those is a
-  // follow-up. The AHC-specific fix here is the one Codex flagged
-  // as the most acute — partition equivalence is the load-bearing
-  // contract for downstream VBx and Hungarian, and is the
-  // closest-to-threshold decision in the whole pipeline.
-  let use_simd = cfg!(target_arch = "aarch64");
-  ahc_init_inner(embeddings, threshold, use_simd)
+  // SIMD always on. Earlier review rounds added a `cfg!(target_arch
+  // = "aarch64")` gate to chase cross-arch bit-equality, but a
+  // later round caught that nalgebra/matrixmultiply already runs
+  // its own AVX/FMA/NEON GEMM under `pipeline::assign_embeddings`,
+  // outside this gate. Cross-arch ulp determinism was never
+  // actually deliverable, so the gate was theatre. NEON matches
+  // scalar bit-exact at the primitive level (verified by
+  // `ops::differential_tests`); x86 SIMD diverges by ulps from
+  // scalar but tracks matrixmultiply's GEMM precision. Algorithm
+  // robustness against those ulp drifts is validated empirically
+  // by the per-fixture parity tests vs pyannote (DER ≤ 0.4% on
+  // captured fixtures across both arches).
+  ahc_init_inner(embeddings, threshold, true)
 }
 
 /// Test-only entrypoint: identical to [`ahc_init`] but with the
@@ -261,8 +246,8 @@ fn fcluster_distance_remap(steps: &[Step<f64>], n: usize, threshold: f64) -> Vec
   // Second pass: scan leaves 0..n and assign encounter-order labels.
   let mut canonical = vec![0usize; n];
   let mut next_label = 0usize;
-  let mut label_of_class: std::collections::HashMap<usize, usize> =
-    std::collections::HashMap::new();
+  let mut label_of_class: HashMap<usize, usize> =
+    HashMap::new();
   for (i, slot) in canonical.iter_mut().enumerate() {
     *slot = *label_of_class.entry(raw[i]).or_insert_with(|| {
       let l = next_label;

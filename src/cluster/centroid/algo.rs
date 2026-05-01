@@ -49,16 +49,12 @@ pub fn weighted_centroids(
   embeddings: &DMatrix<f64>,
   sp_threshold: f64,
 ) -> Result<DMatrix<f64>, Error> {
-  // Arch-gated SIMD: NEON axpy matches scalar bit-exact on aarch64;
-  // x86 AVX2/AVX-512 axpy uses different reduction trees in the
-  // dot-product step that follows in the cosine-distance stage.
-  // Centroid coordinates feed `sp > sp_threshold` (alive-cluster
-  // dropout) AND the stage-6 cosine ranking that drives Hungarian
-  // argmax — both threshold-sensitive. Force scalar on x86 to keep
-  // the output cross-arch deterministic. Codex adversarial review
-  // HIGH (companion fix to `vbx_iterate`).
-  let use_simd = cfg!(target_arch = "aarch64");
-  weighted_centroids_inner(q, sp, embeddings, sp_threshold, use_simd)
+  // SIMD always on; see `cluster::vbx::vbx_iterate` for the
+  // rationale (matrixmultiply GEMM already arch-dispatches inside
+  // VBx, so a use_simd gate here was never sufficient for cross-
+  // arch bit-equality, and algorithm robustness is validated
+  // empirically by parity tests).
+  weighted_centroids_inner(q, sp, embeddings, sp_threshold, true)
 }
 
 /// Test-only entrypoint: identical to [`weighted_centroids`] but with
