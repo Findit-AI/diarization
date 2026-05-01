@@ -113,20 +113,20 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   let (max_iters_arr, _) = read_npz_array::<i64>(&vbx_path, "max_iters");
 
   let pipeline_input = AssignEmbeddingsInput::new(
-      &embeddings,
-      num_chunks,
-      num_speakers,
-      &segmentations,
-      num_frames_per_chunk,
-      &post_plda,
-      &phi,
-      &train_chunk_idx,
-      &train_speaker_idx,
-      threshold_data[0],
-      fa_arr[0],
-      fb_arr[0],
-      max_iters_arr[0] as usize,
-    );
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames_per_chunk,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
+    threshold_data[0],
+    fa_arr[0],
+    fb_arr[0],
+    max_iters_arr[0] as usize,
+  );
   let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
 
   let recon_path = fixture(&format!("{base}/reconstruction.npz"));
@@ -144,17 +144,17 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   let min_duration_off = min_dur_off_arr[0];
 
   let recon_input = ReconstructInput::new(
-      &segmentations,
-      num_chunks,
-      num_frames_per_chunk,
-      num_speakers,
-      &hard_clusters,
-      &count_u8,
-      num_output_frames,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    num_chunks,
+    num_frames_per_chunk,
+    num_speakers,
+    &hard_clusters,
+    &count_u8,
+    num_output_frames,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   let grid = reconstruct(&recon_input).expect("reconstruct");
   let num_clusters = grid.len() / num_output_frames;
 

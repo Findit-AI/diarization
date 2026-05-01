@@ -187,20 +187,20 @@ fn run_pipeline_parity(fixture_dir: &str) {
 
   // Run the port.
   let input = AssignEmbeddingsInput::new(
-      &embeddings,
-      num_chunks,
-      num_speakers,
-      &segmentations,
-      num_frames,
-      &post_plda,
-      &phi,
-      &train_chunk_idx,
-      &train_speaker_idx,
-      threshold,
-      fa,
-      fb,
-      max_iters,
-    );
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames,
+    &post_plda,
+    &phi,
+    &train_chunk_idx,
+    &train_speaker_idx,
+    threshold,
+    fa,
+    fb,
+    max_iters,
+  );
   let got = assign_embeddings(&input).expect("assign_embeddings");
 
   // Captured ground truth.

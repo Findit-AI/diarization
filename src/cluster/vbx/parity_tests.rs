@@ -184,7 +184,12 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let mut elbo_max_err_iter = 0usize;
   let mut elbo_max_err_got = 0.0f64;
   let mut elbo_max_err_want = 0.0f64;
-  for (ii, (got, want)) in out.elbo_trajectory().iter().zip(elbo_flat.iter()).enumerate() {
+  for (ii, (got, want)) in out
+    .elbo_trajectory()
+    .iter()
+    .zip(elbo_flat.iter())
+    .enumerate()
+  {
     let err = (got - want).abs();
     if err > elbo_max_err {
       elbo_max_err = err;

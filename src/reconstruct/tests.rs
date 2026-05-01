@@ -31,17 +31,17 @@ fn rejects_nan_segmentation() {
   let hard_clusters = vec![vec![0i32, 1i32]];
   let count = vec![1u8; 4];
   let input = ReconstructInput::new(
-      &segmentations,
-      num_chunks,
-      num_frames_per_chunk,
-      num_speakers,
-      &hard_clusters,
-      &count,
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    num_chunks,
+    num_frames_per_chunk,
+    num_speakers,
+    &hard_clusters,
+    &count,
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
 
@@ -52,17 +52,17 @@ fn rejects_pos_inf_segmentation() {
   segmentations[0] = f64::INFINITY;
   let hard_clusters = vec![vec![0i32, 1i32]];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[1u8; 4],
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
 
@@ -132,17 +132,17 @@ fn rejects_negative_cluster_id_other_than_unmatched() {
   let hard_clusters = vec![vec![0i32, -1i32]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[1u8; 4],
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -154,17 +154,17 @@ fn accepts_unmatched_sentinel() {
   let hard_clusters = vec![vec![0i32, UNMATCHED]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[1u8; 4],
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(reconstruct(&input).is_ok());
 }
 
@@ -178,17 +178,17 @@ fn rejects_cluster_id_above_max() {
   let hard_clusters = vec![vec![0i32, MAX_CLUSTER_ID + 1]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[1u8; 4],
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -204,17 +204,17 @@ fn rejects_count_above_max_cluster_id() {
   let segmentations = vec![0.5_f64; 8];
   let hard_clusters = vec![vec![0i32, 1i32]];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &count,
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &count,
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -253,10 +253,7 @@ fn rttm_relabels_by_str_sorted_cluster_id() {
 /// ordering directly.
 #[test]
 fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
-  let spans = vec![
-    RttmSpan::new(0, 0.0, 1.0),
-    RttmSpan::new(1, 1.0, 1.0),
-  ];
+  let spans = vec![RttmSpan::new(0, 0.0, 1.0), RttmSpan::new(1, 1.0, 1.0)];
   let lines = spans_to_rttm_lines(&spans, "uri");
   assert!(lines[0].contains("SPEAKER_00"));
   assert!(lines[1].contains("SPEAKER_01"));
@@ -268,10 +265,7 @@ fn rttm_relabel_identity_when_cluster_ids_match_sort_order() {
 /// clusters where the decimal-lex order matters.
 #[test]
 fn rttm_relabel_str_sort_orders_10_before_2() {
-  let spans = vec![
-    RttmSpan::new(2, 0.0, 1.0),
-    RttmSpan::new(10, 1.0, 1.0),
-  ];
+  let spans = vec![RttmSpan::new(2, 0.0, 1.0), RttmSpan::new(10, 1.0, 1.0)];
   let lines = spans_to_rttm_lines(&spans, "uri");
   // Str-sort: "10" < "2", so cluster 10 → SPEAKER_00, cluster 2 → SPEAKER_01.
   assert!(
@@ -297,17 +291,17 @@ fn rejects_zero_output_frames() {
   let segmentations = vec![0.5_f64; 8];
   let hard_clusters = vec![vec![0i32, 1i32]];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[],
-      0,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[],
+    0,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
 
@@ -318,16 +312,16 @@ fn rejects_neg_inf_segmentation() {
   segmentations[5] = f64::NEG_INFINITY;
   let hard_clusters = vec![vec![0i32, 1i32]];
   let input = ReconstructInput::new(
-      &segmentations,
-      1,
-      4,
-      2,
-      &hard_clusters,
-      &[1u8; 4],
-      4,
-      chunks_sw,
-      frames_sw,
-      None,
-    );
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+    None,
+  );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }

@@ -72,23 +72,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let plda = PldaTransform::new()?;
 
   let input = OfflineInput::new(
-      &raw_flat,
-      num_chunks,
-      num_speakers,
-      &segmentations,
-      num_frames_per_chunk,
-      &count_u8,
-      num_output_frames,
-      chunks_sw,
-      frames_sw,
-      &plda,
-      threshold[0],
-      fa[0],
-      fb[0],
-      max_iters[0] as usize,
-      min_dur_off[0],
-      None,
-    );
+    &raw_flat,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames_per_chunk,
+    &count_u8,
+    num_output_frames,
+    chunks_sw,
+    frames_sw,
+    &plda,
+    threshold[0],
+    fa[0],
+    fb[0],
+    max_iters[0] as usize,
+    min_dur_off[0],
+    None,
+  );
   let out = diarize_offline(&input)?;
   for line in spans_to_rttm_lines(&out.spans(), "clip_16k") {
     println!("{line}");
