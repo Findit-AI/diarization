@@ -1,15 +1,21 @@
-//! Run `diarization::Diarizer` on a fixed audio clip and dump RTTM (NIST format)
-//! to stdout. Pair with `python/reference.py` for the pyannote.audio
-//! reference + `python/score.py` for DER computation.
+//! Run `diarization::streaming::StreamingOfflineDiarizer` on a fixed audio clip
+//! and dump RTTM (NIST format) to stdout. Pair with `python/reference.py` for
+//! the pyannote.audio reference + `python/score.py` for DER computation.
+//!
+//! Pushes the entire clip as a single voice range so the streaming-offline
+//! path is exercised end-to-end on the same input the offline pipeline sees.
+//! With one voice range covering the whole clip, the result must match the
+//! offline pipeline modulo plumbing.
 //!
 //! Usage: `cargo run --release --manifest-path tests/parity/Cargo.toml -- <clip.wav>`
 //! (run from the dia crate root).
 
 use anyhow::{Context, Result, bail};
 use diarization::{
-  diarizer::{Diarizer, DiarizerOptions},
   embed::EmbedModel,
+  plda::PldaTransform,
   segment::SegmentModel,
+  streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer},
 };
 
 fn main() -> Result<()> {
@@ -28,9 +34,6 @@ fn main() -> Result<()> {
     bail!("expected mono; clip has {} channels", spec.channels);
   }
 
-  // Accept either 16-bit PCM (canonical) or 32-bit float (Phase-0
-  // canonical fixture is `pcm_f32le`). hound dispatches by the
-  // sample-format/bits combination.
   let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
     (hound::SampleFormat::Int, 16) => reader
       .samples::<i16>()
@@ -46,29 +49,27 @@ fn main() -> Result<()> {
     ),
   };
 
-  // Segment + embed models. Paths can be overridden via env vars.
   let seg_path = std::env::var("DIA_SEGMENT_MODEL_PATH")
     .unwrap_or_else(|_| "models/segmentation-3.0.onnx".into());
   let emb_path = std::env::var("DIA_EMBED_MODEL_PATH")
     .unwrap_or_else(|_| "models/wespeaker_resnet34_lm.onnx".into());
   let mut seg = SegmentModel::from_file(&seg_path).context("load segment model")?;
   let mut emb = EmbedModel::from_file(&emb_path).context("load embed model")?;
+  let plda = PldaTransform::new().context("load plda")?;
 
-  let mut d = Diarizer::new(DiarizerOptions::default());
-  let mut spans = Vec::new();
-  d.process_samples(&mut seg, &mut emb, &samples, |s| spans.push(s))
-    .context("process_samples")?;
-  d.finish_stream(&mut seg, &mut emb, |s| spans.push(s))
-    .context("finish_stream")?;
+  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
+  diarizer
+    .push_voice_range(&mut seg, &mut emb, 0, &samples)
+    .context("push_voice_range")?;
+  let spans = diarizer.finalize(&plda).context("finalize")?;
 
-  // Dump RTTM (NIST format).
   let uri = std::path::Path::new(clip_path)
     .file_stem()
     .and_then(|s| s.to_str())
     .unwrap_or("clip");
   for s in &spans {
-    let start_sec = s.range().start_pts() as f64 / 16_000.0;
-    let dur_sec = (s.range().end_pts() - s.range().start_pts()) as f64 / 16_000.0;
+    let start_sec = s.start_sample() as f64 / 16_000.0;
+    let dur_sec = (s.end_sample() - s.start_sample()) as f64 / 16_000.0;
     println!(
       "SPEAKER {uri} 1 {:.3} {:.3} <NA> <NA> SPK_{:02} <NA> <NA>",
       start_sec,
@@ -77,10 +78,10 @@ fn main() -> Result<()> {
     );
   }
   eprintln!(
-    "# dia: {} spans, {} speakers, total_samples_pushed = {}",
+    "# dia (streaming-offline): {} spans, {} voice ranges, total_samples = {}",
     spans.len(),
-    d.num_speakers(),
-    d.total_samples_pushed()
+    diarizer.num_ranges(),
+    samples.len(),
   );
   Ok(())
 }

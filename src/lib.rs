@@ -1,50 +1,61 @@
-//! Sans-I/O streaming speaker diarization for variable-length VAD-filtered audio.
+//! Sans-I/O speaker diarization with pyannote-equivalent accuracy.
 //!
 //! `diarization` is the Rust port of [`pyannote.audio`](https://github.com/pyannote/pyannote-audio)'s
-//! speaker-diarization pipeline, restructured around incremental push-based
-//! state machines so it can run live on streaming audio. Inputs are arbitrary-
-//! length pushes (e.g., per VAD speech region); outputs are emitted per closed
-//! speaker turn as windows finalize.
+//! speaker-diarization pipeline. Two entrypoints, both running the same
+//! pyannote `cluster_vbx` clustering pipeline (PLDA → AHC → VBx →
+//! centroid → cosine → Hungarian → reconstruct):
+//!
+//! - [`offline::OwnedDiarizationPipeline`] — owned-audio batch path.
+//!   Caller passes the entire 16 kHz mono PCM at once.
+//! - [`streaming::StreamingOfflineDiarizer`] — voice-range-driven
+//!   streaming path. Caller drives a VAD externally and pushes one
+//!   voice range at a time; heavy stages 1+2 run eagerly per range,
+//!   global clustering is deferred to `finalize`. Same DER as the
+//!   offline path, plus per-range latency for the heavy work.
 //!
 //! ## Modules
 //!
 //! - [`segment`]: speaker-segmentation state machine
-//!   (pyannote/segmentation-3.0 ONNX). Emits `Action::Activity` (per-(window,
-//!   slot) speaker presence) and `Action::SpeakerScores` (per-window per-frame
-//!   raw probabilities for downstream reconstruction).
-//! - [`embed`]: speaker-fingerprint generation (WeSpeaker ResNet34 ONNX +
-//!   kaldi fbank). High-level `EmbedModel::embed` (sliding-window mean) and
-//!   the masked variant `embed_masked` (rev-8 gather-and-embed).
-//! - [`cluster`]: cross-window speaker linking. Online streaming `Clusterer`
-//!   plus offline batch `cluster_offline` with spectral (default) and
-//!   agglomerative methods.
-//! - [`diarizer`]: top-level `Diarizer` orchestrator. Combines the above three
-//!   plus a per-frame reconstruction state machine matching pyannote's
-//!   `SpeakerDiarization.apply` pipeline.
+//!   (pyannote/segmentation-3.0 ONNX).
+//! - [`embed`]: speaker-fingerprint generation (WeSpeaker ResNet34
+//!   ONNX + kaldi fbank). `EmbedModel::embed_chunk_with_frame_mask`
+//!   is the masked variant pyannote uses.
+//! - [`plda`]: WeSpeaker PLDA whitening + length-norm.
+//! - [`cluster`]: pyannote `cluster_vbx` primitives (AHC, VBx,
+//!   centroid, Hungarian) plus a generic offline `cluster_offline`.
+//! - [`pipeline`]: glues PLDA → cluster_vbx into a single
+//!   `assign_embeddings` call.
+//! - [`reconstruct`]: per-frame post-clustering smoothing.
+//! - [`offline`]: owned-audio orchestrator (`OwnedDiarizationPipeline`).
+//! - [`streaming`]: voice-range-driven orchestrator
+//!   (`StreamingOfflineDiarizer`).
 //!
-//! ## Quick start
+//! ## Quick start (streaming-offline)
 //!
 //! ```no_run
 //! # #[cfg(feature = "ort")]
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! use diarization::diarizer::{Diarizer, DiarizerOptions};
 //! use diarization::embed::EmbedModel;
+//! use diarization::plda::PldaTransform;
 //! use diarization::segment::SegmentModel;
+//! use diarization::streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer};
 //!
 //! let mut seg = SegmentModel::from_file("models/segmentation-3.0.onnx")?;
 //! let mut emb = EmbedModel::from_file("models/wespeaker_resnet34_lm.onnx")?;
-//! let mut d = Diarizer::new(DiarizerOptions::default());
+//! let plda = PldaTransform::new()?;
+//! let mut d = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
 //!
+//! // Caller drives VAD externally; pushes one voice range at a time.
 //! let samples: Vec<f32> = vec![/* 16 kHz mono PCM */];
-//! d.process_samples(&mut seg, &mut emb, &samples, |span| {
+//! d.push_voice_range(&mut seg, &mut emb, 0, &samples)?;
+//! for span in d.finalize(&plda)? {
 //!   println!(
 //!     "[{:.2}s..{:.2}s] speaker {}",
-//!     span.range().start_pts() as f64 / 16_000.0,
-//!     span.range().end_pts() as f64 / 16_000.0,
+//!     span.start_sample() as f64 / 16_000.0,
+//!     span.end_sample() as f64 / 16_000.0,
 //!     span.speaker_id()
 //!   );
-//! })?;
-//! d.finish_stream(&mut seg, &mut emb, |_| {})?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -58,13 +69,7 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 pub mod cluster;
-pub mod diarizer;
 pub mod embed;
-// Phase 5c (this commit): the full pyannote `cluster_vbx` pipeline
-// (PLDA → AHC → VBx → centroid → cosine → Hungarian → reconstruct)
-// is now publicly available alongside the streaming `Diarizer` /
-// online clusterer. See `offline::OfflineDiarizer` for the batch
-// owned-audio entrypoint.
 pub mod segment;
 
 // Numerical primitives shared across the algorithm modules. Three-tier

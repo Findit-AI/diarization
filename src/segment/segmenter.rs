@@ -113,10 +113,9 @@ pub struct Segmenter {
   /// failure (the `WindowId` stayed in `pending`, but no caller-
   /// reachable handle remained to retry it). Codex review HIGH.
   ///
-  /// Mirrors `diarization::diarizer::Diarizer::pending_seg_inference` for the
-  /// Layer-2 path. `cfg`-gated because it is only consumed by the
-  /// `ort`-feature streaming helpers; the fields stay always-present
-  /// to keep `Segmenter` layout stable across feature builds.
+  /// `cfg`-gated because it is only consumed by the `ort`-feature
+  /// streaming helpers; the field stays always-present to keep
+  /// `Segmenter` layout stable across feature builds.
   pub(crate) pending_inference: Option<(WindowId, alloc::boxed::Box<[f32]>)>,
 }
 
@@ -327,7 +326,7 @@ impl Segmenter {
     }
 
     // Emit raw per-(slot, frame) probabilities BEFORE any activities for
-    // the same window so a downstream `Diarizer` can buffer scores per
+    // the same window so a downstream consumer can buffer scores per
     // `WindowId` and then process the activities that follow.
     self.pending_actions.push_back(Action::SpeakerScores {
       id,
@@ -626,12 +625,8 @@ impl Segmenter {
   /// reconstruction pump — it ignores the not-yet-emitted tail anchor.
   /// Use [`Self::tail_safe_finalization_boundary_samples`] instead.
   /// Codex review HIGH.
-  ///
-  /// `pub(crate)` because the only consumer today is
-  /// [`Diarizer`](crate::diarizer)'s reconstruction state machine
-  /// (spec §5.9 frame-finalization boundary). Expose as `pub` if a
-  /// real external use case materializes.
-  #[allow(dead_code)] // Consumer (`diarization::Diarizer`) lands in a later phase.
+  #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn peek_next_window_start(&self) -> u64 {
     if self.finished {
       return u64::MAX;
@@ -641,9 +636,7 @@ impl Segmenter {
 
   /// Smallest absolute SAMPLE position past which downstream
   /// reconstruction can safely finalize frames — i.e. no future or
-  /// already-pending window can still contribute past this point. Used
-  /// by [`Diarizer::drain`](crate::diarizer::Diarizer) to advance its
-  /// frame finalization boundary.
+  /// already-pending window can still contribute past this point.
   ///
   /// Pre-finish: `min(next regular window start, earliest pending
   /// window start, total_samples_pushed - WINDOW_SAMPLES)`. The third
@@ -658,6 +651,7 @@ impl Segmenter {
   ///
   /// Post-finish + all pending consumed: `u64::MAX` (everything
   /// finalizes).
+  #[cfg(test)]
   pub(crate) fn tail_safe_finalization_boundary_samples(&self) -> u64 {
     if self.finished && self.pending.is_empty() {
       return u64::MAX;
@@ -1030,12 +1024,9 @@ mod tests {
 
   /// Codex review HIGH: `clear()` must drop any stashed Layer-2
   /// inference so a fresh session doesn't accidentally retry one from
-  /// the previous session. The Layer-2 streaming helpers
-  /// (`process_samples` / `finish_stream` under `feature = "ort"`)
-  /// populate this field on transient errors; we exercise the field
-  /// directly here because the helpers themselves require an ONNX
-  /// runtime not available in unit tests, mirroring the diarizer-level
-  /// `clear_resets_pending_seg_inference` test.
+  /// the previous session. We exercise the field directly here because
+  /// the streaming helpers populating it require an ONNX runtime not
+  /// available in unit tests.
   #[test]
   fn clear_drops_layer2_pending_inference() {
     let mut s = Segmenter::new(opts());
@@ -1186,7 +1177,7 @@ mod tests {
   }
 
   /// After finish + all pending consumed, the tail-safe boundary
-  /// returns u64::MAX so the diarizer can finalize everything.
+  /// returns u64::MAX so downstream consumers can finalize everything.
   #[test]
   fn tail_safe_finalization_boundary_after_finish_and_drain() {
     let mut s = Segmenter::new(opts());

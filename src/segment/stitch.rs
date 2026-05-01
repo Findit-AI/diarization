@@ -39,8 +39,7 @@ pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
 /// `u32` helper above truncates after ~74 h of audio at 16 kHz and
 /// would silently wrap public timestamps.
 ///
-/// Codex review MEDIUM. Spec §15 #54 — folded back from the parallel
-/// helper that previously lived in `diarization::diarizer::reconstruct`.
+/// Codex review MEDIUM. Spec §15 #54.
 #[inline]
 pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
   let n = frame_idx * WINDOW_SAMPLES as u64;

@@ -152,10 +152,8 @@ pub enum Action {
   /// **immediately before** the `Activity` events for the same `id`.
   ///
   /// Carries the powerset-decoded per-frame voice probabilities for
-  /// each of the 3 speaker slots. Used by `diarization::Diarizer` for
-  /// pyannote-style per-frame reconstruction (per-frame per-cluster
-  /// activation overlap-add, count-bounded argmax). Most callers
-  /// can ignore this variant via the `_ => ...` arm of `match`.
+  /// each of the 3 speaker slots. Most callers can ignore this
+  /// variant via the `_ => ...` arm of `match`.
   ///
   /// Layout: `raw_probs[slot][frame]`. `MAX_SPEAKER_SLOTS = 3`,
   /// `FRAMES_PER_WINDOW = 589`. ~7 KB allocation per emission;

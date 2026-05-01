@@ -8,9 +8,7 @@ use crate::embed::options::{EMBEDDING_DIM, NORM_EPSILON};
 ///
 /// **Invariant:** `||embedding.as_array()||₂ > NORM_EPSILON`. The crate
 /// guarantees this — the only public constructor (`normalize_from`)
-/// returns `None` for degenerate inputs. Internal downstream code
-/// (e.g., `Clusterer::submit`) can rely on this for similarity
-/// computations being well-defined.
+/// returns `None` for degenerate inputs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Embedding(pub(crate) [f32; EMBEDDING_DIM]);
 

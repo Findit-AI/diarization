@@ -1,14 +1,8 @@
-//! Speaker clustering — online streaming ([`Clusterer`]), offline batch
-//! ([`cluster_offline`]), and the pyannote `cluster_vbx`-pipeline
-//! primitives ([`ahc`], [`vbx`], [`centroid`], [`hungarian`]).
+//! Speaker clustering — generic offline batch [`cluster_offline`] plus
+//! the pyannote `cluster_vbx`-pipeline primitives ([`ahc`], [`vbx`],
+//! [`centroid`], [`hungarian`]).
 //!
-//! # Online path
-//! [`Clusterer`] accepts one embedding at a time and maintains a set of
-//! per-speaker centroids.  Call [`Clusterer::submit`] for each embedding
-//! produced by `diarization::embed`; it returns a [`ClusterAssignment`] that carries
-//! the globally-unique speaker id and whether a new speaker was opened.
-//!
-//! # Offline path
+//! # Generic offline path
 //! [`cluster_offline`] takes a slice of embeddings and returns a
 //! `Vec<u64>` of speaker labels (one per embedding). Dispatches to
 //! [`agglomerative`](OfflineMethod::Agglomerative) (Single / Complete /
@@ -31,21 +25,17 @@ pub mod vbx;
 
 mod error;
 mod options;
-mod types;
 
 pub use crate::embed::Embedding;
 pub use error::Error;
 pub use offline::cluster_offline;
-pub use online::Clusterer;
 pub use options::{
-  ClusterOptions, DEFAULT_EMA_ALPHA, DEFAULT_SIMILARITY_THRESHOLD, Linkage, MAX_AUTO_SPEAKERS,
-  MAX_OFFLINE_INPUT, OfflineClusterOptions, OfflineMethod, OverflowStrategy, UpdateStrategy,
+  DEFAULT_SIMILARITY_THRESHOLD, Linkage, MAX_AUTO_SPEAKERS, MAX_OFFLINE_INPUT,
+  OfflineClusterOptions, OfflineMethod,
 };
-pub use types::{ClusterAssignment, SpeakerCentroid};
 
 mod agglomerative;
 mod offline;
-mod online;
 mod spectral;
 
 #[cfg(test)]
@@ -57,10 +47,6 @@ mod tests;
 // would silently regress Send/Sync auto-derive on the public types.
 const _: fn() = || {
   fn assert_send_sync<T: Send + Sync>() {}
-  assert_send_sync::<Clusterer>();
-  assert_send_sync::<ClusterOptions>();
   assert_send_sync::<OfflineClusterOptions>();
-  assert_send_sync::<ClusterAssignment>();
-  assert_send_sync::<SpeakerCentroid>();
   assert_send_sync::<Error>();
 };

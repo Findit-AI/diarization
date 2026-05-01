@@ -2,15 +2,6 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  /// `Clusterer::submit` exceeded `max_speakers` AND
-  /// `overflow_strategy = Reject`. Caller decides whether to
-  /// proceed (e.g., bump the cap, run offline clustering, or drop).
-  #[error("speaker cap reached ({cap}) and overflow_strategy = Reject")]
-  TooManySpeakers {
-    /// The `max_speakers` cap that was hit.
-    cap: u32,
-  },
-
   /// `cluster_offline` was passed an empty embeddings list.
   #[error("input embeddings list is empty")]
   EmptyInput,
@@ -73,12 +64,6 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn too_many_speakers_message() {
-    let e = Error::TooManySpeakers { cap: 5 };
-    assert!(format!("{e}").contains("5"));
-  }
 
   #[test]
   fn target_exceeds_input_message() {

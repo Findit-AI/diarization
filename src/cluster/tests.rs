@@ -1,30 +1,7 @@
-//! Cross-component cluster tests (online + offline) per spec §9.
-//!
-//! Verifies that on the same well-separated synthetic input the online
-//! `Clusterer` and the offline agglomerative path produce semantically
-//! equivalent groupings. Cheap sanity check that the two backends agree
-//! on a problem they should both find easy.
+//! Cross-component cluster tests for `cluster_offline` per spec §9.
 
 use super::*;
 use crate::cluster::test_util::perturbed_unit;
-
-#[test]
-fn online_separates_two_well_clustered_groups() {
-  let mut c = Clusterer::new(ClusterOptions::default());
-  // Group A: 5 near-unit(0).
-  for s in [0.0, 0.05, -0.05, 0.1, -0.1] {
-    c.submit(&perturbed_unit(0, s)).unwrap();
-  }
-  // Group B: 5 near-unit(10).
-  for s in [0.0, 0.05, -0.05, 0.1, -0.1] {
-    c.submit(&perturbed_unit(10, s)).unwrap();
-  }
-  assert_eq!(
-    c.num_speakers(),
-    2,
-    "online clusterer should open exactly 2 speakers on these well-separated groups"
-  );
-}
 
 #[test]
 fn agglomerative_average_matches_two_groups() {
