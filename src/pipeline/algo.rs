@@ -171,7 +171,16 @@ impl<'a> AssignEmbeddingsInput<'a> {
 ///      does this to avoid artificial cluster inflation).
 ///   4. A new fixture captured with `num_clusters` forcing != auto.
 pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
-  assign_embeddings_inner(input, true)
+  // Match `cluster::ahc::ahc_init`'s arch-gated SIMD policy. NEON
+  // matches scalar bit-exact (verified by
+  // `ops::differential_tests`), so aarch64 keeps SIMD on. x86 AVX2
+  // / AVX-512 reductions diverge from scalar, which can flip
+  // threshold-sensitive decisions (AHC merge cut, VBx alive-cluster
+  // count, centroid weighted-sum dropouts). Force scalar on x86 to
+  // keep the cluster_vbx output cross-architecture deterministic.
+  // Codex adversarial review HIGH.
+  let use_simd = cfg!(target_arch = "aarch64");
+  assign_embeddings_inner(input, use_simd)
 }
 
 /// Test-only entrypoint: identical to [`assign_embeddings`] but

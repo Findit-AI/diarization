@@ -58,12 +58,36 @@ use nalgebra::DMatrix;
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
-  // Production: SIMD on. Scalar and NEON now produce bit-identical
-  // pdist outputs on aarch64 (scalar uses `f64::mul_add` and the
-  // same 4-acc reduction tree as NEON; verified by
-  // `ops::differential_tests::pdist_euclidean_well_conditioned_match`).
-  // See module docs for the precision contract.
-  ahc_init_inner(embeddings, threshold, true)
+  // ── Threshold-sensitive SIMD gating ────────────────────────────
+  //
+  // `fcluster_distance_remap` cuts merges at `subtree_max[node] <=
+  // threshold` (community-1: 0.6). A one-ulp distance drift around
+  // that boundary can split or merge speakers differently. We have
+  // two SIMD reduction families that produce different bit patterns
+  // for the same input:
+  //   - **scalar + aarch64 NEON**: 4-accumulator FMA tree
+  //     (`f64::mul_add`). Verified bit-identical by
+  //     `ops::differential_tests::pdist_euclidean_well_conditioned_match`.
+  //   - **x86 AVX2 / AVX-512**: 2-accumulator wide-lane FMA + tree
+  //     reduction (`_mm256_fmadd_pd` / `_mm512_reduce_add_pd`).
+  //     Different reduction → different ulps near boundaries.
+  //
+  // Codex adversarial review HIGH (this finding): an AHC partition
+  // computed under x86 SIMD can disagree with the same input run on
+  // aarch64 or scalar. To keep AHC cross-architecture deterministic,
+  // gate SIMD to aarch64 only — NEON matches scalar bit-exact, x86
+  // forces scalar (slower for the N² loop but reproducible).
+  //
+  // VBx / centroid / Hungarian production paths in
+  // `pipeline::assign_embeddings` have analogous concerns
+  // (`sp > SP_ALIVE_THRESHOLD`, alive-cluster count, argmax). They
+  // currently still use `use_simd=true`; tightening those is a
+  // follow-up. The AHC-specific fix here is the one Codex flagged
+  // as the most acute — partition equivalence is the load-bearing
+  // contract for downstream VBx and Hungarian, and is the
+  // closest-to-threshold decision in the whole pipeline.
+  let use_simd = cfg!(target_arch = "aarch64");
+  ahc_init_inner(embeddings, threshold, use_simd)
 }
 
 /// Test-only entrypoint: identical to [`ahc_init`] but with the

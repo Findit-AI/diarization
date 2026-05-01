@@ -29,6 +29,16 @@ ort = ["dep:ort"]
 # in addition to the existing `from_file` (ONNX). See
 # `scripts/export-wespeaker-torchscript.py` for the model export step.
 tch = ["dep:tch"]
+# Pulls in the sister `silero` crate (path dep at `../silero/`) as an
+# optional dependency, used only by the `run_streaming_pipeline` example
+# to drive VAD externally. The crate's lib + non-streaming examples do
+# NOT depend on silero, so a clean checkout can `cargo build` /
+# `cargo test --no-default-features --features ort` without the sibling
+# directory present. Enable this feature when building the streaming
+# example or developing with VAD in scope. Codex review CRITICAL: prior
+# `silero = { path = "../silero" }` as a non-optional dep broke clean
+# CI checkouts whenever `../silero/` wasn't materialized alongside.
+silero-vad = ["dep:silero"]
 # Internal feature for benchmarks. Exposes pub(crate) modules
 # (`vbx`, `ahc`, `centroid`, `pipeline`, `reconstruct`, `hungarian`,
 # `plda`) as `pub` so external benches in `benches/*.rs` can call the
@@ -81,12 +91,12 @@ kodama = "0.3"
 # buffer — allocation-free.
 itoa = "1"
 
-# Phase 5e: silero VAD for streaming voice-range detection.
-# Production flow: silero gates the heavy diarizer pipeline so we
-# don't run segmentation/embedding on silence. The crate is sister-
+# Phase 5e: silero VAD for streaming voice-range detection. Sister
 # project at `findit-studio/silero` (path dep until both publish to
-# the same registry).
-silero = { path = "../silero" }
+# the same registry). Optional + feature-gated so clean checkouts
+# without `../silero/` materialized still build the lib (Codex review
+# CRITICAL). Enable via `--features silero-vad`.
+silero = { path = "../silero", optional = true }
 
 
 [dev-dependencies]
@@ -103,6 +113,11 @@ npyz = { version = "0.9", features = ["npz"] }
 path = "examples/run_owned_pipeline_tch.rs"
 name = "run_owned_pipeline_tch"
 required-features = ["tch", "ort"]
+
+[[example]]
+path = "examples/run_streaming_pipeline.rs"
+name = "run_streaming_pipeline"
+required-features = ["silero-vad", "ort"]
 
 [[bench]]
 path = "benches/segment.rs"
