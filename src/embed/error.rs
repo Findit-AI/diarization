@@ -38,6 +38,30 @@ pub enum Error {
   #[error("frame_mask is empty or has no active frames")]
   EmptyOrInactiveMask,
 
+  /// `chunk_samples.len()` passed to
+  /// `EmbedModel::embed_chunk_with_frame_mask` doesn't match the
+  /// pyannote-style 10s chunk size (`segment::WINDOW_SAMPLES`).
+  /// The ORT/tch backends compute fbank from the whole chunk and
+  /// feed it to a pooling layer expecting fixed geometry; a non-
+  /// pyannote-sized chunk produces a finite-but-wrong embedding
+  /// that silently corrupts downstream PLDA/clustering.
+  #[error(
+    "chunk_samples.len() = {got}, expected {expected} (pyannote 10s @ 16 kHz = WINDOW_SAMPLES)"
+  )]
+  ChunkSamplesShapeMismatch { expected: usize, got: usize },
+
+  /// `frame_mask.len()` passed to
+  /// `EmbedModel::embed_chunk_with_frame_mask` doesn't match the
+  /// pyannote-style 589-frame segmentation grid
+  /// (`segment::FRAMES_PER_WINDOW`). The backends pass `frame_mask`
+  /// directly as the pooling-layer weights dimension; an off-by-one
+  /// or sample-level mask changes the integration window and produces
+  /// a finite-but-wrong embedding.
+  #[error(
+    "frame_mask.len() = {got}, expected {expected} (pyannote segmentation = FRAMES_PER_WINDOW)"
+  )]
+  FrameMaskShapeMismatch { expected: usize, got: usize },
+
   /// Input contains NaN or infinity.
   #[error("input contains non-finite values (NaN or infinity)")]
   NonFiniteInput,

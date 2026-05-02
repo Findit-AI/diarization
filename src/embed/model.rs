@@ -517,11 +517,34 @@ impl EmbedModel {
     // backend's `embed_chunk_with_frame_mask` override. The `EmbedBackend`
     // trait provides default empty/short-mask guards via its
     // gather-then-window fallback, but the ORT and tch overrides skip
-    // them and pass `frame_mask` straight to the model. An empty or
-    // all-false mask becomes all-zero pooling weights, division-by-zero
-    // in statistics pooling, and NaN/inf rows the public API has no
-    // other place to catch.
-    if frame_mask.is_empty() || !frame_mask.iter().any(|&b| b) {
+    // them and pass `frame_mask` straight to the model.
+    //
+    // Strict shape contract: the documented input is a pyannote-style
+    // 10-second chunk (`WINDOW_SAMPLES = 160_000` samples @ 16 kHz)
+    // with a 589-frame segmentation mask (`FRAMES_PER_WINDOW`). Both
+    // backends feed `frame_mask.len()` directly as the pooling-layer
+    // weights dimension and compute fbank from the full chunk. A
+    // non-pyannote-sized chunk or off-by-one mask passes the model
+    // and yields a finite-but-wrong 256-d embedding that silently
+    // corrupts downstream PLDA/clustering.
+    let expected_samples = crate::segment::WINDOW_SAMPLES as usize;
+    if chunk_samples.len() != expected_samples {
+      return Err(Error::ChunkSamplesShapeMismatch {
+        expected: expected_samples,
+        got: chunk_samples.len(),
+      });
+    }
+    let expected_frames = crate::segment::FRAMES_PER_WINDOW;
+    if frame_mask.len() != expected_frames {
+      return Err(Error::FrameMaskShapeMismatch {
+        expected: expected_frames,
+        got: frame_mask.len(),
+      });
+    }
+    // Empty/all-false mask → all-zero pooling weights →
+    // division-by-zero in statistics pooling → NaN/inf row. Reject
+    // before backend dispatch.
+    if !frame_mask.iter().any(|&b| b) {
       return Err(Error::EmptyOrInactiveMask);
     }
     let raw = self
@@ -809,10 +832,55 @@ mod tests {
     assert!(matches!(r, Err(Error::InvalidClip { len: 100, min: 400 })));
   }
 
-  /// `EmbedModel::embed_chunk_with_frame_mask` rejects an empty
-  /// `frame_mask` at the public boundary BEFORE invoking the backend.
-  /// This guard cannot be bypassed by an ORT/tch backend override that
-  /// elides the trait default's frame-count check.
+  /// `EmbedModel::embed_chunk_with_frame_mask` rejects a wrong-length
+  /// `chunk_samples` slice at the public boundary BEFORE invoking the
+  /// backend. The contract is `WINDOW_SAMPLES = 160_000` (pyannote 10s
+  /// @ 16 kHz); a 2-second `EMBED_WINDOW_SAMPLES = 32_000` clip used
+  /// for unweighted aggregation would otherwise produce a finite-but-
+  /// wrong embedding (different fbank frame count, different pooling
+  /// geometry).
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_chunk_with_frame_mask_rejects_wrong_chunk_length() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    // 2-second clip when the contract requires 10s.
+    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+    let mask = vec![true; crate::segment::FRAMES_PER_WINDOW];
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(
+      matches!(r, Err(Error::ChunkSamplesShapeMismatch { .. })),
+      "got {r:?}"
+    );
+  }
+
+  /// `EmbedModel::embed_chunk_with_frame_mask` rejects an off-by-one /
+  /// sample-level mask at the public boundary. Backends pass
+  /// `frame_mask.len()` as the pooling-layer weights dim; a wrong-
+  /// sized mask changes the integration window.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_chunk_with_frame_mask_rejects_wrong_mask_length() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let samples = vec![0.001f32; crate::segment::WINDOW_SAMPLES as usize];
+    // 588 instead of 589 — off by one.
+    let mask = vec![true; crate::segment::FRAMES_PER_WINDOW - 1];
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(
+      matches!(r, Err(Error::FrameMaskShapeMismatch { .. })),
+      "got {r:?}"
+    );
+  }
+
+  /// `EmbedModel::embed_chunk_with_frame_mask` rejects empty
+  /// `frame_mask` (caught by the shape check first).
   #[test]
   #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
   fn embed_chunk_with_frame_mask_rejects_empty_mask() {
@@ -821,15 +889,19 @@ mod tests {
       return;
     }
     let mut model = EmbedModel::from_file(&path).expect("load model");
-    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+    let samples = vec![0.001f32; crate::segment::WINDOW_SAMPLES as usize];
     let mask: Vec<bool> = Vec::new();
     let r = model.embed_chunk_with_frame_mask(&samples, &mask);
-    assert!(matches!(r, Err(Error::EmptyOrInactiveMask)), "got {r:?}");
+    assert!(
+      matches!(r, Err(Error::FrameMaskShapeMismatch { .. })),
+      "got {r:?}"
+    );
   }
 
-  /// All-false `frame_mask` produces all-zero pooling weights →
-  /// division-by-zero in statistics pooling → NaN/inf raw vector
-  /// downstream. We reject it at the EmbedModel boundary instead.
+  /// All-false `frame_mask` (correct length) produces all-zero pooling
+  /// weights → division-by-zero in statistics pooling → NaN/inf raw
+  /// vector downstream. We reject it at the EmbedModel boundary
+  /// instead.
   #[test]
   #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
   fn embed_chunk_with_frame_mask_rejects_all_false_mask() {
@@ -838,8 +910,8 @@ mod tests {
       return;
     }
     let mut model = EmbedModel::from_file(&path).expect("load model");
-    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
-    let mask = vec![false; 589];
+    let samples = vec![0.001f32; crate::segment::WINDOW_SAMPLES as usize];
+    let mask = vec![false; crate::segment::FRAMES_PER_WINDOW];
     let r = model.embed_chunk_with_frame_mask(&samples, &mask);
     assert!(matches!(r, Err(Error::EmptyOrInactiveMask)), "got {r:?}");
   }
