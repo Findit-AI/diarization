@@ -82,13 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     chunks_sw,
     frames_sw,
     &plda,
-    threshold[0],
-    fa[0],
-    fb[0],
-    max_iters[0] as usize,
-    min_dur_off[0],
-    None,
-  );
+  )
+  .with_threshold(threshold[0])
+  .with_fa(fa[0])
+  .with_fb(fb[0])
+  .with_max_iters(max_iters[0] as usize)
+  .with_min_duration_off(min_dur_off[0]);
   let out = diarize_offline(&input)?;
   for line in spans_to_rttm_lines(&out.spans(), "clip_16k") {
     println!("{line}");

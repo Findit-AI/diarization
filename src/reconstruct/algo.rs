@@ -101,10 +101,15 @@ pub struct ReconstructInput<'a> {
 }
 
 impl<'a> ReconstructInput<'a> {
-  /// Construct. All shape preconditions are re-verified by
-  /// [`reconstruct`] — see its doc-comment for the validation rules.
+  /// Construct with `smoothing_epsilon = None` (bit-exact pyannote
+  /// argmax). Pass `Some(eps)` via [`Self::with_smoothing_epsilon`]
+  /// to prefer the previous frame's selection when two clusters are
+  /// within `eps` activation.
   ///
-  /// Field meaning:
+  /// All shape preconditions are re-verified by [`reconstruct`] —
+  /// see its doc-comment for the validation rules.
+  ///
+  /// Required data inputs:
   /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
   ///   `[c][f][s]`. Length `num_chunks * num_frames_per_chunk * num_speakers`.
   /// - `hard_clusters`: per-chunk hard cluster assignment (output of
@@ -113,10 +118,6 @@ impl<'a> ReconstructInput<'a> {
   /// - `count`: per-output-frame instantaneous speaker count.
   ///   Length `num_output_frames`.
   /// - `chunks_sw` / `frames_sw`: outer / inner sliding windows.
-  /// - `smoothing_epsilon`: optional smoothing epsilon for top-k
-  ///   selection. `None` = strict descending-activation argmax (matches
-  ///   pyannote bit-exact). `Some(eps)` = prefer the previous frame's
-  ///   selection when two clusters are within `eps` activation.
   #[allow(clippy::too_many_arguments)]
   pub const fn new(
     segmentations: &'a [f64],
@@ -128,7 +129,6 @@ impl<'a> ReconstructInput<'a> {
     num_output_frames: usize,
     chunks_sw: SlidingWindow,
     frames_sw: SlidingWindow,
-    smoothing_epsilon: Option<f32>,
   ) -> Self {
     Self {
       segmentations,
@@ -140,8 +140,18 @@ impl<'a> ReconstructInput<'a> {
       num_output_frames,
       chunks_sw,
       frames_sw,
-      smoothing_epsilon,
+      smoothing_epsilon: None,
     }
+  }
+
+  /// Set the temporal-smoothing epsilon for top-k selection (builder).
+  /// `None` = strict descending-activation argmax. `Some(eps)` =
+  /// prefer the previous frame's selection when two clusters are
+  /// within `eps` activation.
+  #[must_use]
+  pub const fn with_smoothing_epsilon(mut self, smoothing_epsilon: Option<f32>) -> Self {
+    self.smoothing_epsilon = smoothing_epsilon;
+    self
   }
 
   /// Per-`(chunk, frame, speaker)` activity, flattened `[c][f][s]`.

@@ -324,18 +324,18 @@ impl StreamingOfflineDiarizer {
     // ── Stage 3: count tensor (local to this range) ────────────────
     let chunk_duration_s = WINDOW_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
     let chunk_step_s = cfg.step_samples() as f64 / SAMPLE_RATE_HZ as f64;
+    let chunks_sw_local = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
+    let frames_sw_template =
+      SlidingWindow::new(0.0, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S);
     let (count, frames_sw_local) = count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
       SLOTS_PER_CHUNK,
       cfg.onset() as f64,
-      chunk_duration_s,
-      chunk_step_s,
-      PYANNOTE_FRAME_DURATION_S,
-      PYANNOTE_FRAME_STEP_S,
+      chunks_sw_local,
+      frames_sw_template,
     );
-    let chunks_sw_local = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
 
     self.ranges.push(AccumulatedRange {
       abs_start_sample,
@@ -422,13 +422,13 @@ impl StreamingOfflineDiarizer {
       chunks_sw_global,
       frames_sw_global,
       plda,
-      cfg.threshold(),
-      cfg.fa(),
-      cfg.fb(),
-      cfg.max_iters(),
-      cfg.min_duration_off(),
-      cfg.smoothing_epsilon(),
-    );
+    )
+    .with_threshold(cfg.threshold())
+    .with_fa(cfg.fa())
+    .with_fb(cfg.fb())
+    .with_max_iters(cfg.max_iters())
+    .with_min_duration_off(cfg.min_duration_off())
+    .with_smoothing_epsilon(cfg.smoothing_epsilon());
     let offline_out = diarize_offline(&input)?;
     let hard_clusters = offline_out.hard_clusters();
     let num_clusters = offline_out.num_clusters();
@@ -461,8 +461,8 @@ impl StreamingOfflineDiarizer {
         r.count.len(),
         r.chunks_sw_local,
         r.frames_sw_local,
-        cfg.smoothing_epsilon(),
-      );
+      )
+      .with_smoothing_epsilon(cfg.smoothing_epsilon());
       let discrete = reconstruct_grid(&recon_input)?;
 
       let max_cluster_local = hc_slice

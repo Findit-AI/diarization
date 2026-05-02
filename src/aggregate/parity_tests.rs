@@ -1,7 +1,7 @@
 //! Bit-exact parity: `count_pyannote(captured_segmentations)` ==
 //! `captured_count` for all 6 captured fixtures.
 
-use crate::aggregate::count_pyannote;
+use crate::{aggregate::count_pyannote, reconstruct::SlidingWindow};
 use npyz::npz::NpzArchive;
 use std::{fs::File, io::BufReader, path::PathBuf};
 
@@ -47,10 +47,8 @@ fn run_count_parity(fixture_dir: &str) {
     num_frames_per_chunk,
     num_speakers,
     0.5, // pyannote community-1 onset
-    chunk_dur_arr[0],
-    chunk_step_arr[0],
-    frame_dur_arr[0],
-    frame_step_arr[0],
+    SlidingWindow::new(0.0, chunk_dur_arr[0], chunk_step_arr[0]),
+    SlidingWindow::new(0.0, frame_dur_arr[0], frame_step_arr[0]),
   );
 
   // Bit-exact: length and every frame must match.

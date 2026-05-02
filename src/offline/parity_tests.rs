@@ -73,14 +73,14 @@ fn run_offline_parity(fixture_dir: &str) {
     chunks_sw,
     frames_sw,
     &plda,
-    threshold_arr[0],
-    fa_arr[0],
-    fb_arr[0],
-    max_iters_arr[0] as usize,
-    min_dur_off_arr[0],
-    // Phase 5c parity: bit-exact pyannote argmax (no smoothing).
-    None,
-  );
+  )
+  .with_threshold(threshold_arr[0])
+  .with_fa(fa_arr[0])
+  .with_fb(fb_arr[0])
+  .with_max_iters(max_iters_arr[0] as usize)
+  .with_min_duration_off(min_dur_off_arr[0]);
+  // Phase 5c parity: bit-exact pyannote argmax (no smoothing) is the
+  // default, no with_smoothing_epsilon override needed.
 
   let out = diarize_offline(&input).expect("diarize_offline");
 

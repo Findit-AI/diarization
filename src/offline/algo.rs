@@ -48,9 +48,12 @@ pub struct OfflineInput<'a> {
 }
 
 impl<'a> OfflineInput<'a> {
-  /// Construct.
+  /// Construct with `community-1` hyperparameter defaults
+  /// (`threshold = 0.6`, `fa = 0.07`, `fb = 0.8`, `max_iters = 20`,
+  /// `min_duration_off = 0.0`, `smoothing_epsilon = None`). Override
+  /// individual hyperparameters via the `with_*` builders.
   ///
-  /// Field meaning:
+  /// Required data inputs:
   /// - `raw_embeddings`: pre-PLDA WeSpeaker raw embeddings, flattened
   ///   `[c][s][d]`. Length `num_chunks * num_speakers * EMBEDDING_DIM`.
   /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
@@ -59,12 +62,6 @@ impl<'a> OfflineInput<'a> {
   ///   Length `num_output_frames`.
   /// - `chunks_sw` / `frames_sw`: sliding-window timing.
   /// - `plda`: PLDA model.
-  /// - `threshold` / `fa` / `fb` / `max_iters`: AHC + VBx hyperparameters.
-  ///   Community-1 defaults: 0.6 / 0.07 / 0.8 / 20.
-  /// - `min_duration_off`: gap merging threshold for span post-processing.
-  /// - `smoothing_epsilon`: optional temporal smoothing for reconstruct.
-  ///   `None` = bit-exact pyannote (argmax). `Some(0.1)` recommended
-  ///   for `OwnedDiarizationPipeline`.
   #[allow(clippy::too_many_arguments)]
   pub const fn new(
     raw_embeddings: &'a [f32],
@@ -77,12 +74,6 @@ impl<'a> OfflineInput<'a> {
     chunks_sw: SlidingWindow,
     frames_sw: SlidingWindow,
     plda: &'a PldaTransform,
-    threshold: f64,
-    fa: f64,
-    fb: f64,
-    max_iters: usize,
-    min_duration_off: f64,
-    smoothing_epsilon: Option<f32>,
   ) -> Self {
     Self {
       raw_embeddings,
@@ -95,13 +86,58 @@ impl<'a> OfflineInput<'a> {
       chunks_sw,
       frames_sw,
       plda,
-      threshold,
-      fa,
-      fb,
-      max_iters,
-      min_duration_off,
-      smoothing_epsilon,
+      // Community-1 defaults.
+      threshold: 0.6,
+      fa: 0.07,
+      fb: 0.8,
+      max_iters: 20,
+      min_duration_off: 0.0,
+      smoothing_epsilon: None,
     }
+  }
+
+  /// Set the AHC linkage threshold (builder).
+  #[must_use]
+  pub const fn with_threshold(mut self, threshold: f64) -> Self {
+    self.threshold = threshold;
+    self
+  }
+
+  /// Set the VBx Fa hyperparameter (builder).
+  #[must_use]
+  pub const fn with_fa(mut self, fa: f64) -> Self {
+    self.fa = fa;
+    self
+  }
+
+  /// Set the VBx Fb hyperparameter (builder).
+  #[must_use]
+  pub const fn with_fb(mut self, fb: f64) -> Self {
+    self.fb = fb;
+    self
+  }
+
+  /// Set the VBx max-iterations cap (builder).
+  #[must_use]
+  pub const fn with_max_iters(mut self, max_iters: usize) -> Self {
+    self.max_iters = max_iters;
+    self
+  }
+
+  /// Set the gap-merging threshold for span post-processing (builder).
+  #[must_use]
+  pub const fn with_min_duration_off(mut self, min_duration_off: f64) -> Self {
+    self.min_duration_off = min_duration_off;
+    self
+  }
+
+  /// Set the temporal-smoothing epsilon for reconstruct (builder).
+  /// `None` = bit-exact pyannote argmax. `Some(0.1)` recommended for
+  /// `OwnedDiarizationPipeline`.
+  #[must_use]
+  pub const fn with_smoothing_epsilon(mut self, smoothing_epsilon: Option<f32>) -> Self {
+    self.smoothing_epsilon = smoothing_epsilon;
+    self
   }
 
   /// Pre-PLDA WeSpeaker raw embeddings.
@@ -392,11 +428,11 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    threshold,
-    fa,
-    fb,
-    max_iters,
-  );
+  )
+  .with_threshold(threshold)
+  .with_fa(fa)
+  .with_fb(fb)
+  .with_max_iters(max_iters);
   let hard_clusters = assign_embeddings(&pipeline_input)?;
   let _ = SP_ALIVE_THRESHOLD; // doc reference
 
@@ -433,8 +469,8 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     num_output_frames,
     chunks_sw,
     frames_sw,
-    smoothing_epsilon,
-  );
+  )
+  .with_smoothing_epsilon(smoothing_epsilon);
   let discrete_diarization = reconstruct(&recon_input)?;
 
   // ── Stage 6: discrete diarization → RTTM spans ─────────────────

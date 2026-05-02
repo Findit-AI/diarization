@@ -40,7 +40,6 @@ fn rejects_nan_segmentation() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
@@ -61,7 +60,6 @@ fn rejects_pos_inf_segmentation() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
@@ -141,7 +139,6 @@ fn rejects_negative_cluster_id_other_than_unmatched() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
@@ -163,7 +160,6 @@ fn accepts_unmatched_sentinel() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(reconstruct(&input).is_ok());
 }
@@ -187,7 +183,6 @@ fn rejects_cluster_id_above_max() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
@@ -213,7 +208,6 @@ fn rejects_count_above_max_cluster_id() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
@@ -300,7 +294,6 @@ fn rejects_zero_output_frames() {
     0,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::Shape(_))));
 }
@@ -321,7 +314,6 @@ fn rejects_neg_inf_segmentation() {
     4,
     chunks_sw,
     frames_sw,
-    None,
   );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }

@@ -36,9 +36,11 @@ pub struct AssignEmbeddingsInput<'a> {
 }
 
 impl<'a> AssignEmbeddingsInput<'a> {
-  /// Construct.
+  /// Construct with `community-1` AHC + VBx hyperparameter defaults
+  /// (`threshold = 0.6`, `fa = 0.07`, `fb = 0.8`, `max_iters = 20`).
+  /// Override individual hyperparameters via the `with_*` builders.
   ///
-  /// Field meaning:
+  /// Required data inputs:
   /// - `embeddings`: raw per-(chunk, speaker) embeddings flattened to
   ///   `(num_chunks * num_speakers, embed_dim)`.
   /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
@@ -48,8 +50,6 @@ impl<'a> AssignEmbeddingsInput<'a> {
   /// - `phi`: eigenvalue diagonal (length `plda_dim`).
   /// - `train_chunk_idx` / `train_speaker_idx`: row-major active
   ///   indices, length `num_train`.
-  /// - `threshold`/`fa`/`fb`/`max_iters`: AHC and VBx hyperparameters.
-  ///   Community-1 defaults: 0.6, 0.07, 0.8, 20.
   #[allow(clippy::too_many_arguments)]
   pub const fn new(
     embeddings: &'a DMatrix<f64>,
@@ -61,10 +61,6 @@ impl<'a> AssignEmbeddingsInput<'a> {
     phi: &'a DVector<f64>,
     train_chunk_idx: &'a [usize],
     train_speaker_idx: &'a [usize],
-    threshold: f64,
-    fa: f64,
-    fb: f64,
-    max_iters: usize,
   ) -> Self {
     Self {
       embeddings,
@@ -76,11 +72,40 @@ impl<'a> AssignEmbeddingsInput<'a> {
       phi,
       train_chunk_idx,
       train_speaker_idx,
-      threshold,
-      fa,
-      fb,
-      max_iters,
+      // Community-1 defaults.
+      threshold: 0.6,
+      fa: 0.07,
+      fb: 0.8,
+      max_iters: 20,
     }
+  }
+
+  /// Set the AHC linkage threshold (builder).
+  #[must_use]
+  pub const fn with_threshold(mut self, threshold: f64) -> Self {
+    self.threshold = threshold;
+    self
+  }
+
+  /// Set the VBx Fa hyperparameter (builder).
+  #[must_use]
+  pub const fn with_fa(mut self, fa: f64) -> Self {
+    self.fa = fa;
+    self
+  }
+
+  /// Set the VBx Fb hyperparameter (builder).
+  #[must_use]
+  pub const fn with_fb(mut self, fb: f64) -> Self {
+    self.fb = fb;
+    self
+  }
+
+  /// Set the VBx max-iterations cap (builder).
+  #[must_use]
+  pub const fn with_max_iters(mut self, max_iters: usize) -> Self {
+    self.max_iters = max_iters;
+    self
   }
 
   /// Raw per-`(chunk, speaker)` embeddings.

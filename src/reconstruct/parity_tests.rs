@@ -175,11 +175,11 @@ fn run_reconstruct_parity(fixture_dir: &str) {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    threshold,
-    fa_arr[0],
-    fb_arr[0],
-    max_iters_arr[0] as usize,
-  );
+  )
+  .with_threshold(threshold)
+  .with_fa(fa_arr[0])
+  .with_fb(fb_arr[0])
+  .with_max_iters(max_iters_arr[0] as usize);
   let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
 
   // ── Stage 5b: reconstruct ──────────────────────────────────────
@@ -208,7 +208,6 @@ fn run_reconstruct_parity(fixture_dir: &str) {
     num_output_frames,
     chunks_sw,
     frames_sw,
-    None,
   );
   let got = reconstruct(&recon_input).expect("reconstruct");
 
@@ -320,11 +319,11 @@ fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    threshold_data[0],
-    fa_arr[0],
-    fb_arr[0],
-    max_iters_arr[0] as usize,
-  );
+  )
+  .with_threshold(threshold_data[0])
+  .with_fa(fa_arr[0])
+  .with_fb(fb_arr[0])
+  .with_max_iters(max_iters_arr[0] as usize);
   let hard_clusters = assign_embeddings(&pipeline_input).expect("assign_embeddings");
 
   let recon_path = fixture(&format!("{base}/reconstruction.npz"));
@@ -349,7 +348,6 @@ fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f
     num_output_frames,
     chunks_sw,
     frames_sw,
-    None,
   );
   let got = reconstruct(&recon_input).expect("reconstruct");
 

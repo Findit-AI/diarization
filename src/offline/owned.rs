@@ -363,20 +363,19 @@ impl OwnedDiarizationPipeline {
     // `aggregate::parity_tests` for the bit-exact fixture parity.
     let chunk_duration_s = WINDOW_SAMPLES as f64 / SAMPLE_RATE_HZ as f64;
     let chunk_step_s = cfg.step_samples() as f64 / SAMPLE_RATE_HZ as f64;
+    let chunks_sw = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
+    let frames_sw_template =
+      SlidingWindow::new(0.0, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S);
     let (count, frames_sw) = count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
       SLOTS_PER_CHUNK,
       cfg.onset() as f64,
-      chunk_duration_s,
-      chunk_step_s,
-      PYANNOTE_FRAME_DURATION_S,
-      PYANNOTE_FRAME_STEP_S,
+      chunks_sw,
+      frames_sw_template,
     );
     let num_output_frames = count.len();
-
-    let chunks_sw = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
 
     // ── Stage 4: dispatch to diarize_offline ───────────────────────
     let input = OfflineInput::new(
@@ -390,13 +389,13 @@ impl OwnedDiarizationPipeline {
       chunks_sw,
       frames_sw,
       plda,
-      cfg.threshold(),
-      cfg.fa(),
-      cfg.fb(),
-      cfg.max_iters(),
-      cfg.min_duration_off(),
-      cfg.smoothing_epsilon(),
-    );
+    )
+    .with_threshold(cfg.threshold())
+    .with_fa(cfg.fa())
+    .with_fb(cfg.fb())
+    .with_max_iters(cfg.max_iters())
+    .with_min_duration_off(cfg.min_duration_off())
+    .with_smoothing_epsilon(cfg.smoothing_epsilon());
     diarize_offline(&input)
   }
 }

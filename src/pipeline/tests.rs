@@ -34,10 +34,6 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let got = assign_embeddings(&input).expect("fast path must succeed, not error");
   assert_eq!(got.len(), num_chunks);
@@ -83,10 +79,6 @@ fn rejects_overflowing_chunks_times_speakers() {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let result = assign_embeddings(&input);
   assert!(
@@ -118,10 +110,6 @@ fn rejects_overflowing_chunks_times_frames_times_speakers() {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let result = assign_embeddings(&input);
   assert!(
@@ -157,10 +145,6 @@ fn rejects_zero_column_post_plda() {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let result = assign_embeddings(&input);
   assert!(
@@ -194,10 +178,6 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
     &phi,
     &[],
     &[],
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let got = assign_embeddings(&input).expect("zero-train fast path must succeed");
   for chunk_row in &got {
@@ -236,10 +216,6 @@ fn rejects_nan_in_non_train_embedding_row() {
     &phi,
     &[0usize, 1],
     &[0usize, 1],
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let result = assign_embeddings(&input);
   assert!(
@@ -287,10 +263,6 @@ fn rejects_nan_in_segmentations() {
     &phi,
     &[0usize, 1],
     &[0usize, 1],
-    0.6,
-    0.07,
-    0.8,
-    20,
   );
   let result = assign_embeddings(&input);
   assert!(

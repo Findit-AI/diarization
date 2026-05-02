@@ -203,11 +203,11 @@ fn run_pipeline_parity(fixture_dir: &str) {
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
-    threshold,
-    fa,
-    fb,
-    max_iters,
-  );
+  )
+  .with_threshold(threshold)
+  .with_fa(fa)
+  .with_fb(fb)
+  .with_max_iters(max_iters);
   let got = assign_embeddings(&input).expect("assign_embeddings");
 
   // Captured ground truth.

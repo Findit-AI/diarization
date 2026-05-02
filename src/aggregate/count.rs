@@ -141,18 +141,26 @@ pub fn num_output_frames_pyannote(
 ///
 /// Returns `(count, frames_sw)` where `frames_sw` matches pyannote's
 /// output-frame `SlidingWindow`.
-#[allow(clippy::too_many_arguments)] // pyannote's API surface is wide; refactoring would just push the bag elsewhere.
+/// `chunks_sw` describes the input chunk grid (`duration` =
+/// chunk_duration, `step` = chunk_step). `frames_sw_template` describes
+/// the output frame grid (`duration` and `step`); its `start` is
+/// ignored — the returned `SlidingWindow` always starts at 0.0 to
+/// match pyannote's convention. Both args replace the previous four
+/// positional `(chunk_duration, chunk_step, frame_duration, frame_step)`
+/// floats.
 pub fn count_pyannote(
   segmentations: &[f64],
   num_chunks: usize,
   num_frames_per_chunk: usize,
   num_speakers: usize,
   onset: f64,
-  chunk_duration: f64,
-  chunk_step: f64,
-  frame_duration: f64,
-  frame_step: f64,
+  chunks_sw: SlidingWindow,
+  frames_sw_template: SlidingWindow,
 ) -> (Vec<u8>, SlidingWindow) {
+  let chunk_duration = chunks_sw.duration();
+  let chunk_step = chunks_sw.step();
+  let frame_duration = frames_sw_template.duration();
+  let frame_step = frames_sw_template.step();
   assert_eq!(
     segmentations.len(),
     num_chunks * num_frames_per_chunk * num_speakers,
