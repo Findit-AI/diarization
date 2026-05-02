@@ -235,7 +235,16 @@ impl SegmentModel {
       self.input_scratch.as_slice()
     ),)?,])?;
 
-    let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    // Guard against zero-output sessions before positional indexing.
+    // `outputs[0]` panics at the FFI boundary (ort's Index<usize>
+    // panics for OOB), which would turn a malformed-model error into
+    // a library-caller panic. A graceful typed error is the right
+    // contract.
+    let first_output = outputs
+      .values()
+      .next()
+      .ok_or(Error::MissingInferenceOutput)?;
+    let (shape, data) = first_output.try_extract_tensor::<f32>()?;
     // Validate the trailing two dims (frames, classes) BEFORE relying on
     // the row-major flattening. A model returning the same element count
     // in a different layout — e.g. `[1, POWERSET_CLASSES, FRAMES_PER_WINDOW]`

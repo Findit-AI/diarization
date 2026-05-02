@@ -195,7 +195,16 @@ mod ort_backend {
         weights_flat,
       ))?,
     ])?;
-    let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    // Guard against zero-output sessions before positional indexing.
+    // `outputs[0]` panics at the FFI boundary (ort's Index<usize>
+    // panics for OOB), which would turn a malformed-model error into
+    // a library-caller panic. A graceful typed error is the right
+    // contract.
+    let first_output = outputs
+      .values()
+      .next()
+      .ok_or(Error::MissingInferenceOutput)?;
+    let (shape, data) = first_output.try_extract_tensor::<f32>()?;
     // Per-call shape contract: the ResNet's output must be exactly
     // `[n, EMBEDDING_DIM]`. Validating only the element count (`n *
     // EMBEDDING_DIM`) lets a custom/exporter-drifted model that emits

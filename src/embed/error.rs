@@ -85,6 +85,16 @@ pub enum Error {
   #[error("inference scores length {got}, expected {expected}")]
   InferenceShapeMismatch { expected: usize, got: usize },
 
+  /// ONNX `session.run()` returned a zero-output `SessionOutputs`.
+  /// Realistic causes are a malformed model export (no graph outputs)
+  /// or ABI drift in `ort` itself. Without this typed error,
+  /// `outputs[0]` would panic at the FFI boundary instead of
+  /// surfacing as a recoverable error to library callers.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("inference returned no outputs (malformed model graph or ORT ABI drift)")]
+  MissingInferenceOutput,
+
   /// ONNX inference output contained a NaN/`±inf` value. Realistic
   /// upstream causes are degraded ONNX providers, model corruption,
   /// or non-finite input that flows through ResNet without saturation.

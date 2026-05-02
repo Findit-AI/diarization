@@ -82,6 +82,16 @@ pub enum Error {
   #[error("input samples contain non-finite values (NaN / +inf / -inf)")]
   NonFiniteInput,
 
+  /// ONNX `session.run()` returned a zero-output `SessionOutputs`.
+  /// Realistic causes are a malformed model export (no graph outputs)
+  /// or ABI drift in `ort` itself. Without this typed error,
+  /// `outputs[0]` would panic at the FFI boundary instead of
+  /// surfacing as a recoverable error to library callers.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("inference returned no outputs (malformed model graph or ORT ABI drift)")]
+  MissingInferenceOutput,
+
   /// A loaded ONNX model's input or output dimensions don't match what
   /// `diarization::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
   /// output, where `*` is a free batch dimension).
