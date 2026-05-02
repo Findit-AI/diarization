@@ -30,6 +30,14 @@ pub enum Error {
   #[error("all windows had effectively zero voice-activity weight")]
   AllSilent,
 
+  /// `frame_mask` passed to `EmbedModel::embed_chunk_with_frame_mask`
+  /// is empty or has no active frames. Both backends would feed
+  /// all-zero pooling weights into statistics pooling and produce
+  /// NaN from the division — surface it as a typed boundary error
+  /// instead of letting NaN flow into PLDA/clustering.
+  #[error("frame_mask is empty or has no active frames")]
+  EmptyOrInactiveMask,
+
   /// Input contains NaN or infinity.
   #[error("input contains non-finite values (NaN or infinity)")]
   NonFiniteInput,

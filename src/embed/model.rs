@@ -465,11 +465,13 @@ impl EmbedModel {
     samples: &[f32],
   ) -> Result<[f32; EMBEDDING_DIM], Error> {
     let mut out = self.backend.embed_audio_clips_batch(&[samples])?;
-    Ok(
-      out
-        .pop()
-        .expect("backend returned a non-empty batch for n=1 input"),
-    )
+    let raw = out
+      .pop()
+      .expect("backend returned a non-empty batch for n=1 input");
+    if raw.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteOutput);
+    }
+    Ok(raw)
   }
 
   /// Batched audio-clip inference. Returns N raw (un-normalized)
@@ -479,7 +481,19 @@ impl EmbedModel {
     &mut self,
     clips: &[&[f32]],
   ) -> Result<Vec<[f32; EMBEDDING_DIM]>, Error> {
-    self.backend.embed_audio_clips_batch(clips)
+    let raws = self.backend.embed_audio_clips_batch(clips)?;
+    // Centralized finite check at the EmbedModel boundary: neither the
+    // ORT nor tch backend validates per-element finiteness on its own,
+    // and the high-level `embed`/`embed_weighted`/`embed_masked`
+    // helpers go straight from this batch into per-window axpy
+    // accumulation. A NaN/inf raw row would propagate through the L2
+    // normalize and feed PLDA/clustering as a "valid" speaker vector.
+    for raw in raws.iter() {
+      if raw.iter().any(|v| !v.is_finite()) {
+        return Err(Error::NonFiniteOutput);
+      }
+    }
+    Ok(raws)
   }
 
   /// Pyannote-style speaker embedding for a 10-second chunk + per-
@@ -499,9 +513,24 @@ impl EmbedModel {
     chunk_samples: &[f32],
     frame_mask: &[bool],
   ) -> Result<[f32; EMBEDDING_DIM], Error> {
-    self
+    // Centralized boundary validation that cannot be bypassed by a
+    // backend's `embed_chunk_with_frame_mask` override. The `EmbedBackend`
+    // trait provides default empty/short-mask guards via its
+    // gather-then-window fallback, but the ORT and tch overrides skip
+    // them and pass `frame_mask` straight to the model. An empty or
+    // all-false mask becomes all-zero pooling weights, division-by-zero
+    // in statistics pooling, and NaN/inf rows the public API has no
+    // other place to catch.
+    if frame_mask.is_empty() || !frame_mask.iter().any(|&b| b) {
+      return Err(Error::EmptyOrInactiveMask);
+    }
+    let raw = self
       .backend
-      .embed_chunk_with_frame_mask(chunk_samples, frame_mask)
+      .embed_chunk_with_frame_mask(chunk_samples, frame_mask)?;
+    if raw.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteOutput);
+    }
+    Ok(raw)
   }
 
   // ── High-level methods (spec §4.2) ────────────────────────────────────
@@ -778,5 +807,40 @@ mod tests {
     }
     let r = model.embed_masked(&samples, &mask);
     assert!(matches!(r, Err(Error::InvalidClip { len: 100, min: 400 })));
+  }
+
+  /// `EmbedModel::embed_chunk_with_frame_mask` rejects an empty
+  /// `frame_mask` at the public boundary BEFORE invoking the backend.
+  /// This guard cannot be bypassed by an ORT/tch backend override that
+  /// elides the trait default's frame-count check.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_chunk_with_frame_mask_rejects_empty_mask() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+    let mask: Vec<bool> = Vec::new();
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(matches!(r, Err(Error::EmptyOrInactiveMask)), "got {r:?}");
+  }
+
+  /// All-false `frame_mask` produces all-zero pooling weights →
+  /// division-by-zero in statistics pooling → NaN/inf raw vector
+  /// downstream. We reject it at the EmbedModel boundary instead.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_chunk_with_frame_mask_rejects_all_false_mask() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+    let mask = vec![false; 589];
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(matches!(r, Err(Error::EmptyOrInactiveMask)), "got {r:?}");
   }
 }
