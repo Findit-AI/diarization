@@ -91,16 +91,18 @@ pub fn weighted_centroids(
   // upstream `pi` values come out of `vbx_iterate` via `crate::ops::dot`
   // (SIMD on x86), so a value landing very close to `sp_threshold`
   // could flip the alive/squashed decision across CPU backends. We
-  // refuse to proceed when any `sp[k]` lands in `[threshold * 0.01,
-  // threshold * 100]` — a 4-orders-of-magnitude band. Captured
-  // fixtures observe alive ratios ≥ 6e4× and squashed ratios ≥ 7e5×
-  // (`vbx::parity_tests::vbx_pi_has_safe_margin_from_sp_alive_threshold`),
-  // so the band never fires on realistic inputs but catches
-  // adversarial / pathological data the SIMD path can't safely
-  // resolve.
+  // refuse to proceed when any `sp[k]` lands in `(threshold * 0.5,
+  // threshold * 2)` — a tight ±2× band around the cutoff. Pyannote
+  // priors are bimodal: alive clusters concentrate in O(0.1), squashed
+  // in O(1e-14), with no realistic case landing within 2× of the
+  // 1e-7 cutoff. Anything inside this band is either pathological
+  // input or a model regression that should not silently produce
+  // CPU-dependent diarization output. The previous 100× band was a
+  // four-orders-of-magnitude over-estimate of the actual drift envelope
+  // and would have rejected legitimate sub-O(1) priors like 5e-7.
   if sp_threshold > 0.0 {
-    let lo = sp_threshold * 0.01;
-    let hi = sp_threshold * 100.0;
+    let lo = sp_threshold * 0.5;
+    let hi = sp_threshold * 2.0;
     for k in 0..num_init {
       let v = sp[k];
       if v > lo && v < hi {

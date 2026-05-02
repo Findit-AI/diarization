@@ -42,9 +42,8 @@ fn rejects_q_emb_row_mismatch() {
 #[test]
 fn rejects_no_surviving_clusters() {
   // Both sp values are well below the guard band lower bound
-  // (1.01e-9 < SP_ALIVE_THRESHOLD * 0.01 = 1e-9 false; pick 1e-12)
-  // — outside the SIMD ambiguity band on the squashed side, so the
-  // function reaches the "no surviving clusters" path.
+  // (`SP_ALIVE_THRESHOLD * 0.5 = 5e-8`), so the function reaches the
+  // "no surviving clusters" path rather than firing the guard.
   let q = DMatrix::<f64>::from_element(3, 2, 0.5);
   let sp = DVector::<f64>::from_vec(vec![1.0e-12, 1.0e-13]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
@@ -57,15 +56,15 @@ fn rejects_no_surviving_clusters() {
 /// VBx reductions are SIMD on x86, so a
 /// `sp` value landing within ulp drift of `SP_ALIVE_THRESHOLD` would
 /// flip the alive/squashed decision across CPU backends. The guard
-/// band `[threshold * 0.01, threshold * 100]` rejects those inputs
+/// band `(threshold * 0.5, threshold * 2)` rejects those inputs
 /// with `Error::AmbiguousAliveCluster`. This test constructs `sp`
 /// values inside the band on each side of the threshold and verifies
 /// the error fires before any SIMD-dependent decision is made.
 #[test]
 fn rejects_sp_in_simd_guard_band_above_threshold() {
   let q = DMatrix::<f64>::from_element(3, 2, 0.5);
-  // 5e-7 is between threshold (1e-7) and the upper guard bound (1e-5).
-  let sp = DVector::<f64>::from_vec(vec![5.0e-7, 0.99]);
+  // 1.5e-7 is between threshold (1e-7) and the upper guard bound (2e-7).
+  let sp = DVector::<f64>::from_vec(vec![1.5e-7, 0.99]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   let err =
     weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
@@ -78,8 +77,8 @@ fn rejects_sp_in_simd_guard_band_above_threshold() {
 #[test]
 fn rejects_sp_in_simd_guard_band_below_threshold() {
   let q = DMatrix::<f64>::from_element(3, 2, 0.5);
-  // 5e-9 is between the lower guard bound (1e-9) and threshold (1e-7).
-  let sp = DVector::<f64>::from_vec(vec![0.99, 5.0e-9]);
+  // 7e-8 is between the lower guard bound (5e-8) and threshold (1e-7).
+  let sp = DVector::<f64>::from_vec(vec![0.99, 7.0e-8]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   let err =
     weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
@@ -87,6 +86,51 @@ fn rejects_sp_in_simd_guard_band_below_threshold() {
     matches!(err, Error::AmbiguousAliveCluster { cluster: 1, .. }),
     "got unexpected error: {err:?}"
   );
+}
+
+/// Pyannote-valid priors that are clearly alive (≥ 2× threshold) or
+/// clearly squashed (≤ 0.5× threshold) must NOT trigger the guard.
+/// The previous 100× band rejected legitimate sub-O(1) priors like
+/// 5e-7, breaking diarization for short-lived but real speakers.
+#[test]
+fn accepts_sp_clearly_alive_above_2x_threshold() {
+  // 5e-7 is 5× threshold — clearly alive in pyannote, must pass.
+  let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+  let sp = DVector::<f64>::from_vec(vec![5.0e-7, 1.0e-14]);
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+    .expect("clearly-alive 5e-7 must not fire the guard");
+}
+
+#[test]
+fn accepts_sp_clearly_squashed_below_half_threshold() {
+  // 1e-8 is 0.1× threshold — clearly squashed, must pass (other cluster
+  // alive so we still produce centroids).
+  let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+  let sp = DVector::<f64>::from_vec(vec![0.99, 1.0e-8]);
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+    .expect("clearly-squashed 1e-8 must not fire the guard");
+}
+
+#[test]
+fn accepts_sp_at_band_boundary_2x_threshold() {
+  // 2e-7 is exactly at the upper bound (exclusive); must pass.
+  let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+  let sp = DVector::<f64>::from_vec(vec![2.0e-7, 1.0e-14]);
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+    .expect("boundary 2e-7 must not fire the guard");
+}
+
+#[test]
+fn accepts_sp_at_band_boundary_half_threshold() {
+  // 5e-8 is exactly at the lower bound (exclusive); must pass.
+  let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+  let sp = DVector::<f64>::from_vec(vec![0.99, 5.0e-8]);
+  let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+    .expect("boundary 5e-8 must not fire the guard");
 }
 
 /// `sp` exactly at threshold lands inside the band — guarded.

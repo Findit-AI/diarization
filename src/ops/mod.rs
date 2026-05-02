@@ -21,7 +21,7 @@
 //!   contract is anchored here.
 //! - [`arch::neon`] — aarch64 NEON.
 //! - [`arch::x86_avx2`], [`arch::x86_avx512`] — x86_64 tiers.
-//! - [`arch::wasm_simd128`] — wasm32 simd128.
+//! - wasm32 falls through to scalar (no SIMD backend wired).
 //!
 //! Public dispatchers in [`self`] (`dot`, `axpy`, `logsumexp_row`)
 //! always select the best-available SIMD backend at runtime. Callers
@@ -105,13 +105,6 @@ pub(crate) fn avx512_available() -> bool {
   // AVX-512F covers `_mm512_*pd` (8-lane f64) which is what we'd use
   // for dot/axpy/pdist. Other extensions (BW, VL) aren't required.
   std::arch::is_x86_feature_detected!("avx512f")
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) const fn simd128_available() -> bool {
-  // WASM has no runtime CPU detection — the simd128 feature is fixed
-  // at produce-time via `target_feature = "simd128"`.
-  !cfg!(diarization_force_scalar) && cfg!(target_feature = "simd128")
 }
 
 #[cfg(test)]

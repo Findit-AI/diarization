@@ -59,7 +59,6 @@ jobs:
       # `silero-vad` (path dep on `../silero/` not present in clean
       # checkouts) from the cargo-hack feature sweep. Their CI
       # coverage lives in dedicated jobs that provision the deps.
-      # Codex adversarial review HIGH.
       run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch,silero-vad
 
   # Run tests on some extra platforms
