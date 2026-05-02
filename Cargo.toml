@@ -214,4 +214,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(diarization_force_scalar)',
   'cfg(diarization_disable_avx2)',
   'cfg(diarization_disable_avx512)',
+  'cfg(diarization_assert_avx2)',
+  'cfg(diarization_assert_avx512)',
 ] }

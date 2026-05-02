@@ -46,7 +46,12 @@ sde64 -version
 # `aggregate::parity_tests` is also included (count-tensor exact
 # match) since the count loop is on the SIMD path under
 # `aggregate::count`.
-RUSTFLAGS="-Dwarnings" \
+# `--cfg diarization_assert_avx512` enables the
+# `dispatch_selects_avx512_under_sde` test in `ops::backend_selection_tests`,
+# which fails the build if `avx512_available()` returns false under
+# emulation. Without it, an SDE/CPUID regression would silently route the
+# differential tests through the scalar fallback and report green.
+RUSTFLAGS="-Dwarnings --cfg diarization_assert_avx512" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -future --" \
 cargo test \
   --lib \

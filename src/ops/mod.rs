@@ -107,6 +107,47 @@ pub(crate) fn avx512_available() -> bool {
   std::arch::is_x86_feature_detected!("avx512f")
 }
 
+/// Backend-selection assertion tests. The SDE CI jobs run cargo test with
+/// `--cfg diarization_assert_avx512` (or `_avx2`) so a feature-detection or
+/// emulator regression that silently falls the dispatcher back to scalar
+/// fails the build instead of producing a green "scalar matches scalar"
+/// differential check. Without this, an SDE/CPUID/XCR0 misconfig could
+/// leave the unsafe SIMD load + reduction paths untested in CI.
+#[cfg(test)]
+mod backend_selection_tests {
+  /// Only fires under the AVX-512 SDE job. Asserts the dispatcher would
+  /// pick the AVX-512 path. Mirrors `ci/sde_avx512.sh`'s emulation
+  /// expectation.
+  #[test]
+  #[cfg(all(target_arch = "x86_64", diarization_assert_avx512))]
+  fn dispatch_selects_avx512_under_sde() {
+    assert!(
+      super::avx512_available(),
+      "diarization_assert_avx512 set but avx512_available() == false; \
+       SDE/CPUID regression would silently route SIMD tests through scalar"
+    );
+  }
+
+  /// Only fires under the AVX2 SDE job. Asserts AVX2+FMA is selected and
+  /// AVX-512 is disabled (so the AVX2 backend is actually exercised, not
+  /// AVX-512). Mirrors `ci/sde_avx2.sh`'s `-hsw` Haswell emulation.
+  #[test]
+  #[cfg(all(target_arch = "x86_64", diarization_assert_avx2))]
+  fn dispatch_selects_avx2_under_sde() {
+    assert!(
+      super::avx2_available(),
+      "diarization_assert_avx2 set but avx2_available() == false; \
+       SDE/CPUID regression would silently route SIMD tests through scalar"
+    );
+    assert!(
+      !super::avx512_available(),
+      "diarization_assert_avx2 set but avx512_available() == true; \
+       dispatcher would pick AVX-512 instead of the AVX2 backend we want \
+       to exercise — check `--cfg diarization_disable_avx512` is in RUSTFLAGS"
+    );
+  }
+}
+
 #[cfg(test)]
 mod differential_tests {
   //! Scalar vs SIMD differential tests.

@@ -48,7 +48,12 @@ sde64 -version
 # tests run under SDE-emulated Haswell (AVX2 + FMA, no AVX-512) so
 # AVX2-induced ulp drift on threshold-sensitive decisions surfaces
 # in CI.
-RUSTFLAGS="-Dwarnings --cfg diarization_disable_avx512" \
+# `--cfg diarization_assert_avx2` enables the
+# `dispatch_selects_avx2_under_sde` test in `ops::backend_selection_tests`,
+# which fails the build if AVX2+FMA isn't selected (or if AVX-512 leaks
+# through and the dispatcher picks AVX-512 instead of the AVX2 backend
+# we want emulated).
+RUSTFLAGS="-Dwarnings --cfg diarization_disable_avx512 --cfg diarization_assert_avx2" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -hsw --" \
 cargo test \
   --lib \

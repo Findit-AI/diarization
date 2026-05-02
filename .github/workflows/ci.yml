@@ -62,8 +62,14 @@ jobs:
       run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch,silero-vad
 
   # Run tests on some extra platforms
+  # Portability check: scalar-only build across the broad cross matrix.
+  # Default features (`ort`, `bundled-segmentation`) require native
+  # ONNX-Runtime linking and are not provisioned for wasm/WASI/riscv/etc.
+  # in this repo, so we build with `--no-default-features` here. ORT
+  # support on its supported targets is exercised by the `cross-ort`
+  # job below.
   cross:
-    name: cross
+    name: cross (scalar, --no-default-features)
     strategy:
       matrix:
         target:
@@ -95,6 +101,38 @@ jobs:
           key: ${{ runner.os }}-cross-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cross-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: cargo build --target ${{ matrix.target }} --no-default-features
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --target ${{ matrix.target }} --no-default-features
+
+  # ORT-enabled build matrix. Restricted to the targets where the
+  # `ort` crate ships prebuilt binaries (or links cleanly against the
+  # system installation): native x86_64/aarch64 Linux/macOS/Windows.
+  # Triples that lack ORT provisioning live in the `cross` job above.
+  cross-ort:
+    name: cross (ort + bundled-segmentation)
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-ort-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-ort-
       - name: Install Rust
         run: rustup update stable && rustup default stable
       - name: cargo build --target ${{ matrix.target }}
