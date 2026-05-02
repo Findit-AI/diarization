@@ -1,13 +1,16 @@
 //! Pyannote `cluster_vbx` flow stages 2–7 wired end-to-end.
 
+use std::sync::Arc;
+
 use crate::{
   cluster::{
     ahc::ahc_init,
     centroid::{SP_ALIVE_THRESHOLD, weighted_centroids},
-    hungarian::{UNMATCHED, constrained_argmax},
+    hungarian::{ChunkAssignment, UNMATCHED, constrained_argmax},
     vbx::{StopReason, vbx_iterate},
   },
   pipeline::error::Error,
+  segment::options::MAX_SPEAKER_SLOTS,
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -195,7 +198,9 @@ impl<'a> AssignEmbeddingsInput<'a> {
 ///   3. Disabling `constrained_assignment` in this branch (pyannote
 ///      does this to avoid artificial cluster inflation).
 ///   4. A new fixture captured with `num_clusters` forcing != auto.
-pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i32>>, Error> {
+pub fn assign_embeddings(
+  input: &AssignEmbeddingsInput<'_>,
+) -> Result<Arc<[ChunkAssignment]>, Error> {
   let &AssignEmbeddingsInput {
     embeddings,
     num_chunks,
@@ -216,8 +221,10 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   if num_chunks == 0 {
     return Err(Error::Shape("num_chunks must be at least 1"));
   }
-  if num_speakers == 0 {
-    return Err(Error::Shape("num_speakers must be at least 1"));
+  if num_speakers != MAX_SPEAKER_SLOTS as usize {
+    return Err(Error::Shape(
+      "num_speakers must equal MAX_SPEAKER_SLOTS (segmentation-3.0 / community-1 = 3)",
+    ));
   }
   let embed_dim = embeddings.ncols();
   if embed_dim == 0 {
@@ -314,7 +321,13 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   // short clips, sparse speech, or single-usable-speaker recordings
   // without erroring. Codex review HIGH round 1 of Phase 5.
   if num_train < 2 {
-    return Ok(vec![vec![0i32; num_speakers]; num_chunks]);
+    // Build directly via TrustedLen iterator collect — no
+    // `Vec`-then-`Arc` round-trip.
+    return Ok(
+      (0..num_chunks)
+        .map(|_| [0_i32; MAX_SPEAKER_SLOTS as usize])
+        .collect(),
+    );
   }
   if !(0.0..=f64::MAX).contains(&threshold) || !threshold.is_finite() || threshold <= 0.0 {
     return Err(Error::Shape("threshold must be a positive finite scalar"));
@@ -441,9 +454,22 @@ pub fn assign_embeddings(input: &AssignEmbeddingsInput<'_>) -> Result<Vec<Vec<i3
   for row in &hard {
     debug_assert_eq!(row.len(), num_speakers);
   }
-  let _ = UNMATCHED; // doc reference
 
-  Ok(hard)
+  // Build `Arc<[ChunkAssignment]>` directly from the trusted-len
+  // iterator. `Vec::into_iter()` is `TrustedLen`, so std's specialized
+  // `<Arc<[T]> as FromIterator<T>>::from_iter` writes each `[i32; 3]`
+  // straight into the `Arc<[..]>` allocation — no intermediate `Vec`
+  // round-trip.
+  let hard_arc: Arc<[ChunkAssignment]> = hard
+    .into_iter()
+    .map(|row| {
+      let mut arr = [UNMATCHED; MAX_SPEAKER_SLOTS as usize];
+      arr.copy_from_slice(&row);
+      arr
+    })
+    .collect();
+
+  Ok(hard_arc)
 }
 
 /// Build pyannote's `qinit = scipy_softmax(one_hot(ahc_clusters) * 7.0)`

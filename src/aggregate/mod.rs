@@ -50,4 +50,6 @@ mod count;
 #[cfg(test)]
 mod parity_tests;
 
-pub use count::{count_pyannote, hamming_aggregate};
+pub use count::{
+  CountTensor, Error, count_pyannote, hamming_aggregate, try_count_pyannote, try_hamming_aggregate,
+};

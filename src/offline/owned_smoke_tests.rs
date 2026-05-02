@@ -68,7 +68,7 @@ fn owned_smoke_02_pyannote_sample() {
     "expected non-empty spans; got 0 spans (num_clusters={})",
     out.num_clusters()
   );
-  for span in out.spans() {
+  for span in out.spans_slice() {
     let s = span.start();
     let d = span.duration();
     assert!(

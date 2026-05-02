@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .file_stem()
     .and_then(|s| s.to_str())
     .unwrap_or("audio");
-  for span in &spans {
+  for span in spans.iter() {
     let start = span.start_sample() as f64 / 16_000.0;
     let dur = (span.end_sample() - span.start_sample()) as f64 / 16_000.0;
     println!(

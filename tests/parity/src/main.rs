@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     .file_stem()
     .and_then(|s| s.to_str())
     .unwrap_or("clip");
-  for s in &spans {
+  for s in spans.iter() {
     let start_sec = s.start_sample() as f64 / 16_000.0;
     let dur_sec = (s.end_sample() - s.start_sample()) as f64 / 16_000.0;
     println!(

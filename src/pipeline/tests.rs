@@ -12,7 +12,7 @@ use nalgebra::{DMatrix, DVector};
 #[test]
 fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   let num_chunks = 3;
-  let num_speakers = 2;
+  let num_speakers = 3;
   let embed_dim = 4;
   let plda_dim = 4;
   let num_frames = 8;
@@ -37,7 +37,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   );
   let got = assign_embeddings(&input).expect("fast path must succeed, not error");
   assert_eq!(got.len(), num_chunks);
-  for chunk_row in &got {
+  for chunk_row in got.iter() {
     assert_eq!(chunk_row.len(), num_speakers);
     for &k in chunk_row {
       assert_eq!(k, 0, "every speaker in every chunk must be cluster 0");
@@ -54,7 +54,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
 #[test]
 fn rejects_overflowing_chunks_times_speakers() {
   let num_chunks = usize::MAX / 2 + 2;
-  let num_speakers = 2;
+  let num_speakers = 3;
   let embed_dim = 4;
   let plda_dim = 4;
   let num_frames = 8;
@@ -125,7 +125,7 @@ fn rejects_overflowing_chunks_times_frames_times_speakers() {
 #[test]
 fn rejects_zero_column_post_plda() {
   let num_chunks = 3;
-  let num_speakers = 2;
+  let num_speakers = 3;
   let embed_dim = 4;
   let num_frames = 8;
   let embeddings = DMatrix::<f64>::from_element(num_chunks * num_speakers, embed_dim, 0.5);
@@ -180,7 +180,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
     &[],
   );
   let got = assign_embeddings(&input).expect("zero-train fast path must succeed");
-  for chunk_row in &got {
+  for chunk_row in got.iter() {
     for &k in chunk_row {
       assert_eq!(k, 0);
     }
@@ -196,7 +196,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
 #[test]
 fn rejects_nan_in_non_train_embedding_row() {
   let num_chunks = 4;
-  let num_speakers = 2;
+  let num_speakers = 3;
   let embed_dim = 4;
   let plda_dim = 4;
   let num_frames = 8;
@@ -244,7 +244,7 @@ fn rejects_nan_in_non_train_embedding_row() {
 #[test]
 fn rejects_nan_in_segmentations() {
   let num_chunks = 3;
-  let num_speakers = 2;
+  let num_speakers = 3;
   let embed_dim = 4;
   let plda_dim = 4;
   let num_frames = 8;

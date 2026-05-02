@@ -50,6 +50,8 @@ pub const MAX_OFFLINE_INPUT: usize = 1_000;
 
 /// HAC linkage criterion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Linkage {
   /// Nearest-neighbour linkage (minimum pairwise distance).
   Single,
@@ -79,6 +81,8 @@ pub enum Linkage {
 /// `target_speakers`, switch to [`Agglomerative`](Self::Agglomerative),
 /// or open an issue if you need threshold-driven K selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum OfflineMethod {
   /// Agglomerative Hierarchical Clustering with the given linkage.
   Agglomerative {
@@ -92,11 +96,27 @@ pub enum OfflineMethod {
 
 /// Options for the offline batch [`cluster_offline`](crate::cluster::cluster_offline) function.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OfflineClusterOptions {
+  #[cfg_attr(feature = "serde", serde(default))]
   method: OfflineMethod,
+  #[cfg_attr(feature = "serde", serde(default = "default_similarity_threshold"))]
   similarity_threshold: f32,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, skip_serializing_if = "Option::is_none")
+  )]
   target_speakers: Option<u32>,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, skip_serializing_if = "Option::is_none")
+  )]
   seed: Option<u64>,
+}
+
+#[cfg(feature = "serde")]
+const fn default_similarity_threshold() -> f32 {
+  DEFAULT_SIMILARITY_THRESHOLD
 }
 
 impl Default for OfflineClusterOptions {
@@ -227,5 +247,49 @@ mod validation_tests {
   #[should_panic(expected = "similarity_threshold must be finite in [-1.0, 1.0]")]
   fn offline_threshold_neg_inf_panics() {
     let _ = OfflineClusterOptions::new().with_similarity_threshold(f32::NEG_INFINITY);
+  }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+  use super::*;
+
+  /// Roundtrip the default config through JSON.
+  #[test]
+  fn offline_cluster_options_default_roundtrip() {
+    let opts = OfflineClusterOptions::new();
+    let json = serde_json::to_string(&opts).expect("serialize");
+    let back: OfflineClusterOptions = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(opts, back);
+  }
+
+  /// Deserialize from a partial JSON (only some fields present) — the
+  /// `serde(default = ...)` annotations supply the rest from
+  /// pyannote's community-1 defaults.
+  #[test]
+  fn offline_cluster_options_partial_json() {
+    let json = r#"{"method": "spectral", "target_speakers": 5}"#;
+    let opts: OfflineClusterOptions = serde_json::from_str(json).expect("deserialize");
+    assert_eq!(opts.method(), OfflineMethod::Spectral);
+    assert_eq!(opts.target_speakers(), Some(5));
+    // Defaults filled in from `default_similarity_threshold`.
+    assert!((opts.similarity_threshold() - DEFAULT_SIMILARITY_THRESHOLD).abs() < 1e-9);
+    assert_eq!(opts.seed(), None);
+  }
+
+  /// `Linkage` and `OfflineMethod` are tagged enums; verify the
+  /// snake_case wire format.
+  #[test]
+  fn enums_serialize_snake_case() {
+    let linkage = Linkage::Average;
+    assert_eq!(serde_json::to_string(&linkage).unwrap(), "\"average\"");
+    let method = OfflineMethod::Agglomerative {
+      linkage: Linkage::Single,
+    };
+    let json = serde_json::to_string(&method).unwrap();
+    // Internally tagged externally — default serde for non-unit
+    // variants is `{"agglomerative":{"linkage":"single"}}`.
+    let back: OfflineMethod = serde_json::from_str(&json).unwrap();
+    assert_eq!(method, back);
   }
 }

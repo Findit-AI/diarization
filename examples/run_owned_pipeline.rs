@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .and_then(|s| s.to_str())
     .unwrap_or("audio");
 
-  for line in spans_to_rttm_lines(&out.spans(), uri) {
+  for line in spans_to_rttm_lines(out.spans_slice(), uri) {
     println!("{line}");
   }
 

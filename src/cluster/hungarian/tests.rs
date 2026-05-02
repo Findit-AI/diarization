@@ -415,3 +415,32 @@ fn pyannote_inactive_speaker_pattern_hits_optimal_total() {
     "exactly one inactive speaker should be matched; got {assign:?}"
   );
 }
+
+// ── Sealed-trait pattern regression checks ──────────────────────────────
+
+/// `ChunkAssignment` resolves to the default layout's row type.
+/// Locks in the v0.1.x community-1 commitment without hard-coding
+/// `[i32; 3]` at every call site.
+#[test]
+fn chunk_assignment_resolves_to_default_layout_row() {
+  use crate::cluster::hungarian::{ChunkAssignment, ChunkLayout, DefaultLayout, Segmentation3};
+
+  // Compile-time identity: the public alias is the default layout's row.
+  let _: ChunkAssignment = [0_i32; 3];
+  // The default IS Segmentation3.
+  let _: <DefaultLayout as ChunkLayout>::Row = [0_i32; Segmentation3::SLOTS];
+  assert_eq!(<DefaultLayout as ChunkLayout>::SLOTS, 3);
+}
+
+/// Documents the sealed-trait contract: external crates cannot
+/// `impl ChunkLayout for MyLayout` because the supertrait
+/// `sealed::Sealed` is private to `cluster::hungarian::algo`. This
+/// test checks the runtime side (we can construct + use the marker);
+/// the seal itself is enforced by Rust's module privacy at the trait
+/// definition site, not by a runtime assertion.
+#[test]
+fn chunk_layout_seal_smoke() {
+  use crate::cluster::hungarian::{ChunkLayout, Segmentation3};
+  let _layout = Segmentation3;
+  assert_eq!(<Segmentation3 as ChunkLayout>::SLOTS, 3);
+}

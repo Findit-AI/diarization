@@ -128,12 +128,23 @@ impl Segmenter {
   /// option setters [`SegmentOptions::with_step_samples`] /
   /// [`SegmentOptions::set_step_samples`] already panic on zero, so
   /// this trip only fires if a future refactor constructs a
-  /// `SegmentOptions` value that bypasses those setters.
+  /// `SegmentOptions` value that bypasses those setters. Use
+  /// [`Self::try_new`] to surface this precondition as an
+  /// [`Error::InvalidOptions`] instead.
   pub fn new(opts: SegmentOptions) -> Self {
-    assert!(opts.step_samples() > 0, "step_samples must be > 0");
+    Self::try_new(opts).expect("Segmenter::new: invalid options; use try_new to handle")
+  }
+
+  /// Fallible variant of [`Self::new`]. Returns
+  /// [`Error::InvalidOptions`] when `opts.step_samples() == 0`;
+  /// otherwise identical output.
+  pub fn try_new(opts: SegmentOptions) -> Result<Self, Error> {
+    if opts.step_samples() == 0 {
+      return Err(Error::InvalidOptions("step_samples must be > 0"));
+    }
     let onset = opts.onset_threshold();
     let offset = opts.offset_threshold();
-    Self {
+    Ok(Self {
       opts,
       generation: GENERATION.fetch_add(1, Ordering::Relaxed),
       input: VecDeque::new(),
@@ -150,7 +161,7 @@ impl Segmenter {
       tail_emitted: false,
       total_samples: 0,
       pending_inference: None,
-    }
+    })
   }
 
   /// Read-only access to the configured options.

@@ -28,7 +28,7 @@ fn rejects_nan_segmentation() {
   let num_speakers = 2;
   let mut segmentations = vec![0.5_f64; num_chunks * num_frames_per_chunk * num_speakers];
   segmentations[3] = f64::NAN;
-  let hard_clusters = vec![vec![0i32, 1i32]];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
   let count = vec![1u8; 4];
   let input = ReconstructInput::new(
     &segmentations,
@@ -49,7 +49,7 @@ fn rejects_pos_inf_segmentation() {
   let (chunks_sw, frames_sw) = default_swins();
   let mut segmentations = vec![0.5_f64; 8];
   segmentations[0] = f64::INFINITY;
-  let hard_clusters = vec![vec![0i32, 1i32]];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
   let input = ReconstructInput::new(
     &segmentations,
     1,
@@ -127,7 +127,7 @@ fn rttm_eof_single_final_frame_active_emits_no_span() {
 fn rejects_negative_cluster_id_other_than_unmatched() {
   let (chunks_sw, frames_sw) = default_swins();
   // hard_clusters with a -1 entry (NOT the UNMATCHED -2 sentinel).
-  let hard_clusters = vec![vec![0i32, -1i32]];
+  let hard_clusters = vec![[0i32, -1i32, UNMATCHED]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
     &segmentations,
@@ -148,7 +148,7 @@ fn rejects_negative_cluster_id_other_than_unmatched() {
 #[test]
 fn accepts_unmatched_sentinel() {
   let (chunks_sw, frames_sw) = default_swins();
-  let hard_clusters = vec![vec![0i32, UNMATCHED]];
+  let hard_clusters = vec![[0i32, UNMATCHED, UNMATCHED]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
     &segmentations,
@@ -171,7 +171,7 @@ fn accepts_unmatched_sentinel() {
 #[test]
 fn rejects_cluster_id_above_max() {
   let (chunks_sw, frames_sw) = default_swins();
-  let hard_clusters = vec![vec![0i32, MAX_CLUSTER_ID + 1]];
+  let hard_clusters = vec![[0i32, MAX_CLUSTER_ID + 1, UNMATCHED]];
   let segmentations = vec![0.5_f64; 8];
   let input = ReconstructInput::new(
     &segmentations,
@@ -197,7 +197,7 @@ fn rejects_count_above_max_cluster_id() {
   let mut count = vec![1u8; 4];
   count[2] = 255;
   let segmentations = vec![0.5_f64; 8];
-  let hard_clusters = vec![vec![0i32, 1i32]];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
   let input = ReconstructInput::new(
     &segmentations,
     1,
@@ -283,7 +283,7 @@ fn rttm_relabel_str_sort_orders_10_before_2() {
 fn rejects_zero_output_frames() {
   let (chunks_sw, frames_sw) = default_swins();
   let segmentations = vec![0.5_f64; 8];
-  let hard_clusters = vec![vec![0i32, 1i32]];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
   let input = ReconstructInput::new(
     &segmentations,
     1,
@@ -303,7 +303,7 @@ fn rejects_neg_inf_segmentation() {
   let (chunks_sw, frames_sw) = default_swins();
   let mut segmentations = vec![0.5_f64; 8];
   segmentations[5] = f64::NEG_INFINITY;
-  let hard_clusters = vec![vec![0i32, 1i32]];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
   let input = ReconstructInput::new(
     &segmentations,
     1,

@@ -92,7 +92,7 @@ fn run_offline_parity(fixture_dir: &str) {
     .filter(|l| !l.is_empty() && l.starts_with("SPEAKER"))
     .collect();
 
-  let our_lines = spans_to_rttm_lines(out.spans(), "clip_16k");
+  let our_lines = spans_to_rttm_lines(out.spans_slice(), "clip_16k");
   // The offline path projects PLDA itself from raw_embeddings, while
   // pyannote's captured `post_plda` was computed by its own
   // `_xvec_tf + _plda_tf` chain. Both implementations match within

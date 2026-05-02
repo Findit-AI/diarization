@@ -41,7 +41,7 @@ fn run_count_parity(fixture_dir: &str) {
   let (frame_step_arr, _) = read_npz_array::<f64>(&recon, "frame_step");
   let (frame_dur_arr, _) = read_npz_array::<f64>(&recon, "frame_duration");
 
-  let (computed, _frames_sw) = count_pyannote(
+  let tensor = count_pyannote(
     &segmentations,
     num_chunks,
     num_frames_per_chunk,
@@ -50,6 +50,7 @@ fn run_count_parity(fixture_dir: &str) {
     SlidingWindow::new(0.0, chunk_dur_arr[0], chunk_step_arr[0]),
     SlidingWindow::new(0.0, frame_dur_arr[0], frame_step_arr[0]),
   );
+  let computed = tensor.count();
 
   // Bit-exact: length and every frame must match.
   assert_eq!(

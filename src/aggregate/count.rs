@@ -34,7 +34,62 @@
 //! distinct use case (reconstruction-side aggregation), but
 //! [`count_pyannote`] does not call it.
 
+use std::sync::Arc;
+
 use crate::reconstruct::SlidingWindow;
+
+/// Errors returned by the fallible (`try_*`) variants of this module.
+///
+/// The non-fallible counterparts ([`count_pyannote`] /
+/// [`hamming_aggregate`]) panic on the same conditions. Use the
+/// fallible form when shape preconditions could come from untrusted
+/// input.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  /// Input slice length doesn't match the declared `(num_chunks, ...)`
+  /// shape product. Includes the offending lengths in the message.
+  #[error("aggregate: shape: {0}")]
+  Shape(&'static str),
+}
+
+/// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
+/// per-output-frame integer count tensor plus the matching
+/// `SlidingWindow`.
+///
+/// `count` is `Arc<[u8]>` so multiple downstream consumers can share
+/// the buffer without copying it. `Arc::clone` is two atomic ops;
+/// independent passes (e.g. RTTM emission + offline pipeline reuse +
+/// metric computation) each get a cheap handle.
+#[derive(Debug, Clone)]
+pub struct CountTensor {
+  count: Arc<[u8]>,
+  frames_sw: SlidingWindow,
+}
+
+impl CountTensor {
+  /// Cheap-clone handle to the per-output-frame count of active
+  /// speakers. Length = `frames_sw`'s expansion of the input chunk
+  /// grid. Each call is one `Arc::clone` (atomic refcount bump).
+  pub fn count(&self) -> Arc<[u8]> {
+    Arc::clone(&self.count)
+  }
+
+  /// Borrow as a slice without cloning the `Arc`.
+  pub fn count_slice(&self) -> &[u8] {
+    &self.count
+  }
+
+  /// Output-frame sliding window — `start = 0.0`, `duration` and
+  /// `step` from the `frames_sw_template` argument.
+  pub const fn frames_sw(&self) -> SlidingWindow {
+    self.frames_sw
+  }
+
+  /// Consume into the inner parts.
+  pub fn into_parts(self) -> (Arc<[u8]>, SlidingWindow) {
+    (self.count, self.frames_sw)
+  }
+}
 
 /// Hamming-weighted, skip-average aggregation across overlapping chunks.
 ///
@@ -63,6 +118,12 @@ use crate::reconstruct::SlidingWindow;
 /// `skip_average = true` (pyannote convention): returns the
 /// **unnormalized** hamming-weighted sum (no division by total
 /// weight).
+///
+/// # Panics
+///
+/// Panics if `per_chunk_value.len() != num_chunks *
+/// num_frames_per_chunk`. Use [`try_hamming_aggregate`] to surface
+/// the precondition as `Result<_, Error>` instead.
 pub fn hamming_aggregate(
   per_chunk_value: &[f64],
   num_chunks: usize,
@@ -71,11 +132,38 @@ pub fn hamming_aggregate(
   frame_step: f64,
   num_output_frames: usize,
 ) -> Vec<f64> {
-  assert_eq!(
-    per_chunk_value.len(),
-    num_chunks * num_frames_per_chunk,
-    "hamming_aggregate: per_chunk_value.len() != num_chunks * num_frames_per_chunk"
-  );
+  try_hamming_aggregate(
+    per_chunk_value,
+    num_chunks,
+    num_frames_per_chunk,
+    chunk_step,
+    frame_step,
+    num_output_frames,
+  )
+  .expect("hamming_aggregate: shape precondition violated; use try_hamming_aggregate to handle")
+}
+
+/// Fallible variant of [`hamming_aggregate`]. Returns
+/// [`Error::Shape`] when `per_chunk_value.len() != num_chunks *
+/// num_frames_per_chunk`; otherwise identical output.
+pub fn try_hamming_aggregate(
+  per_chunk_value: &[f64],
+  num_chunks: usize,
+  num_frames_per_chunk: usize,
+  chunk_step: f64,
+  frame_step: f64,
+  num_output_frames: usize,
+) -> Result<Vec<f64>, Error> {
+  let expected = num_chunks
+    .checked_mul(num_frames_per_chunk)
+    .ok_or(Error::Shape(
+      "num_chunks * num_frames_per_chunk overflows usize",
+    ))?;
+  if per_chunk_value.len() != expected {
+    return Err(Error::Shape(
+      "per_chunk_value.len() must equal num_chunks * num_frames_per_chunk",
+    ));
+  }
   let mut out = vec![0.0_f64; num_output_frames];
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
   let hamming: Vec<f64> = (0..num_frames_per_chunk)
@@ -92,7 +180,7 @@ pub fn hamming_aggregate(
       out[ofr as usize] += per_chunk_value[c * num_frames_per_chunk + cf] * hamming[cf];
     }
   }
-  out
+  Ok(out)
 }
 
 /// Compute pyannote's exact `num_output_frames` for the given
@@ -124,7 +212,7 @@ pub fn num_output_frames_pyannote(
 
 /// Bit-exact pyannote `speaker_count`. Returns the per-output-frame
 /// integer count of active speakers, ready to feed into
-/// [`crate::reconstruct::reconstruct`].
+/// [`reconstruct`](crate::reconstruct::reconstruct).
 ///
 /// Implements (verbatim from pyannote 4.0.4):
 /// ```text
@@ -139,15 +227,18 @@ pub fn num_output_frames_pyannote(
 /// `segmentations`: `(num_chunks, num_frames_per_chunk, num_speakers)`
 /// flattened row-major in the [c][f][s] order pyannote uses.
 ///
-/// Returns `(count, frames_sw)` where `frames_sw` matches pyannote's
-/// output-frame `SlidingWindow`.
-/// `chunks_sw` describes the input chunk grid (`duration` =
-/// chunk_duration, `step` = chunk_step). `frames_sw_template` describes
-/// the output frame grid (`duration` and `step`); its `start` is
-/// ignored — the returned `SlidingWindow` always starts at 0.0 to
-/// match pyannote's convention. Both args replace the previous four
-/// positional `(chunk_duration, chunk_step, frame_duration, frame_step)`
-/// floats.
+/// Returns a [`CountTensor`] holding the per-output-frame count and
+/// the matching `SlidingWindow`. `chunks_sw` describes the input
+/// chunk grid (`duration` = chunk_duration, `step` = chunk_step).
+/// `frames_sw_template` describes the output frame grid (`duration`
+/// and `step`); its `start` is ignored — the returned `SlidingWindow`
+/// always starts at 0.0 to match pyannote's convention.
+///
+/// # Panics
+///
+/// Panics if `segmentations.len() != num_chunks * num_frames_per_chunk
+/// * num_speakers`. Use [`try_count_pyannote`] to surface the
+/// precondition as `Result<_, Error>` instead.
 pub fn count_pyannote(
   segmentations: &[f64],
   num_chunks: usize,
@@ -156,16 +247,47 @@ pub fn count_pyannote(
   onset: f64,
   chunks_sw: SlidingWindow,
   frames_sw_template: SlidingWindow,
-) -> (Vec<u8>, SlidingWindow) {
+) -> CountTensor {
+  try_count_pyannote(
+    segmentations,
+    num_chunks,
+    num_frames_per_chunk,
+    num_speakers,
+    onset,
+    chunks_sw,
+    frames_sw_template,
+  )
+  .expect("count_pyannote: shape precondition violated; use try_count_pyannote to handle")
+}
+
+/// Fallible variant of [`count_pyannote`]. Returns [`Error::Shape`]
+/// when `segmentations.len() != num_chunks * num_frames_per_chunk *
+/// num_speakers` (or when that product overflows `usize`); otherwise
+/// identical output.
+pub fn try_count_pyannote(
+  segmentations: &[f64],
+  num_chunks: usize,
+  num_frames_per_chunk: usize,
+  num_speakers: usize,
+  onset: f64,
+  chunks_sw: SlidingWindow,
+  frames_sw_template: SlidingWindow,
+) -> Result<CountTensor, Error> {
   let chunk_duration = chunks_sw.duration();
   let chunk_step = chunks_sw.step();
   let frame_duration = frames_sw_template.duration();
   let frame_step = frames_sw_template.step();
-  assert_eq!(
-    segmentations.len(),
-    num_chunks * num_frames_per_chunk * num_speakers,
-    "count_pyannote: segmentations.len() != num_chunks * num_frames_per_chunk * num_speakers"
-  );
+  let expected = num_chunks
+    .checked_mul(num_frames_per_chunk)
+    .and_then(|n| n.checked_mul(num_speakers))
+    .ok_or(Error::Shape(
+      "num_chunks * num_frames_per_chunk * num_speakers overflows usize",
+    ))?;
+  if segmentations.len() != expected {
+    return Err(Error::Shape(
+      "segmentations.len() must equal num_chunks * num_frames_per_chunk * num_speakers",
+    ));
+  }
 
   // ── 1. Per-(chunk, frame) integer count of active speakers ─────
   //
@@ -252,16 +374,78 @@ pub fn count_pyannote(
   // `aggregated_mask == 0` (no contributing chunks), it injects
   // `missing=0.0`. Effectively: count is 0 where no chunk
   // contributed, else `np.rint(aggregated / overlapping_count)`.
-  let mut count = vec![0u8; num_output_frames];
+  //
+  // Build `Arc<[u8]>` directly via the trusted-len iterator collect:
+  // `Range<usize>::map` preserves `TrustedLen`, so std's
+  // specialized `<Arc<[T]> as FromIterator<T>>::from_iter` allocates
+  // the `Arc` once and writes each element in place — no
+  // `Vec`-then-`Arc` round-trip. Callers fan-out via cheap
+  // `Arc::clone` (refcount bump).
   let epsilon = 1e-12_f64;
-  for t in 0..num_output_frames {
-    if overlapping_count[t] > 0.0 {
-      let avg = aggregated[t] / overlapping_count[t].max(epsilon);
-      count[t] = avg.round_ties_even().clamp(0.0, u8::MAX as f64) as u8;
-    }
-  }
+  let count: Arc<[u8]> = (0..num_output_frames)
+    .map(|t| {
+      if overlapping_count[t] > 0.0 {
+        let avg = aggregated[t] / overlapping_count[t].max(epsilon);
+        avg.round_ties_even().clamp(0.0, u8::MAX as f64) as u8
+      } else {
+        0
+      }
+    })
+    .collect();
 
   let frames_sw = SlidingWindow::new(0.0, frame_duration, frame_step);
 
-  (count, frames_sw)
+  Ok(CountTensor { count, frames_sw })
+}
+
+#[cfg(test)]
+mod try_variant_tests {
+  use super::*;
+
+  fn sw(duration: f64, step: f64) -> SlidingWindow {
+    SlidingWindow::new(0.0, duration, step)
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_short_segmentations() {
+    // Declared shape is 3 chunks * 4 frames * 2 speakers = 24 elements.
+    let segs: Vec<f64> = vec![0.0; 23];
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_overflow() {
+    // num_chunks * num_frames_per_chunk * num_speakers overflows usize.
+    let segs: Vec<f64> = vec![0.0; 0];
+    let r = try_count_pyannote(
+      &segs,
+      1 << 30,
+      1 << 30,
+      1 << 30,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+    );
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  #[should_panic(expected = "shape precondition violated")]
+  fn count_pyannote_panics_on_short_input() {
+    let segs: Vec<f64> = vec![0.0; 23];
+    let _ = count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+  }
+
+  #[test]
+  fn try_hamming_aggregate_rejects_short_input() {
+    let r = try_hamming_aggregate(&[0.0; 7], 3, 4, 1.0, 0.0169, 100);
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  #[should_panic(expected = "shape precondition violated")]
+  fn hamming_aggregate_panics_on_short_input() {
+    let _ = hamming_aggregate(&[0.0; 7], 3, 4, 1.0, 0.0169, 100);
+  }
 }

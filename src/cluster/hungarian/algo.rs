@@ -45,6 +45,70 @@ use pathfinding::prelude::{Matrix, kuhn_munkres};
 /// `-2 * np.ones((num_chunks, num_speakers), dtype=np.int8)` initializer.
 pub const UNMATCHED: i32 = -2;
 
+// ── Sealed `ChunkLayout` trait + per-architecture marker types ───────────
+
+mod sealed {
+  pub trait Sealed {}
+}
+
+/// Sealed marker trait describing a segmentation-model output layout.
+///
+/// Each implementor pins the number of speaker slots a particular
+/// upstream model architecture emits per chunk. The trait is
+/// **sealed** (the supertrait `sealed::Sealed` is private) — external
+/// crates cannot add their own layouts. New layouts must land in
+/// `dia` itself, paired with:
+/// 1. A captured Phase-0 fixture from the upstream model's reference
+///    Python pipeline.
+/// 2. A parity test in `cluster::hungarian::parity_tests` (or the
+///    relevant downstream module) validating the new `SLOTS` count
+///    against the captured tensor shapes.
+///
+/// The `Row` associated type is the per-chunk hard-cluster assignment
+/// array (`[i32; SLOTS]`); using an associated type instead of a
+/// hard-coded alias means downstream public APIs (`assign_embeddings`,
+/// `OfflineOutput`, `reconstruct`) don't have to change shape if a
+/// future v0.x minor adds a second layout — they switch to a
+/// `<L: ChunkLayout>` generic parameter and the existing
+/// [`DefaultLayout`] alias keeps current callers working.
+pub trait ChunkLayout: sealed::Sealed + Copy + Default + 'static {
+  /// Number of speaker slots per chunk for this layout.
+  const SLOTS: usize;
+  /// Per-chunk hard-cluster assignment row type — conventionally
+  /// `[i32; SLOTS]`.
+  type Row: Copy + 'static;
+}
+
+/// pyannote/segmentation-3.0 layout (community-1 model architecture):
+/// 3 speaker slots per chunk. The only layout `dia` v0.1.x supports;
+/// new pyannote model releases would add their own marker types
+/// alongside this one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Segmentation3;
+impl sealed::Sealed for Segmentation3 {}
+impl ChunkLayout for Segmentation3 {
+  const SLOTS: usize = crate::segment::options::MAX_SPEAKER_SLOTS as usize;
+  type Row = [i32; crate::segment::options::MAX_SPEAKER_SLOTS as usize];
+}
+
+/// Default segmentation layout for `dia` v0.1.x. Type-aliased to
+/// [`Segmentation3`] so public APIs that today commit to community-1's
+/// architecture don't need a `<L: ChunkLayout>` generic. When a
+/// future release adds a second layout, this alias stays pinned to
+/// `Segmentation3` for backward compatibility — callers wanting the
+/// new layout opt in via the explicit marker type.
+pub type DefaultLayout = Segmentation3;
+
+/// Per-chunk hard-cluster assignment row for the [`DefaultLayout`]
+/// (`[i32; 3]` under segmentation-3.0). `[s]` is the cluster id, or
+/// [`UNMATCHED`] (`-2`) for speakers with no surviving cluster.
+///
+/// Resolved through the [`ChunkLayout`] associated type (rather than
+/// a direct `[i32; 3]` alias) so future expansion to other model
+/// architectures is a non-breaking addition rather than a public-API
+/// type churn.
+pub type ChunkAssignment = <DefaultLayout as ChunkLayout>::Row;
+
 /// Batched constrained Hungarian assignment over a stack of per-chunk
 /// `(num_speakers, num_clusters)` cost matrices.
 ///

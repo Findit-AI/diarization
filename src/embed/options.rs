@@ -51,12 +51,44 @@ use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 /// execution providers configured beyond ort's default search.
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
-#[derive(Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EmbedModelOptions {
-  optimization_level: Option<GraphOptimizationLevel>,
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      default = "default_optimization_level",
+      with = "crate::ort_serde::graph_optimization_level"
+    )
+  )]
+  optimization_level: GraphOptimizationLevel,
+  #[cfg_attr(feature = "serde", serde(skip, default))]
   providers: Vec<ExecutionProviderDispatch>,
-  intra_op_num_threads: Option<usize>,
-  inter_op_num_threads: Option<usize>,
+  #[cfg_attr(feature = "serde", serde(default = "default_threads"))]
+  intra_threads: usize,
+  #[cfg_attr(feature = "serde", serde(default = "default_threads"))]
+  inter_threads: usize,
+}
+
+#[cfg(feature = "ort")]
+const fn default_optimization_level() -> GraphOptimizationLevel {
+  GraphOptimizationLevel::Disable
+}
+
+#[cfg(feature = "ort")]
+const fn default_threads() -> usize {
+  1
+}
+
+#[cfg(feature = "ort")]
+impl Default for EmbedModelOptions {
+  fn default() -> Self {
+    Self {
+      optimization_level: default_optimization_level(),
+      providers: Vec::new(),
+      intra_threads: default_threads(),
+      inter_threads: default_threads(),
+    }
+  }
 }
 
 #[cfg(feature = "ort")]
@@ -70,7 +102,7 @@ impl EmbedModelOptions {
 
   /// Override the graph optimization level.
   pub fn with_optimization_level(mut self, level: GraphOptimizationLevel) -> Self {
-    self.optimization_level = Some(level);
+    self.optimization_level = level;
     self
   }
 
@@ -85,16 +117,17 @@ impl EmbedModelOptions {
     self
   }
 
-  /// Override `intra_op_num_threads`. Set to `1` for bit-exact
-  /// reproducibility across runs (parallel reductions are not deterministic).
-  pub fn with_intra_op_num_threads(mut self, n: usize) -> Self {
-    self.intra_op_num_threads = Some(n);
+  /// Override `intra_threads`. Default is `1` for bit-exact
+  /// reproducibility across runs (parallel reductions are not
+  /// deterministic).
+  pub fn with_intra_threads(mut self, n: usize) -> Self {
+    self.intra_threads = n;
     self
   }
 
-  /// Override `inter_op_num_threads`.
-  pub fn with_inter_op_num_threads(mut self, n: usize) -> Self {
-    self.inter_op_num_threads = Some(n);
+  /// Override `inter_threads`. Default is `1`.
+  pub fn with_inter_threads(mut self, n: usize) -> Self {
+    self.inter_threads = n;
     self
   }
 
@@ -102,7 +135,7 @@ impl EmbedModelOptions {
 
   /// Set the graph optimization level (in-place).
   pub fn set_optimization_level(&mut self, level: GraphOptimizationLevel) -> &mut Self {
-    self.optimization_level = Some(level);
+    self.optimization_level = level;
     self
   }
 
@@ -112,15 +145,15 @@ impl EmbedModelOptions {
     self
   }
 
-  /// Set `intra_op_num_threads` (in-place).
-  pub fn set_intra_op_num_threads(&mut self, n: usize) -> &mut Self {
-    self.intra_op_num_threads = Some(n);
+  /// Set `intra_threads` (in-place).
+  pub fn set_intra_threads(&mut self, n: usize) -> &mut Self {
+    self.intra_threads = n;
     self
   }
 
-  /// Set `inter_op_num_threads` (in-place).
-  pub fn set_inter_op_num_threads(&mut self, n: usize) -> &mut Self {
-    self.inter_op_num_threads = Some(n);
+  /// Set `inter_threads` (in-place).
+  pub fn set_inter_threads(&mut self, n: usize) -> &mut Self {
+    self.inter_threads = n;
     self
   }
 
@@ -133,17 +166,15 @@ impl EmbedModelOptions {
     self,
     mut builder: SessionBuilder,
   ) -> Result<SessionBuilder, crate::embed::Error> {
-    if let Some(level) = self.optimization_level {
-      builder = builder
-        .with_optimization_level(level)
-        .map_err(ort::Error::from)?;
-    }
-    if let Some(n) = self.intra_op_num_threads {
-      builder = builder.with_intra_threads(n).map_err(ort::Error::from)?;
-    }
-    if let Some(n) = self.inter_op_num_threads {
-      builder = builder.with_inter_threads(n).map_err(ort::Error::from)?;
-    }
+    builder = builder
+      .with_optimization_level(self.optimization_level)
+      .map_err(ort::Error::from)?;
+    builder = builder
+      .with_intra_threads(self.intra_threads)
+      .map_err(ort::Error::from)?;
+    builder = builder
+      .with_inter_threads(self.inter_threads)
+      .map_err(ort::Error::from)?;
     if !self.providers.is_empty() {
       builder = builder
         .with_execution_providers(self.providers)

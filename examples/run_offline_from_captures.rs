@@ -89,12 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   .with_max_iters(max_iters[0] as usize)
   .with_min_duration_off(min_dur_off[0]);
   let out = diarize_offline(&input)?;
-  for line in spans_to_rttm_lines(&out.spans(), "clip_16k") {
+  for line in spans_to_rttm_lines(out.spans_slice(), "clip_16k") {
     println!("{line}");
   }
   eprintln!(
     "# offline (Phase 5c, captured tensors): {} spans, {} clusters",
-    out.spans().len(),
+    out.spans_slice().len(),
     out.num_clusters()
   );
   Ok(())

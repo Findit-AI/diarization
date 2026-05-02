@@ -70,13 +70,33 @@ const fn check_hysteresis_threshold(v: f32) -> bool {
 
 /// Tunables for the segmenter. Defaults match the upstream pyannote pipeline.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SegmentOptions {
+  #[cfg_attr(feature = "serde", serde(default = "default_onset_threshold"))]
   onset_threshold: f32,
+  #[cfg_attr(feature = "serde", serde(default = "default_offset_threshold"))]
   offset_threshold: f32,
+  #[cfg_attr(feature = "serde", serde(default = "default_step_samples"))]
   step_samples: u32,
+  #[cfg_attr(feature = "serde", serde(default, with = "humantime_serde"))]
   min_voice_duration: Duration,
+  #[cfg_attr(feature = "serde", serde(default, with = "humantime_serde"))]
   min_activity_duration: Duration,
+  #[cfg_attr(feature = "serde", serde(default, with = "humantime_serde"))]
   voice_merge_gap: Duration,
+}
+
+#[cfg(feature = "serde")]
+const fn default_onset_threshold() -> f32 {
+  0.5
+}
+#[cfg(feature = "serde")]
+const fn default_offset_threshold() -> f32 {
+  0.357
+}
+#[cfg(feature = "serde")]
+const fn default_step_samples() -> u32 {
+  40_000
 }
 
 impl Default for SegmentOptions {

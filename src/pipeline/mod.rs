@@ -12,10 +12,10 @@
 //! 6. Per-chunk per-speaker centroid distances (cdist with cosine metric).
 //! 7. `constrained_argmax` over masked soft clusters (`diarization::cluster::hungarian`).
 //!
-//! Output: per-chunk hard-cluster assignments `Vec<Vec<i32>>`, where
-//! each inner vector has length `num_speakers` and `UNMATCHED = -2`
-//! marks speakers with no surviving cluster (only possible when
-//! `num_speakers > num_alive_clusters`).
+//! Output: per-chunk hard-cluster assignments `Arc<[ChunkAssignment]>`,
+//! where each [`ChunkAssignment`] is `[i32; MAX_SPEAKER_SLOTS]` (= 3)
+//! and `UNMATCHED = -2` marks speakers with no surviving cluster (only
+//! possible when `num_speakers > num_alive_clusters`).
 //!
 //! Stage 8 (per-frame discrete diarization) is Phase 5b. Diarizer
 //! integration is Phase 5c. Until then `diarization::pipeline` is crate-private.
@@ -31,5 +31,6 @@ mod parity_tests;
 #[cfg(test)]
 mod tests;
 
+pub use crate::cluster::hungarian::ChunkAssignment;
 pub use algo::{AssignEmbeddingsInput, assign_embeddings};
 pub use error::Error;

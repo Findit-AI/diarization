@@ -1,9 +1,11 @@
 //! Phase 5c offline diarization orchestrator.
 
+use std::sync::Arc;
+
 use crate::{
   cluster::centroid::SP_ALIVE_THRESHOLD,
   embed::EMBEDDING_DIM,
-  pipeline::{AssignEmbeddingsInput, assign_embeddings},
+  pipeline::{AssignEmbeddingsInput, ChunkAssignment, assign_embeddings},
   plda::{PldaTransform, RawEmbedding},
   reconstruct::{ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans, reconstruct},
 };
@@ -207,20 +209,25 @@ impl<'a> OfflineInput<'a> {
 }
 
 /// Output of [`diarize_offline`].
+///
+/// Owned slices are `Arc<[T]>` so multiple downstream consumers
+/// (RTTM emission, metric computation, visualization, etc.) can share
+/// the same buffer with cheap `Arc::clone` rather than re-allocating.
+#[derive(Debug, Clone)]
 pub struct OfflineOutput {
-  hard_clusters: Vec<Vec<i32>>,
-  discrete_diarization: Vec<f32>,
+  hard_clusters: Arc<[ChunkAssignment]>,
+  discrete_diarization: Arc<[f32]>,
   num_clusters: usize,
-  spans: Vec<RttmSpan>,
+  spans: Arc<[RttmSpan]>,
 }
 
 impl OfflineOutput {
   /// Construct.
   pub fn new(
-    hard_clusters: Vec<Vec<i32>>,
-    discrete_diarization: Vec<f32>,
+    hard_clusters: Arc<[ChunkAssignment]>,
+    discrete_diarization: Arc<[f32]>,
     num_clusters: usize,
-    spans: Vec<RttmSpan>,
+    spans: Arc<[RttmSpan]>,
   ) -> Self {
     Self {
       hard_clusters,
@@ -230,16 +237,29 @@ impl OfflineOutput {
     }
   }
 
-  /// Hard speaker assignment per (chunk, speaker_slot). `-2` for
-  /// unmatched. Length `num_chunks`; each inner vec has length
-  /// `num_speakers`.
-  pub fn hard_clusters(&self) -> &[Vec<i32>] {
+  /// Cheap-clone handle to the per-chunk hard speaker assignment.
+  /// Each row is `[i32; MAX_SPEAKER_SLOTS]` (= 3) with `-2` for
+  /// unmatched slots. Length = `num_chunks`.
+  pub fn hard_clusters(&self) -> Arc<[ChunkAssignment]> {
+    Arc::clone(&self.hard_clusters)
+  }
+
+  /// Borrow the per-chunk hard speaker assignment without cloning the
+  /// `Arc`.
+  pub fn hard_clusters_slice(&self) -> &[ChunkAssignment] {
     &self.hard_clusters
   }
 
-  /// Frame-level binary diarization grid `(num_output_frames,
-  /// num_clusters)`, flattened row-major `[t][k]`.
-  pub fn discrete_diarization(&self) -> &[f32] {
+  /// Cheap-clone handle to the frame-level binary diarization grid
+  /// `(num_output_frames, num_clusters)`, flattened row-major
+  /// `[t][k]`.
+  pub fn discrete_diarization(&self) -> Arc<[f32]> {
+    Arc::clone(&self.discrete_diarization)
+  }
+
+  /// Borrow the frame-level binary diarization grid without cloning
+  /// the `Arc`.
+  pub fn discrete_diarization_slice(&self) -> &[f32] {
     &self.discrete_diarization
   }
 
@@ -248,14 +268,15 @@ impl OfflineOutput {
     self.num_clusters
   }
 
-  /// RTTM spans (uri-agnostic). Caller wraps with file id to format.
-  pub fn spans(&self) -> &[RttmSpan] {
-    &self.spans
+  /// Cheap-clone handle to the RTTM spans (uri-agnostic). Caller
+  /// wraps with file id to format.
+  pub fn spans(&self) -> Arc<[RttmSpan]> {
+    Arc::clone(&self.spans)
   }
 
-  /// Move the spans out without cloning.
-  pub fn into_spans(self) -> Vec<RttmSpan> {
-    self.spans
+  /// Borrow the RTTM spans without cloning the `Arc`.
+  pub fn spans_slice(&self) -> &[RttmSpan] {
+    &self.spans
   }
 }
 
@@ -445,7 +466,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   // num_clusters` panics for fixtures where `count` peaks higher
   // than the number of distinct hard-cluster ids.
   let mut max_cluster_id = -1i32;
-  for row in &hard_clusters {
+  for row in hard_clusters.iter() {
     for &k in row {
       if k > max_cluster_id {
         max_cluster_id = k;
@@ -482,6 +503,12 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     min_duration_off,
   );
 
+  // `discrete_to_spans` builds via `Vec::push` because span count is
+  // unknown a-priori; convert to `Arc<[RttmSpan]>` once at the
+  // boundary. This is a one-time O(num_spans) copy (typically <1000
+  // elements) — small price for the fan-out savings on every
+  // downstream `Arc::clone`.
+  let spans: Arc<[RttmSpan]> = Arc::from(spans);
   Ok(OfflineOutput::new(
     hard_clusters,
     discrete_diarization,

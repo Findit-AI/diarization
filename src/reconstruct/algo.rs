@@ -1,7 +1,12 @@
 //! Reconstruction math: clustered_segmentations + overlap-add aggregate
 //! + top-K binarize.
 
-use crate::{cluster::hungarian::UNMATCHED, reconstruct::error::Error};
+use std::sync::Arc;
+
+use crate::{
+  cluster::hungarian::{ChunkAssignment, UNMATCHED},
+  reconstruct::error::Error,
+};
 
 /// Hard upper bound on the cluster-id range accepted in `hard_clusters`.
 /// Pyannote's diarization pipeline emits ids bounded by the alive
@@ -92,7 +97,7 @@ pub struct ReconstructInput<'a> {
   num_chunks: usize,
   num_frames_per_chunk: usize,
   num_speakers: usize,
-  hard_clusters: &'a [Vec<i32>],
+  hard_clusters: &'a [ChunkAssignment],
   count: &'a [u8],
   num_output_frames: usize,
   chunks_sw: SlidingWindow,
@@ -124,7 +129,7 @@ impl<'a> ReconstructInput<'a> {
     num_chunks: usize,
     num_frames_per_chunk: usize,
     num_speakers: usize,
-    hard_clusters: &'a [Vec<i32>],
+    hard_clusters: &'a [ChunkAssignment],
     count: &'a [u8],
     num_output_frames: usize,
     chunks_sw: SlidingWindow,
@@ -171,7 +176,7 @@ impl<'a> ReconstructInput<'a> {
     self.num_speakers
   }
   /// Per-chunk hard cluster assignment.
-  pub const fn hard_clusters(&self) -> &'a [Vec<i32>] {
+  pub const fn hard_clusters(&self) -> &'a [ChunkAssignment] {
     self.hard_clusters
   }
   /// Per-output-frame instantaneous speaker count.
@@ -214,7 +219,7 @@ impl<'a> ReconstructInput<'a> {
 ///   mask path; arbitrary `±inf` is rejected).
 /// - [`Error::Timing`] for non-finite or non-positive sliding-window
 ///   parameters.
-pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
+pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   let &ReconstructInput {
     segmentations,
     num_chunks,
@@ -246,12 +251,14 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   if hard_clusters.len() != num_chunks {
     return Err(Error::Shape("hard_clusters.len() != num_chunks"));
   }
-  for row in hard_clusters {
-    if row.len() != num_speakers {
-      return Err(Error::Shape(
-        "each hard_clusters[c] must have length num_speakers",
-      ));
-    }
+  // Each `hard_clusters[c]` is `[i32; MAX_SPEAKER_SLOTS]` by type, so
+  // its length is statically equal to `MAX_SPEAKER_SLOTS = 3`. We
+  // require `num_speakers <= MAX_SPEAKER_SLOTS` so the body's
+  // `0..num_speakers` indexing stays in-bounds.
+  if num_speakers > crate::segment::options::MAX_SPEAKER_SLOTS as usize {
+    return Err(Error::Shape(
+      "num_speakers must be <= MAX_SPEAKER_SLOTS (3)",
+    ));
   }
   if num_output_frames == 0 {
     // Zero output frames with nonempty chunks/segmentations is a
@@ -334,8 +341,12 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
     }
   }
   if max_cluster < 0 {
-    // No assigned clusters anywhere — return all-zero grid.
-    return Ok(vec![0.0; num_output_frames]);
+    // No assigned clusters anywhere — return all-zero grid built
+    // directly via the trusted-len iterator collect. `Range<usize>`
+    // is `TrustedLen`, `Map` preserves it, so std's specialized
+    // `<Arc<[T]> as FromIterator<T>>::from_iter` allocates the
+    // `Arc<[f32]>` once and writes each element straight in.
+    return Ok((0..num_output_frames).map(|_| 0.0_f32).collect());
   }
   let num_clusters_from_hard = (max_cluster + 1) as usize;
 
@@ -429,7 +440,27 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
   }
 
   // ── Stage 3: top-`count[t]` binarize per output frame ──────────
-  let mut out = vec![0.0f32; num_output_frames * num_clusters];
+  //
+  // Build the output `Arc<[f32]>` directly via
+  // `Arc::new_uninit_slice` + `Arc::get_mut` for unique mutable
+  // access (the freshly-allocated `Arc` has refcount 1, so
+  // `get_mut` returns `Some`). Each cell is initialized to 0.0
+  // first, then non-default selections overwrite. After all writes,
+  // `assume_init` converts the `MaybeUninit` slice in place — no
+  // `Vec`-then-`Arc` round-trip and no copy through the refcount
+  // prefix.
+  let total = num_output_frames * num_clusters;
+  let mut arc_uninit: Arc<[std::mem::MaybeUninit<f32>]> = Arc::new_uninit_slice(total);
+  // SAFETY: `arc_uninit` was just constructed and has refcount 1, so
+  // `get_mut` returns `Some` with unique mutable access to the
+  // backing storage.
+  let out: &mut [std::mem::MaybeUninit<f32>] = Arc::get_mut(&mut arc_uninit)
+    .expect("Arc::get_mut on freshly-allocated new_uninit_slice (unique owner) returns Some");
+  for slot in out.iter_mut() {
+    slot.write(0.0_f32);
+  }
+  // SAFETY: every element was just initialized via `slot.write(0.0)`.
+  let out: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast(), total) };
   let mut prev_selected: Vec<usize> = Vec::new();
   for (t, &c_byte) in count.iter().enumerate().take(num_output_frames) {
     let c_count = c_byte as usize;
@@ -473,7 +504,13 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Vec<f32>, Error> {
     prev_selected = now_selected;
   }
 
+  // SAFETY: every cell in `arc_uninit` was initialized to 0.0 above
+  // (the `slot.write(0.0)` loop covered the full slice), and the
+  // subsequent `out[..] = 1.0` writes are also fully initialized
+  // f32 values. `assume_init` is the canonical conversion from
+  // `Arc<[MaybeUninit<f32>]>` to `Arc<[f32]>`.
+  let arc_init: Arc<[f32]> = unsafe { arc_uninit.assume_init() };
   // Reference UNMATCHED so the import isn't dead code.
   let _ = UNMATCHED;
-  Ok(out)
+  Ok(arc_init)
 }

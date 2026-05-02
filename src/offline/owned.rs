@@ -50,15 +50,53 @@ pub const SLOTS_PER_CHUNK: usize = 3;
 /// 1-second chunk step, 0.5 onset/offset binarization, threshold/Fa/Fb
 /// from the community-1 config.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OwnedPipelineConfig {
+  #[cfg_attr(feature = "serde", serde(default = "default_step_samples"))]
   step_samples: u32,
+  #[cfg_attr(feature = "serde", serde(default = "default_onset"))]
   onset: f32,
+  #[cfg_attr(feature = "serde", serde(default = "default_threshold"))]
   threshold: f64,
+  #[cfg_attr(feature = "serde", serde(default = "default_fa"))]
   fa: f64,
+  #[cfg_attr(feature = "serde", serde(default = "default_fb"))]
   fb: f64,
+  #[cfg_attr(feature = "serde", serde(default = "default_max_iters"))]
   max_iters: usize,
+  #[cfg_attr(feature = "serde", serde(default))]
   min_duration_off: f64,
+  #[cfg_attr(feature = "serde", serde(default = "default_smoothing_epsilon"))]
   smoothing_epsilon: Option<f32>,
+}
+
+#[cfg(feature = "serde")]
+const fn default_step_samples() -> u32 {
+  16_000
+}
+#[cfg(feature = "serde")]
+const fn default_onset() -> f32 {
+  0.5
+}
+#[cfg(feature = "serde")]
+const fn default_threshold() -> f64 {
+  0.6
+}
+#[cfg(feature = "serde")]
+const fn default_fa() -> f64 {
+  0.07
+}
+#[cfg(feature = "serde")]
+const fn default_fb() -> f64 {
+  0.8
+}
+#[cfg(feature = "serde")]
+const fn default_max_iters() -> usize {
+  20
+}
+#[cfg(feature = "serde")]
+const fn default_smoothing_epsilon() -> Option<f32> {
+  Some(0.1)
 }
 
 impl OwnedPipelineConfig {
@@ -374,7 +412,8 @@ impl OwnedDiarizationPipeline {
       cfg.onset() as f64,
       chunks_sw,
       frames_sw_template,
-    );
+    )
+    .into_parts();
     let num_output_frames = count.len();
 
     // ── Stage 4: dispatch to diarize_offline ───────────────────────
@@ -415,4 +454,33 @@ fn box_leak_segment_err(e: crate::segment::Error) -> &'static str {
 }
 fn box_leak_embed_err(e: crate::embed::Error) -> &'static str {
   Box::leak(format!("embed: {e}").into_boxed_str())
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+  use super::*;
+
+  #[test]
+  fn owned_pipeline_config_default_roundtrip() {
+    let cfg = OwnedPipelineConfig::new();
+    let json = serde_json::to_string(&cfg).expect("serialize");
+    let back: OwnedPipelineConfig = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(cfg.step_samples(), back.step_samples());
+    assert_eq!(cfg.threshold(), back.threshold());
+    assert_eq!(cfg.fa(), back.fa());
+    assert_eq!(cfg.fb(), back.fb());
+    assert_eq!(cfg.max_iters(), back.max_iters());
+    assert_eq!(cfg.smoothing_epsilon(), back.smoothing_epsilon());
+  }
+
+  /// Empty JSON object → all defaults filled in.
+  #[test]
+  fn owned_pipeline_config_empty_json_uses_defaults() {
+    let cfg: OwnedPipelineConfig = serde_json::from_str("{}").expect("deserialize");
+    let want = OwnedPipelineConfig::new();
+    assert_eq!(cfg.step_samples(), want.step_samples());
+    assert_eq!(cfg.onset(), want.onset());
+    assert_eq!(cfg.threshold(), want.threshold());
+    assert_eq!(cfg.smoothing_epsilon(), want.smoothing_epsilon());
+  }
 }

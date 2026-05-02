@@ -48,6 +48,8 @@
 //! near-realtime indexing this is acceptable; for sub-range latency
 //! see [`crate::diarizer::Diarizer`].
 
+use std::sync::Arc;
+
 use crate::{
   aggregate::count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
@@ -85,7 +87,9 @@ pub enum StreamingError {
 
 /// Configuration for [`StreamingOfflineDiarizer`].
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StreamingOfflineConfig {
+  #[cfg_attr(feature = "serde", serde(default))]
   diarization: OwnedPipelineConfig,
 }
 
@@ -173,7 +177,10 @@ struct AccumulatedRange {
   raw_embeddings: Vec<f32>,
   /// Per-output-frame instantaneous speaker count, computed by
   /// `aggregate::count_pyannote` on this range's segmentations.
-  count: Vec<u8>,
+  /// `Arc<[u8]>` to avoid a copy from `count_pyannote`'s output;
+  /// also lets `finalize` cheaply hand the per-range buffer to
+  /// downstream stages.
+  count: Arc<[u8]>,
   /// Output-frame sliding window (local to this range, start = 0).
   frames_sw_local: SlidingWindow,
   /// Chunk-level sliding window (local to this range, start = 0).
@@ -335,7 +342,8 @@ impl StreamingOfflineDiarizer {
       cfg.onset() as f64,
       chunks_sw_local,
       frames_sw_template,
-    );
+    )
+    .into_parts();
 
     self.ranges.push(AccumulatedRange {
       abs_start_sample,
@@ -373,9 +381,9 @@ impl StreamingOfflineDiarizer {
   ///   pushed or any range's chunk count is zero.
   /// - All other errors propagate from `diarize_offline` /
   ///   `reconstruct`.
-  pub fn finalize(&self, plda: &PldaTransform) -> Result<Vec<DiarizedSpan>, StreamingError> {
+  pub fn finalize(&self, plda: &PldaTransform) -> Result<Arc<[DiarizedSpan]>, StreamingError> {
     if self.ranges.is_empty() {
-      return Ok(Vec::new());
+      return Ok(Arc::from([] as [DiarizedSpan; 0]));
     }
     let total_chunks: usize = self.ranges.iter().map(|r| r.num_chunks).sum();
     if total_chunks == 0 {
@@ -509,7 +517,12 @@ impl StreamingOfflineDiarizer {
 
     // Sort by start time so callers can stream the output in order.
     all_spans.sort_by_key(|s| s.start_sample);
-    Ok(all_spans)
+    // One-time `Vec`→`Arc<[T]>` copy at the boundary. `all_spans` is
+    // built by `Vec::push` because span count is unknown a-priori
+    // (it depends on per-range `discrete_to_spans` output); converting
+    // to `Arc<[DiarizedSpan]>` lets downstream consumers fan out
+    // cheaply via `Arc::clone`.
+    Ok(Arc::from(all_spans))
   }
 
   /// Drop accumulated tensors. Useful for reusing the same diarizer
