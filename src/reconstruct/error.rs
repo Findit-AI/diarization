@@ -41,6 +41,13 @@ pub enum ShapeError {
   SegmentationsSizeOverflow,
   #[error("num_chunks * num_frames_per_chunk * num_clusters overflows usize")]
   ClusteredSizeOverflow,
+  #[error("num_output_frames * num_clusters overflows usize")]
+  OutputGridSizeOverflow,
+  #[error(
+    "hard_clusters[c] has a non-UNMATCHED id in a slot beyond num_speakers; \
+     slots num_speakers..MAX_SPEAKER_SLOTS must all be UNMATCHED"
+  )]
+  HardClustersTrailingSlotNotUnmatched,
   #[error("grid.len() must equal num_frames * num_clusters")]
   GridLenMismatch,
   #[error("num_frames * num_clusters overflows usize")]

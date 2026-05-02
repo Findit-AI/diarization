@@ -451,7 +451,16 @@ jobs:
       - name: Run tarpaulin
         env:
           RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --all-features --run-types tests --run-types doctests --workspace --out xml
+        # Explicit feature list instead of `--all-features`. The `tch`
+        # backend needs libtorch on the runner (handled only by the
+        # dedicated `tch-compile-check` job) and `silero-vad` is a
+        # workspace path dep on `../silero/` not present in clean
+        # checkouts. Coverage matches the same exclusion pattern the
+        # build/test/clippy jobs use via `cargo hack
+        # --exclude-features tch,silero-vad`. Without this, the
+        # coverage job would fail to compile after the rest of CI
+        # passes — forcing maintainers to bypass the gate to merge.
+        run: cargo tarpaulin --features ort,bundled-segmentation,serde,_bench --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:

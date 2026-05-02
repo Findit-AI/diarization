@@ -316,8 +316,15 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // speech under the previous code (skipped by the speakers_in_k
   // filter), and a corrupt large positive id could drive the
   // num_clusters allocation into multi-GB range.
+  //
+  // We restrict id-range validation to the first `num_speakers`
+  // slots (the active range). Trailing slots in `[num_speakers,
+  // MAX_SPEAKER_SLOTS)` MUST be UNMATCHED — without that constraint,
+  // a non-UNMATCHED trailing slot would survive validation and the
+  // downstream `speakers_in_k` filter would index `segmentations`
+  // with `s >= num_speakers`, OOB-reading the next frame's data.
   for row in hard_clusters {
-    for &k in row {
+    for &k in row.iter().take(num_speakers) {
       if k == UNMATCHED {
         continue;
       }
@@ -328,12 +335,19 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
         return Err(ShapeError::HardClustersIdAboveMax.into());
       }
     }
+    for &k in row.iter().skip(num_speakers) {
+      if k != UNMATCHED {
+        return Err(ShapeError::HardClustersTrailingSlotNotUnmatched.into());
+      }
+    }
   }
 
-  // Determine num_clusters from hard_clusters.
+  // Determine num_clusters from hard_clusters. Only consult the active
+  // `num_speakers` slots — trailing slots are guaranteed UNMATCHED by
+  // the validation above.
   let mut max_cluster = -1i32;
   for row in hard_clusters {
-    for &k in row {
+    for &k in row.iter().take(num_speakers) {
       if k > max_cluster {
         max_cluster = k;
       }
@@ -374,9 +388,14 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   for c in 0..num_chunks {
     for k_iter in 0..num_clusters_from_hard {
       let k = k_iter as i32;
-      // Find speakers in this chunk assigned to cluster k.
+      // Find speakers in this chunk assigned to cluster k. Iterate
+      // only the active `num_speakers` slots — slots beyond that are
+      // guaranteed UNMATCHED by the validation above, but capping
+      // explicitly is the load-bearing guarantee that `s` stays in
+      // `0..num_speakers` so the segmentation index below cannot OOB.
       let speakers_in_k: Vec<usize> = hard_clusters[c]
         .iter()
+        .take(num_speakers)
         .enumerate()
         .filter_map(|(s, &kk)| (kk == k).then_some(s))
         .collect();
@@ -406,8 +425,17 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // closest_frame(chunk_start_time + 0.5 * frame_duration), then
   //   aggregated[start_frame .. start_frame + npc, k] += clustered * mask
   // hamming + warm_up are all-ones in cluster_vbx's call path.
-  let mut aggregated = vec![0.0f32; num_output_frames * num_clusters];
-  let mut agg_mask = vec![false; num_output_frames * num_clusters];
+  //
+  // Checked product: `num_output_frames * num_clusters` is independent
+  // from the `cs_size` axes guarded above. On 32-bit targets, a feasible
+  // `count.len()` near `usize::MAX / 1024` combined with a valid
+  // MAX_CLUSTER_ID = 1023 would wrap silently and let the allocations
+  // below get a tiny buffer that later indexing OOBs into.
+  let output_grid_size = num_output_frames
+    .checked_mul(num_clusters)
+    .ok_or(ShapeError::OutputGridSizeOverflow)?;
+  let mut aggregated = vec![0.0f32; output_grid_size];
+  let mut agg_mask = vec![false; output_grid_size];
 
   for c in 0..num_chunks {
     let chunk_start_time = chunks_sw.start + (c as f64) * chunks_sw.step;
@@ -455,7 +483,9 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // `assume_init` converts the `MaybeUninit` slice in place — no
   // `Vec`-then-`Arc` round-trip and no copy through the refcount
   // prefix.
-  let total = num_output_frames * num_clusters;
+  // Reuse the checked product computed above for the aggregated /
+  // agg_mask Vec so the Arc allocation can't disagree with them.
+  let total = output_grid_size;
   let mut arc_uninit: Arc<[std::mem::MaybeUninit<f32>]> = Arc::new_uninit_slice(total);
   // SAFETY: `arc_uninit` was just constructed and has refcount 1, so
   // `get_mut` returns `Some` with unique mutable access to the
