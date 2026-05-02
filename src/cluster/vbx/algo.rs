@@ -3,6 +3,14 @@
 use crate::cluster::vbx::error::Error;
 use nalgebra::{DMatrix, DVector};
 
+/// Hard upper bound on `max_iters`. Pyannote's community-1 default is
+/// 20 and captured fixtures converge in 16-20 iterations; production
+/// runs that hit even 50 would already indicate a misconfiguration.
+/// `1_000` is ~50× the default — generous headroom for experimentation
+/// while preventing a malformed config from turning one diarization
+/// call into hours of unbounded matmul work.
+pub const MAX_ITERS_CAP: usize = 1_000;
+
 /// Why the EM loop stopped. Lets callers distinguish a converged
 /// posterior from one that ran out of iterations — both have
 /// `elbo_trajectory.len() == max_iters` when convergence happens
@@ -290,6 +298,12 @@ pub fn vbx_iterate(
   }
   if max_iters == 0 {
     return Err(Error::Shape("max_iters must be at least 1"));
+  }
+  if max_iters > MAX_ITERS_CAP {
+    return Err(Error::Shape(
+      "max_iters exceeds MAX_ITERS_CAP (1_000); pyannote's default is 20 \
+       and realistic configurations converge well below the cap",
+    ));
   }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi)) and rho via

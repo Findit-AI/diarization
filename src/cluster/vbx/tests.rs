@@ -347,6 +347,36 @@ fn vbx_rejects_max_iters_zero() {
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
+/// `max_iters > MAX_ITERS_CAP` is rejected at the boundary so a
+/// malformed config cannot turn one diarization call into hours of
+/// unbounded matmul work. Pyannote's default is 20; the cap is 1_000.
+#[test]
+fn vbx_rejects_max_iters_above_cap() {
+  use crate::cluster::vbx::MAX_ITERS_CAP;
+  let t = 6;
+  let s = 3;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = deterministic_qinit(t, s);
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP + 1);
+  assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
+}
+
+/// `max_iters == MAX_ITERS_CAP` is allowed (boundary inclusive).
+#[test]
+fn vbx_accepts_max_iters_at_cap() {
+  use crate::cluster::vbx::MAX_ITERS_CAP;
+  let t = 4;
+  let s = 2;
+  let x = DMatrix::<f64>::zeros(t, 4);
+  let phi = DVector::<f64>::from_element(4, 1.0);
+  let qinit = deterministic_qinit(t, s);
+  // The actual loop will converge well before MAX_ITERS_CAP; we only
+  // verify the boundary check accepts it.
+  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP);
+  assert!(result.is_ok(), "got {result:?}");
+}
+
 /// Strongly non-uniform qinit (each row peaked on a different speaker)
 /// with `max_iters = 0` would return `gamma = qinit` and `pi = 1/S` —
 /// inconsistent (`pi` should equal `gamma.col_sum() / T`). Now blocked

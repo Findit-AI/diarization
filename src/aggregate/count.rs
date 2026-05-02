@@ -154,6 +154,18 @@ pub fn try_hamming_aggregate(
   frame_step: f64,
   num_output_frames: usize,
 ) -> Result<Vec<f64>, Error> {
+  // `num_frames_per_chunk == 0` underflows `(... - 1) as f64` below.
+  // Non-positive / non-finite step values divide into a non-finite
+  // start_frame that saturates to `i64::MAX` after the cast.
+  if num_frames_per_chunk == 0 {
+    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+  }
+  if !chunk_step.is_finite() || chunk_step <= 0.0 {
+    return Err(Error::Shape("chunk_step must be a positive finite scalar"));
+  }
+  if !frame_step.is_finite() || frame_step <= 0.0 {
+    return Err(Error::Shape("frame_step must be a positive finite scalar"));
+  }
   let expected = num_chunks
     .checked_mul(num_frames_per_chunk)
     .ok_or(Error::Shape(
@@ -200,12 +212,27 @@ pub fn try_hamming_aggregate(
 ///
 /// Both `chunks.start` and `frames.start` are 0 in the community-1
 /// pipeline.
+///
+/// # Panics
+///
+/// Panics in debug builds if `num_chunks == 0` (subtraction overflow),
+/// or if `frame_step <= 0.0` (the divide produces a non-finite length
+/// that casts to a saturated `usize`). Callers should validate inputs
+/// before calling — [`try_count_pyannote`] does this at its boundary.
 pub fn num_output_frames_pyannote(
   num_chunks: usize,
   chunk_duration: f64,
   chunk_step: f64,
   frame_step: f64,
 ) -> usize {
+  assert!(
+    num_chunks >= 1,
+    "num_output_frames_pyannote: num_chunks must be at least 1"
+  );
+  assert!(
+    frame_step.is_finite() && frame_step > 0.0,
+    "num_output_frames_pyannote: frame_step must be a positive finite scalar"
+  );
   let last_chunk_end = chunk_duration + (num_chunks - 1) as f64 * chunk_step;
   (last_chunk_end / frame_step).round_ties_even() as usize + 1
 }
@@ -273,10 +300,49 @@ pub fn try_count_pyannote(
   chunks_sw: SlidingWindow,
   frames_sw_template: SlidingWindow,
 ) -> Result<CountTensor, Error> {
+  // Reject empty / non-positive geometry up front. `num_chunks == 0`
+  // would underflow `(num_chunks - 1) as f64` in
+  // `num_output_frames_pyannote` and drive `aggregated`'s allocation
+  // toward `usize::MAX`. `frame_step <= 0` divides into a non-finite
+  // length that saturates the same allocation. `num_frames_per_chunk
+  // == 0` and `num_speakers == 0` are technically fillable but produce
+  // semantically meaningless empty outputs, so refuse them too.
+  if num_chunks == 0 {
+    return Err(Error::Shape("num_chunks must be at least 1"));
+  }
+  if num_frames_per_chunk == 0 {
+    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+  }
+  if num_speakers == 0 {
+    return Err(Error::Shape("num_speakers must be at least 1"));
+  }
   let chunk_duration = chunks_sw.duration();
   let chunk_step = chunks_sw.step();
   let frame_duration = frames_sw_template.duration();
   let frame_step = frames_sw_template.step();
+  if !chunk_duration.is_finite() || chunk_duration <= 0.0 {
+    return Err(Error::Shape(
+      "chunks_sw.duration must be a positive finite scalar",
+    ));
+  }
+  if !chunk_step.is_finite() || chunk_step <= 0.0 {
+    return Err(Error::Shape(
+      "chunks_sw.step must be a positive finite scalar",
+    ));
+  }
+  if !frame_duration.is_finite() || frame_duration <= 0.0 {
+    return Err(Error::Shape(
+      "frames_sw_template.duration must be a positive finite scalar",
+    ));
+  }
+  if !frame_step.is_finite() || frame_step <= 0.0 {
+    return Err(Error::Shape(
+      "frames_sw_template.step must be a positive finite scalar",
+    ));
+  }
+  if !onset.is_finite() {
+    return Err(Error::Shape("onset must be finite"));
+  }
   let expected = num_chunks
     .checked_mul(num_frames_per_chunk)
     .and_then(|n| n.checked_mul(num_speakers))
@@ -427,6 +493,76 @@ mod try_variant_tests {
       sw(10.0, 1.0),
       sw(0.062, 0.0169),
     );
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  /// `num_chunks == 0` would underflow `(num_chunks - 1) as f64` in
+  /// `num_output_frames_pyannote` and saturate the `aggregated`
+  /// allocation to `usize::MAX` in release builds.
+  #[test]
+  fn try_count_pyannote_rejects_zero_num_chunks() {
+    let r = try_count_pyannote(&[], 0, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_zero_num_frames_per_chunk() {
+    let r = try_count_pyannote(&[], 3, 0, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_zero_num_speakers() {
+    let r = try_count_pyannote(&[], 3, 4, 0, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  /// `frame_step == 0` divides into a non-finite output-frame count.
+  #[test]
+  fn try_count_pyannote_rejects_zero_frame_step() {
+    let segs: Vec<f64> = vec![0.0; 24];
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_negative_frame_step() {
+    let segs: Vec<f64> = vec![0.0; 24];
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, -0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_non_finite_onset() {
+    let segs: Vec<f64> = vec![0.0; 24];
+    let r = try_count_pyannote(&segs, 3, 4, 2, f64::NAN, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_non_finite_chunk_duration() {
+    let segs: Vec<f64> = vec![0.0; 24];
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(f64::INFINITY, 1.0),
+      sw(0.062, 0.0169),
+    );
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_hamming_aggregate_rejects_zero_num_frames_per_chunk() {
+    let r = try_hamming_aggregate(&[], 3, 0, 1.0, 0.0169, 8);
+    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  #[test]
+  fn try_hamming_aggregate_rejects_zero_frame_step() {
+    let r = try_hamming_aggregate(&[0.0; 12], 3, 4, 1.0, 0.0, 8);
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
