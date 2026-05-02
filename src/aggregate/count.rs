@@ -93,6 +93,10 @@ pub enum ShapeError {
      to represent or saturated past usize::MAX)"
   )]
   OutputFrameCountOverflow,
+  #[error("segmentations contains non-finite values (NaN / +inf / -inf)")]
+  NonFiniteSegmentations,
+  #[error("per_chunk_value contains non-finite values (NaN / +inf / -inf)")]
+  NonFinitePerChunkValue,
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -220,6 +224,15 @@ pub fn try_hamming_aggregate(
     .ok_or(ShapeError::HammingSizeOverflow)?;
   if per_chunk_value.len() != expected {
     return Err(ShapeError::HammingPerChunkValueLenMismatch.into());
+  }
+  // Reject non-finite input up front. Without this, NaN cells flow
+  // through the multiply-add accumulator and the function returns
+  // `Ok(Vec<NaN>)` from a fallible API — silent numeric corruption.
+  // Mirrors the policy in `try_count_pyannote`.
+  for &v in per_chunk_value {
+    if !v.is_finite() {
+      return Err(ShapeError::NonFinitePerChunkValue.into());
+    }
   }
   let mut out = vec![0.0_f64; num_output_frames];
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
@@ -420,6 +433,19 @@ pub fn try_count_pyannote(
     .ok_or(ShapeError::CountTensorSizeOverflow)?;
   if segmentations.len() != expected {
     return Err(ShapeError::SegmentationsLenMismatch.into());
+  }
+  // Reject non-finite segmentation values up front. The threshold
+  // comparison `v >= onset` is asymmetric on non-finite inputs: NaN
+  // compares false, -inf compares false (against a finite onset),
+  // +inf compares true. A degraded segmentation backend producing
+  // NaN/inf cells would silently fold into a finite-looking count
+  // tensor, hiding the bad input from downstream reconstruct's
+  // top-K logic. Same policy as
+  // `crate::reconstruct::reconstruct`'s segmentation finite check.
+  for &v in segmentations {
+    if !v.is_finite() {
+      return Err(ShapeError::NonFiniteSegmentations.into());
+    }
   }
 
   // ── 1. Per-(chunk, frame) integer count of active speakers ─────
@@ -706,6 +732,69 @@ mod try_variant_tests {
   fn try_hamming_aggregate_rejects_zero_frame_step() {
     let r = try_hamming_aggregate(&[0.0; 12], 3, 4, 1.0, 0.0, 8);
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  /// Threshold comparison `v >= onset` is asymmetric on non-finite
+  /// inputs (NaN false, -inf false against finite onset, +inf true),
+  /// so a degraded segmentation backend producing NaN/inf cells could
+  /// silently fold into a finite-looking count tensor. The fallible
+  /// API must reject the bad input up front instead.
+  #[test]
+  fn try_count_pyannote_rejects_nan_segmentation() {
+    let mut segs: Vec<f64> = vec![0.5; 24];
+    segs[7] = f64::NAN;
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_pos_inf_segmentation() {
+    let mut segs: Vec<f64> = vec![0.5; 24];
+    segs[0] = f64::INFINITY;
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_neg_inf_segmentation() {
+    let mut segs: Vec<f64> = vec![0.5; 24];
+    segs[15] = f64::NEG_INFINITY;
+    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
+      "got {r:?}"
+    );
+  }
+
+  /// `try_hamming_aggregate` has the same class of issue: a NaN cell
+  /// in `per_chunk_value` flows through the multiply-add accumulator
+  /// and the function returns `Ok(Vec<NaN>)` from a fallible API.
+  #[test]
+  fn try_hamming_aggregate_rejects_nan_per_chunk_value() {
+    let mut vals: Vec<f64> = vec![0.5; 12];
+    vals[5] = f64::NAN;
+    let r = try_hamming_aggregate(&vals, 3, 4, 1.0, 0.0169, 8);
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::NonFinitePerChunkValue))),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn try_hamming_aggregate_rejects_inf_per_chunk_value() {
+    let mut vals: Vec<f64> = vec![0.5; 12];
+    vals[0] = f64::INFINITY;
+    let r = try_hamming_aggregate(&vals, 3, 4, 1.0, 0.0169, 8);
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::NonFinitePerChunkValue))),
+      "got {r:?}"
+    );
   }
 
   #[test]
