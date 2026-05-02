@@ -83,6 +83,11 @@ pub enum ShapeError {
   InvalidHammingChunkStep,
   #[error("frame_step must be a positive finite scalar")]
   InvalidHammingFrameStep,
+  #[error(
+    "num_frames_per_chunk must be at least 2 for hamming aggregation \
+     (length-1 windows divide by zero in the hamming formula)"
+  )]
+  HammingNumFramesPerChunkBelowTwo,
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -188,10 +193,16 @@ pub fn try_hamming_aggregate(
   num_output_frames: usize,
 ) -> Result<Vec<f64>, Error> {
   // `num_frames_per_chunk == 0` underflows `(... - 1) as f64` below.
-  // Non-positive / non-finite step values divide into a non-finite
-  // start_frame that saturates to `i64::MAX` after the cast.
-  if num_frames_per_chunk == 0 {
-    return Err(ShapeError::ZeroNumFramesPerChunk.into());
+  // `num_frames_per_chunk == 1` makes `n_minus_1 == 0.0`, the hamming
+  // formula divides by zero and emits a NaN window, then the
+  // accumulator quietly fills `out` with NaNs and returns `Ok(_)` from
+  // a fallible API. Reject both at the boundary — a hamming window
+  // over a single point isn't mathematically meaningful (no edges to
+  // taper) and any caller that lands here has a shape bug that should
+  // fail loudly. Non-positive / non-finite step values divide into a
+  // non-finite start_frame that saturates to `i64::MAX` after the cast.
+  if num_frames_per_chunk < 2 {
+    return Err(ShapeError::HammingNumFramesPerChunkBelowTwo.into());
   }
   if !chunk_step.is_finite() || chunk_step <= 0.0 {
     return Err(ShapeError::InvalidHammingChunkStep.into());
@@ -574,7 +585,36 @@ mod try_variant_tests {
   #[test]
   fn try_hamming_aggregate_rejects_zero_num_frames_per_chunk() {
     let r = try_hamming_aggregate(&[], 3, 0, 1.0, 0.0169, 8);
-    assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::HammingNumFramesPerChunkBelowTwo))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// `num_frames_per_chunk == 1` makes the hamming formula divide by
+  /// zero (`n_minus_1 == 0.0`); previously this returned `Ok(Vec<NaN>)`
+  /// from a fallible API. Now rejected at the boundary.
+  #[test]
+  fn try_hamming_aggregate_rejects_single_frame_chunk() {
+    let r = try_hamming_aggregate(&[0.5; 3], 3, 1, 1.0, 0.0169, 8);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::HammingNumFramesPerChunkBelowTwo))
+      ),
+      "got {r:?}"
+    );
+    // Belt-and-suspenders: even if the variant changes shape, the
+    // output must never contain NaN for accepted input.
+    if let Ok(v) = &r {
+      assert!(
+        v.iter().all(|x| !x.is_nan()),
+        "hamming aggregate emitted NaN for 1-frame chunk: {v:?}"
+      );
+    }
   }
 
   #[test]
