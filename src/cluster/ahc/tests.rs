@@ -56,6 +56,28 @@ fn rejects_zero_norm_row() {
   assert!(matches!(ahc_init(&m, 0.5), Err(Error::Shape(_))));
 }
 
+/// Adversarial: every element is finite but `v * v` accumulates to
+/// `+inf`. Without the overflow guard, the normalize step would
+/// collapse the row to all zeros and AHC would silently merge every
+/// row into one cluster while returning `Ok(_)`. We must surface a
+/// typed error instead.
+#[test]
+fn rejects_finite_row_with_overflowing_norm() {
+  use crate::cluster::ahc::error::ShapeError;
+  // |v| > sqrt(f64::MAX / d) → v*v sums overflow. For d=4,
+  // threshold ~= sqrt(f64::MAX/4) ≈ 6.7e153. Pick a value safely above.
+  let big = 1.0e154_f64;
+  let mut m = DMatrix::<f64>::from_element(3, 4, 1.0);
+  for c in 0..4 {
+    m[(1, c)] = big;
+  }
+  let r = ahc_init(&m, 0.5);
+  assert!(
+    matches!(r, Err(Error::Shape(ShapeError::RowNormOverflow))),
+    "got {r:?}"
+  );
+}
+
 /// Single row → single cluster (matches pyannote's `< 2` short-circuit).
 #[test]
 fn single_row_returns_single_cluster() {

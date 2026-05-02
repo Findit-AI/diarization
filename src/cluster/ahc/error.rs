@@ -23,6 +23,12 @@ pub enum ShapeError {
   InvalidThreshold,
   #[error("embeddings row has zero L2 norm; cannot normalize")]
   ZeroNormRow,
+  #[error(
+    "embeddings row's squared-norm accumulator overflowed to +inf \
+     (sum of v*v exceeded f64::MAX); the normalize step would collapse \
+     it to all-zeros and silently corrupt the clustering"
+  )]
+  RowNormOverflow,
 }
 
 /// Field that contained a non-finite value.

@@ -63,6 +63,16 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
     return Err(ShapeError::InvalidThreshold.into());
   }
   // Validate finite + nonzero L2 norm per row.
+  //
+  // The `!sq.is_finite()` check matters even when every individual
+  // element is finite: a row with very large finite values (|v| beyond
+  // ~1e152 for D=256) makes `v*v` overflow `sq` to `+inf`. Without
+  // catching it, `l2_normalize_to_row_major` computes `inv_norm =
+  // 1/sqrt(inf) = 0`, every output row collapses to zeros, pdist sees
+  // zero-distance pairs everywhere, and AHC silently merges everything
+  // into one cluster while returning `Ok(_)` — wrong clustering with
+  // no error. Same threat shape as the SegmentModel/EmbedModel
+  // non-finite-output guards.
   for r in 0..n {
     let mut sq = 0.0;
     for c in 0..d {
@@ -71,6 +81,9 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
         return Err(NonFiniteField::Embeddings.into());
       }
       sq += v * v;
+    }
+    if !sq.is_finite() {
+      return Err(ShapeError::RowNormOverflow.into());
     }
     if sq == 0.0 {
       return Err(ShapeError::ZeroNormRow.into());
@@ -112,7 +125,9 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
 /// wants a contiguous row-major slice — so we fuse the normalize +
 /// transpose into one allocation.
 ///
-/// Caller has already rejected zero-norm rows.
+/// Caller has already rejected zero-norm rows AND non-finite squared
+/// norms (overflow). Both invariants are debug-asserted here as a
+/// defense-in-depth check; production passes through unchanged.
 fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
   let (n, d) = m.shape();
   let mut out = Vec::with_capacity(n * d);
@@ -122,6 +137,11 @@ fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
       let v = m[(r, c)];
       sq += v * v;
     }
+    debug_assert!(
+      sq.is_finite() && sq > 0.0,
+      "l2_normalize_to_row_major: caller must reject non-finite/zero \
+       squared norms (row {r}: sq = {sq})"
+    );
     let inv_norm = sq.sqrt().recip();
     for c in 0..d {
       out.push(m[(r, c)] * inv_norm);
