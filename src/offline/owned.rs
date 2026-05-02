@@ -362,12 +362,21 @@ impl OwnedDiarizationPipeline {
           }
           Err(e) => return Err(e.into()),
         };
+        // Reject non-finite embedding output as a hard error. Previously
+        // a NaN/inf vector was lumped together with the legitimate
+        // low-norm drop path below, silently turning ONNX/provider
+        // corruption into "inactive speaker" and producing diarization
+        // with missing speech instead of surfacing the failure.
+        if raw.iter().any(|v| !v.is_finite()) {
+          return Err(crate::embed::Error::NonFiniteOutput.into());
+        }
         // Pre-validate: if the raw norm is below the PLDA min, drop.
         // PLDA min is 0.01 (RawEmbedding::from_raw_array). Computing
         // the L2 norm here lets us drop the slot before
-        // `diarize_offline` rejects it later.
+        // `diarize_offline` rejects it later. Norm is finite by the
+        // check above, so `< 0.01` is the only path that fires here.
         let norm_sq: f64 = raw.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
-        if !norm_sq.is_finite() || norm_sq.sqrt() < 0.01 {
+        if norm_sq.sqrt() < 0.01 {
           for f in 0..FRAMES_PER_WINDOW {
             segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
           }

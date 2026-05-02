@@ -4,7 +4,7 @@ use crate::{
   cluster::hungarian::UNMATCHED,
   reconstruct::{
     Error, MAX_CLUSTER_ID, ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans,
-    reconstruct, spans_to_rttm_lines,
+    reconstruct, spans_to_rttm_lines, try_discrete_to_spans,
   },
 };
 
@@ -345,4 +345,30 @@ fn rejects_segmentation_dimension_overflow() {
     reconstruct(&input),
     Err(Error::Shape(ShapeError::SegmentationsSizeOverflow))
   ));
+}
+
+/// `try_discrete_to_spans` rejects mismatched grid length without
+/// panicking. The infallible `discrete_to_spans` panics on the same
+/// input — that's documented and intentional, but the fallible
+/// variant is what service code handling untrusted grids must use.
+#[test]
+fn try_discrete_to_spans_rejects_grid_len_mismatch() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  // Declared shape: 4 frames * 2 clusters = 8 cells. Grid is shorter.
+  let grid = vec![0.0_f32; 7];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(matches!(r, Err(ShapeError::GridLenMismatch)), "got {r:?}");
+}
+
+/// Adversarial dimensions whose product overflows usize must surface
+/// as a typed `Err(GridSizeOverflow)`, not panic via the underlying
+/// arithmetic.
+#[test]
+fn try_discrete_to_spans_rejects_dimension_overflow() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let grid: Vec<f32> = Vec::new();
+  let r = try_discrete_to_spans(&grid, usize::MAX / 2 + 1, 4, frames_sw, 0.0);
+  assert!(matches!(r, Err(ShapeError::GridSizeOverflow)), "got {r:?}");
 }

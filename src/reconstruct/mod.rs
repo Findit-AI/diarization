@@ -24,6 +24,6 @@ mod tests;
 
 pub use algo::{MAX_CLUSTER_ID, MAX_COUNT_PER_FRAME, ReconstructInput, SlidingWindow, reconstruct};
 pub use error::Error;
-pub use rttm::{RttmSpan, discrete_to_spans, spans_to_rttm_lines};
+pub use rttm::{RttmSpan, discrete_to_spans, spans_to_rttm_lines, try_discrete_to_spans};
 
 mod rttm;

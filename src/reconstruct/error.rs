@@ -41,6 +41,10 @@ pub enum ShapeError {
   SegmentationsSizeOverflow,
   #[error("num_chunks * num_frames_per_chunk * num_clusters overflows usize")]
   ClusteredSizeOverflow,
+  #[error("grid.len() must equal num_frames * num_clusters")]
+  GridLenMismatch,
+  #[error("num_frames * num_clusters overflows usize")]
+  GridSizeOverflow,
 }
 
 /// Field that contained a non-finite value.

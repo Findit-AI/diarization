@@ -331,8 +331,18 @@ impl StreamingOfflineDiarizer {
           }
           Err(e) => return Err(StreamingError::Embed(format!("{e}"))),
         };
+        // Reject non-finite embedding output as a hard error. Mirrors
+        // `offline::owned`'s split: NaN/inf is upstream corruption that
+        // must surface, not get silently drop-listed as "inactive
+        // speaker" alongside legitimate low-norm vectors.
+        if raw.iter().any(|v| !v.is_finite()) {
+          return Err(StreamingError::Embed(format!(
+            "{}",
+            crate::embed::Error::NonFiniteOutput
+          )));
+        }
         let norm_sq: f64 = raw.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
-        if !norm_sq.is_finite() || norm_sq.sqrt() < 0.01 {
+        if norm_sq.sqrt() < 0.01 {
           for f in 0..FRAMES_PER_WINDOW {
             segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
           }

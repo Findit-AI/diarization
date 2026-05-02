@@ -53,6 +53,15 @@ pub enum Error {
   #[error("inference scores length {got}, expected {expected}")]
   InferenceShapeMismatch { expected: usize, got: usize },
 
+  /// ONNX inference output contained a NaN/`±inf` value. Realistic
+  /// upstream causes are degraded ONNX providers, model corruption,
+  /// or non-finite input that flows through ResNet without saturation.
+  /// Owned/streaming offline diarization paths previously treated
+  /// non-finite-norm embeddings as "inactive speaker" silently —
+  /// this variant lets them surface the corruption instead.
+  #[error("inference output contains non-finite values (NaN / +inf / -inf)")]
+  NonFiniteOutput,
+
   /// ONNX inference output had an unexpected tensor shape (rank or per-axis size),
   /// even when the total element count would otherwise have matched. Catches
   /// silently corrupting layout drift like `[EMBEDDING_DIM, n]` or

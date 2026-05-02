@@ -1,6 +1,6 @@
 //! Convert per-frame discrete diarization grid → RTTM-style spans.
 
-use crate::reconstruct::algo::SlidingWindow;
+use crate::reconstruct::{algo::SlidingWindow, error::ShapeError};
 
 /// One contiguous turn from the discrete diarization grid.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +63,13 @@ impl RttmSpan {
 ///
 /// Spans across clusters are sorted by `(start, cluster)` for RTTM
 /// canonical order.
+///
+/// # Panics
+///
+/// Panics if `grid.len() != num_frames * num_clusters` or if
+/// `num_frames * num_clusters` overflows `usize`. Use
+/// [`try_discrete_to_spans`] to surface the precondition as
+/// `Result<_, ShapeError>` instead.
 pub fn discrete_to_spans(
   grid: &[f32],
   num_frames: usize,
@@ -70,7 +77,35 @@ pub fn discrete_to_spans(
   frames_sw: SlidingWindow,
   min_duration_off: f64,
 ) -> Vec<RttmSpan> {
-  assert_eq!(grid.len(), num_frames * num_clusters);
+  try_discrete_to_spans(grid, num_frames, num_clusters, frames_sw, min_duration_off)
+    .expect("discrete_to_spans: shape precondition violated; use try_discrete_to_spans to handle")
+}
+
+/// Fallible variant of [`discrete_to_spans`]. Validates the grid
+/// shape with checked arithmetic so an adversarial dimension product
+/// (which would otherwise wrap silently in release and trivially match
+/// a small grid) surfaces as a typed `ShapeError` instead of a
+/// process panic.
+///
+/// # Errors
+///
+/// - [`ShapeError::GridSizeOverflow`] if `num_frames * num_clusters`
+///   overflows `usize`.
+/// - [`ShapeError::GridLenMismatch`] if `grid.len() != num_frames *
+///   num_clusters`.
+pub fn try_discrete_to_spans(
+  grid: &[f32],
+  num_frames: usize,
+  num_clusters: usize,
+  frames_sw: SlidingWindow,
+  min_duration_off: f64,
+) -> Result<Vec<RttmSpan>, ShapeError> {
+  let expected = num_frames
+    .checked_mul(num_clusters)
+    .ok_or(ShapeError::GridSizeOverflow)?;
+  if grid.len() != expected {
+    return Err(ShapeError::GridLenMismatch);
+  }
   let center_offset = frames_sw.duration() / 2.0;
   let frame_start = frames_sw.start();
   let frame_step = frames_sw.step();
@@ -131,7 +166,7 @@ pub fn discrete_to_spans(
       .unwrap_or(std::cmp::Ordering::Equal)
       .then(a.cluster().cmp(&b.cluster()))
   });
-  spans
+  Ok(spans)
 }
 
 /// Format spans as RTTM lines. Output is one line per span:
