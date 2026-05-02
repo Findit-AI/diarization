@@ -7,20 +7,27 @@
 //! - Low-level: `compute_fbank`, `EmbedModel::embed_features`,
 //!   `EmbedModel::embed_features_batch` (added in phase 5)
 
-#[cfg(feature = "ort")]
+// `embedder` and `model` need to compile under either backend feature.
+// `EmbedModel::from_torchscript_file` lives inside `model.rs` gated on
+// `feature = "tch"`; if `model` is gated only on `ort`, a downstream
+// build with `--no-default-features --features tch` cannot reach the
+// TorchScript constructor at all.
+#[cfg(any(feature = "ort", feature = "tch"))]
 mod embedder;
 mod error;
 mod fbank;
-#[cfg(feature = "ort")]
+#[cfg(any(feature = "ort", feature = "tch"))]
 mod model;
 mod options;
 mod types;
 
 pub use error::Error;
 pub use fbank::{compute_fbank, compute_full_fbank};
-#[cfg(feature = "ort")]
-#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+#[cfg(any(feature = "ort", feature = "tch"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "ort", feature = "tch"))))]
 pub use model::EmbedModel;
+// `EmbedModelOptions` wraps `ort::SessionBuilder` knobs; it has no
+// counterpart on the tch backend, so it stays ORT-only.
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
 pub use options::EmbedModelOptions;

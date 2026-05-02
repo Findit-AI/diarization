@@ -11,7 +11,7 @@ mod lse;
 mod pdist_euclidean;
 
 pub use axpy::axpy;
-#[cfg(feature = "ort")]
+#[cfg(any(feature = "ort", feature = "tch"))]
 pub use axpy::axpy_f32;
 pub use dot::dot;
 pub use lse::logsumexp_row;

@@ -60,7 +60,7 @@ pub(crate) mod arch;
 mod dispatch;
 pub mod scalar;
 
-#[cfg(feature = "ort")]
+#[cfg(any(feature = "ort", feature = "tch"))]
 pub use dispatch::axpy_f32;
 #[cfg(feature = "_bench")]
 pub use dispatch::pdist_euclidean;

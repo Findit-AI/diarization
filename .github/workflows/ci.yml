@@ -140,6 +140,41 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
 
+  # Compile check for the `tch` (TorchScript) backend. `tch` is not in
+  # the cargo-hack feature sweeps below because it requires libtorch
+  # set up on the runner. Without this dedicated job, a regression that
+  # breaks `cargo build --no-default-features --features tch` (e.g.
+  # `EmbedModel` accidentally gated on `feature = "ort"` only) would
+  # ship undetected.
+  tch-compile-check:
+    name: tch-only compile check
+    runs-on: ubuntu-latest
+    env:
+      LIBTORCH_USE_PYTORCH: 1
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tch-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tch-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Install libtorch via PyTorch (CPU-only)
+        # `tch` 0.24 picks up libtorch from the active PyTorch
+        # installation when LIBTORCH_USE_PYTORCH=1; this avoids a
+        # separate libtorch tarball download.
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: cargo check --no-default-features --features tch
+        run: cargo check --lib --no-default-features --features tch
+
   build:
     name: build
     strategy:
