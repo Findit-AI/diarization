@@ -25,7 +25,14 @@ use core::arch::aarch64::{
 #[allow(dead_code)] // Production AHC uses scalar pdist for cross-arch determinism; kept for tests + benches.
 pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
   debug_assert_eq!(rows.len(), n * d, "neon::pdist_euclidean: shape mismatch");
-  let mut out = Vec::with_capacity(n * (n - 1) / 2);
+  let pair_count = if n >= 2 {
+    n.checked_mul(n - 1)
+      .expect("neon::pdist_euclidean: n * (n - 1) overflows usize")
+      / 2
+  } else {
+    0
+  };
+  let mut out = Vec::with_capacity(pair_count);
 
   // SAFETY: row indices are in `0..n` and pointer adds are bounded by
   // `i*d + d <= n*d == rows.len()`. Inner SIMD load offsets are bounded

@@ -91,15 +91,21 @@ pub(crate) const RAW_EMBEDDING_MIN_NORM: f64 = 0.01;
 ///
 /// # Construction
 ///
-/// Construction is `#[cfg(test)] pub(crate)` — production builds
-/// cannot construct a `RawEmbedding` at all. The only production
-/// path from a raw WeSpeaker vector to PLDA features is via
-/// `EmbedModel::embed_raw`; that path owns its own typed entry inside
-/// `diarization::plda` so the boundary stays sealed. (A public
-/// `plda-fixtures` Cargo feature was previously used as the gate,
-/// but additive features are globally unified, so any downstream
+/// Construction is `pub(crate)` — downstream crates cannot construct
+/// a `RawEmbedding` at all. The only production path from a raw
+/// WeSpeaker vector to PLDA features is via the offline diarization
+/// pipeline (`offline::diarize_offline`), which constructs
+/// `RawEmbedding` per (chunk, speaker) slot internally from the
+/// caller's `raw_embeddings: &[f32]`. That keeps the type-safety
+/// contract intact: a downstream caller cannot accidentally feed an
+/// L2-normalized [`crate::embed::Embedding`] vector into PLDA, since
+/// they cannot wrap it as a `RawEmbedding` themselves.
+///
+/// (A public `plda-fixtures` Cargo feature was previously used as the
+/// gate, but additive features are globally unified, so any downstream
 /// crate enabling it would have re-exposed the constructor for the
-/// entire build.)
+/// entire build. Sealing at the visibility level is the only reliable
+/// way to enforce the provenance invariant.)
 ///
 /// # Type-safety contract
 ///
@@ -115,8 +121,8 @@ pub struct RawEmbedding([f32; EMBEDDING_DIMENSION]);
 
 impl RawEmbedding {
   /// Wrap a raw, **unnormalized** WeSpeaker embedding vector.
-  /// `#[cfg(test)] pub(crate)` — see [`RawEmbedding`]'s type-level
-  /// docs for the visibility rationale.
+  /// `pub(crate)` — see [`RawEmbedding`]'s type-level docs for the
+  /// visibility rationale (sealed-construction provenance contract).
   ///
   /// Validates the array is finite **and** has non-trivial L2 norm.
   /// Both checks matter: `xvec_transform` centers `input - mean1`
@@ -143,7 +149,7 @@ impl RawEmbedding {
   /// validation is load-bearing: it rejects all-zero / near-zero
   /// degraded embedder outputs that would silently pass
   /// `xvec_transform`'s post-centering norm guard.
-  pub fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
+  pub(crate) fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
       return Err(Error::NonFiniteInput);
     }

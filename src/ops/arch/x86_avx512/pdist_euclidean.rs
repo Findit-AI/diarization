@@ -20,7 +20,14 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
     n * d,
     "x86_avx512::pdist_euclidean: shape mismatch"
   );
-  let mut out = Vec::with_capacity(n * (n - 1) / 2);
+  let pair_count = if n >= 2 {
+    n.checked_mul(n - 1)
+      .expect("x86_avx512::pdist_euclidean: n * (n - 1) overflows usize")
+      / 2
+  } else {
+    0
+  };
+  let mut out = Vec::with_capacity(pair_count);
 
   // SAFETY: row indices in `0..n`, pointer adds bounded by `i*d + d <=
   // rows.len()`. AVX-512F verified at the dispatcher.

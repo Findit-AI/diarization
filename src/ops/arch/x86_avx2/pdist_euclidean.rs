@@ -20,7 +20,17 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
     n * d,
     "x86_avx2::pdist_euclidean: shape mismatch"
   );
-  let mut out = Vec::with_capacity(n * (n - 1) / 2);
+  // The dispatcher already validates `d >= 1` and that `n * (n - 1)`
+  // doesn't overflow, but check here too — this is `pub(crate) unsafe`
+  // and reachable directly from differential tests.
+  let pair_count = if n >= 2 {
+    n.checked_mul(n - 1)
+      .expect("x86_avx2::pdist_euclidean: n * (n - 1) overflows usize")
+      / 2
+  } else {
+    0
+  };
+  let mut out = Vec::with_capacity(pair_count);
 
   // SAFETY: row indices in `0..n`, pointer adds bounded by `i*d + d <=
   // rows.len()`. AVX2 + FMA verified at the dispatcher.

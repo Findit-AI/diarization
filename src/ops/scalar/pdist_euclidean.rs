@@ -17,12 +17,28 @@
 /// `rows` is a flat slice of length `n * d`, row-major: row `i`'s
 /// d-vector starts at `&rows[i * d ..]`.
 ///
-/// # Panics (debug only)
+/// # Panics
 ///
-/// Debug asserts on `rows.len() == n * d`.
+/// - `debug_assert!` on `rows.len() == n * d`.
+/// - Always panics if `d == 0` (zero-dim distance is undefined; without
+///   this guard, `rows.len() == n * d == 0` would silently let any `n`
+///   pass and `Vec::with_capacity(n * (n-1) / 2)` would OOM).
+/// - Always panics if `n * (n - 1)` overflows `usize` — independent of
+///   the `n * d` shape check; matters on 32-bit and any time `n` is
+///   large relative to pointer width.
 pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
+  assert!(d >= 1, "scalar::pdist_euclidean: d ({d}) must be >= 1");
   debug_assert_eq!(rows.len(), n * d, "pdist_euclidean: shape mismatch");
-  let mut out = Vec::with_capacity(n * (n - 1) / 2);
+  // `n * (n-1)` overflow check, independent of `n * d`. Result is the
+  // condensed output capacity; `/ 2` is safe (product is always even).
+  let pair_count = if n >= 2 {
+    n.checked_mul(n - 1)
+      .expect("scalar::pdist_euclidean: n * (n - 1) overflows usize")
+      / 2
+  } else {
+    0
+  };
+  let mut out = Vec::with_capacity(pair_count);
   for i in 0..n {
     let row_i = &rows[i * d..(i + 1) * d];
     for j in (i + 1)..n {
