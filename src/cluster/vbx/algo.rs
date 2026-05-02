@@ -233,23 +233,24 @@ pub fn vbx_iterate(
     // entrypoint has its own zero-PLDA-dim guard, but `vbx_iterate`
     // is public — direct callers must fail at this boundary too.
     //
-    return Err(Error::Shape("X must have at least one feature column"));
+    return Err(crate::cluster::vbx::error::ShapeError::ZeroXFeatureDim.into());
   }
+  use crate::cluster::vbx::error::{NonFiniteField, ShapeError};
   if phi.len() != d {
-    return Err(Error::Shape("Phi.len() must equal X.ncols()"));
+    return Err(ShapeError::PhiXFeatureMismatch.into());
   }
   if qinit.nrows() != t {
-    return Err(Error::Shape("qinit.nrows() must equal X.nrows()"));
+    return Err(ShapeError::QinitXRowMismatch.into());
   }
   let s = qinit.ncols();
   if s == 0 {
-    return Err(Error::Shape("qinit must have at least one cluster column"));
+    return Err(ShapeError::QinitNoClusters.into());
   }
   if !fa.is_finite() || fa <= 0.0 {
-    return Err(Error::Shape("Fa must be a positive finite scalar"));
+    return Err(ShapeError::InvalidFa.into());
   }
   if !fb.is_finite() || fb <= 0.0 {
-    return Err(Error::Shape("Fb must be a positive finite scalar"));
+    return Err(ShapeError::InvalidFb.into());
   }
   // Phi must be strictly positive AND finite. The previous check
   // accepted `+inf` because `inf > 0.0` is true and `inf.is_nan()`
@@ -270,7 +271,7 @@ pub fn vbx_iterate(
   // The boundary contract is "non-finite intermediates are hard
   // failures"; admitting non-finite inputs violates that.
   if x.iter().any(|v| !v.is_finite()) {
-    return Err(Error::NonFinite("x"));
+    return Err(NonFiniteField::X.into());
   }
   // qinit value validation: each row must be a discrete probability
   // distribution over speakers (finite, nonnegative, row-sum ≈ 1).
@@ -285,25 +286,22 @@ pub fn vbx_iterate(
     for sj in 0..s {
       let v = qinit[(tt, sj)];
       if !v.is_finite() {
-        return Err(Error::NonFinite("qinit"));
+        return Err(NonFiniteField::Qinit.into());
       }
       if v < 0.0 {
-        return Err(Error::Shape("qinit entries must be nonnegative"));
+        return Err(ShapeError::NegativeQinit.into());
       }
       row_sum += v;
     }
     if (row_sum - 1.0).abs() > QINIT_ROW_SUM_TOLERANCE {
-      return Err(Error::Shape("qinit rows must sum to 1"));
+      return Err(ShapeError::QinitRowSumMismatch.into());
     }
   }
   if max_iters == 0 {
-    return Err(Error::Shape("max_iters must be at least 1"));
+    return Err(ShapeError::ZeroMaxIters.into());
   }
   if max_iters > MAX_ITERS_CAP {
-    return Err(Error::Shape(
-      "max_iters exceeds MAX_ITERS_CAP (1_000); pyannote's default is 20 \
-       and realistic configurations converge well below the cap",
-    ));
+    return Err(ShapeError::MaxItersAboveCap.into());
   }
 
   // Pre-compute G[t] = -0.5 * (sum(X[t]^2) + D * log(2*pi)) and rho via
@@ -447,7 +445,7 @@ pub fn vbx_iterate(
     }
     let pi_sum = new_pi.sum();
     if !pi_sum.is_finite() || pi_sum <= 0.0 {
-      return Err(Error::NonFinite("pi sum"));
+      return Err(crate::cluster::vbx::error::NonFiniteField::PiSum.into());
     }
     pi = new_pi / pi_sum;
 
@@ -464,7 +462,7 @@ pub fn vbx_iterate(
     }
     let elbo = log_p_x_total + fb * 0.5 * bracket;
     if !elbo.is_finite() {
-      return Err(Error::NonFinite("ELBO"));
+      return Err(crate::cluster::vbx::error::NonFiniteField::Elbo.into());
     }
     elbo_trajectory.push(elbo);
 

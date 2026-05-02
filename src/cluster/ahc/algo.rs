@@ -51,15 +51,16 @@ use nalgebra::DMatrix;
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
+  use crate::cluster::ahc::error::{NonFiniteField, ShapeError};
   let (n, d) = embeddings.shape();
   if n == 0 {
-    return Err(Error::Shape("embeddings must have at least one row"));
+    return Err(ShapeError::EmptyEmbeddings.into());
   }
   if d == 0 {
-    return Err(Error::Shape("embeddings must have at least one column"));
+    return Err(ShapeError::ZeroEmbeddingDim.into());
   }
   if !threshold.is_finite() || threshold <= 0.0 {
-    return Err(Error::Shape("threshold must be a positive finite scalar"));
+    return Err(ShapeError::InvalidThreshold.into());
   }
   // Validate finite + nonzero L2 norm per row.
   for r in 0..n {
@@ -67,14 +68,12 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
     for c in 0..d {
       let v = embeddings[(r, c)];
       if !v.is_finite() {
-        return Err(Error::NonFinite("embeddings"));
+        return Err(NonFiniteField::Embeddings.into());
       }
       sq += v * v;
     }
     if sq == 0.0 {
-      return Err(Error::Shape(
-        "embeddings row has zero L2 norm; cannot normalize",
-      ));
+      return Err(ShapeError::ZeroNormRow.into());
     }
   }
 

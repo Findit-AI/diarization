@@ -7,13 +7,13 @@ use thiserror::Error;
 pub enum Error {
   /// Input shapes do not satisfy the contract.
   #[error("shape mismatch: {0}")]
-  Shape(&'static str),
+  Shape(#[from] ShapeError),
 
   /// A non-finite value (NaN / ±inf) appeared in an intermediate
   /// (rho, alpha, log_p_, ELBO, …). The algorithm has no recovery
   /// path; the caller should treat this as a hard failure.
   #[error("non-finite intermediate: {0}")]
-  NonFinite(&'static str),
+  NonFinite(#[from] NonFiniteField),
 
   /// `Phi` (the eigenvalue diagonal from `PldaTransform::phi()`) had
   /// an entry that wasn't strictly positive *and* finite. The
@@ -36,4 +36,45 @@ pub enum Error {
   /// regressed state; this is a deliberate fail-fast divergence.
   #[error("ELBO regressed by {delta:.3e} at iteration {iter} (beyond float-roundoff tolerance)")]
   ElboRegression { iter: usize, delta: f64 },
+}
+
+/// Specific shape-violation reasons for [`Error::Shape`].
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeError {
+  #[error("X must have at least one feature column")]
+  ZeroXFeatureDim,
+  #[error("Phi.len() must equal X.ncols()")]
+  PhiXFeatureMismatch,
+  #[error("qinit.nrows() must equal X.nrows()")]
+  QinitXRowMismatch,
+  #[error("qinit must have at least one cluster column")]
+  QinitNoClusters,
+  #[error("Fa must be a positive finite scalar")]
+  InvalidFa,
+  #[error("Fb must be a positive finite scalar")]
+  InvalidFb,
+  #[error("qinit entries must be nonnegative")]
+  NegativeQinit,
+  #[error("qinit rows must sum to 1")]
+  QinitRowSumMismatch,
+  #[error("max_iters must be at least 1")]
+  ZeroMaxIters,
+  #[error(
+    "max_iters exceeds MAX_ITERS_CAP (1_000); pyannote's default is 20 \
+     and realistic configurations converge well below the cap"
+  )]
+  MaxItersAboveCap,
+}
+
+/// Field that contained a non-finite value.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum NonFiniteField {
+  #[error("x")]
+  X,
+  #[error("qinit")]
+  Qinit,
+  #[error("pi sum")]
+  PiSum,
+  #[error("ELBO")]
+  Elbo,
 }

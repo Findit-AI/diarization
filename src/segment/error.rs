@@ -12,12 +12,9 @@ use crate::segment::types::WindowId;
 pub enum Error {
   /// Construction-time validation failure for [`SegmentOptions`].
   ///
-  /// Reserved for future eager validation; not currently emitted by
-  /// v0.1.0 (which stores option values verbatim).
-  ///
   /// [`SegmentOptions`]: crate::segment::SegmentOptions
   #[error("invalid segment options: {0}")]
-  InvalidOptions(&'static str),
+  InvalidOptions(#[from] InvalidOptionsReason),
 
   /// `push_inference` received a `scores` slice of the wrong length.
   ///
@@ -92,4 +89,11 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error(transparent)]
   Ort(#[from] ort::Error),
+}
+
+/// Specific reasons for [`Error::InvalidOptions`].
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidOptionsReason {
+  #[error("step_samples must be > 0")]
+  ZeroStepSamples,
 }

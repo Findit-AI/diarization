@@ -217,18 +217,17 @@ pub fn assign_embeddings(
     max_iters,
   } = input;
 
+  use crate::pipeline::error::{NonFiniteField, ShapeError};
   // ── Boundary checks ────────────────────────────────────────────
   if num_chunks == 0 {
-    return Err(Error::Shape("num_chunks must be at least 1"));
+    return Err(ShapeError::ZeroNumChunks.into());
   }
   if num_speakers != MAX_SPEAKER_SLOTS as usize {
-    return Err(Error::Shape(
-      "num_speakers must equal MAX_SPEAKER_SLOTS (segmentation-3.0 / community-1 = 3)",
-    ));
+    return Err(ShapeError::WrongNumSpeakers.into());
   }
   let embed_dim = embeddings.ncols();
   if embed_dim == 0 {
-    return Err(Error::Shape("embeddings must have at least one column"));
+    return Err(ShapeError::ZeroEmbeddingDim.into());
   }
   // Use checked arithmetic at the public boundary: enormous dimension
   // products would otherwise wrap silently in release builds, letting
@@ -237,34 +236,26 @@ pub fn assign_embeddings(
   // `offline::algo`.
   let expected_emb_rows = num_chunks
     .checked_mul(num_speakers)
-    .ok_or(Error::Shape("num_chunks * num_speakers overflows usize"))?;
+    .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
   if embeddings.nrows() != expected_emb_rows {
-    return Err(Error::Shape(
-      "embeddings.nrows() must equal num_chunks * num_speakers",
-    ));
+    return Err(ShapeError::EmbeddingsRowMismatch.into());
   }
   if num_frames == 0 {
-    return Err(Error::Shape("num_frames must be at least 1"));
+    return Err(ShapeError::ZeroNumFrames.into());
   }
   let expected_seg_len = num_chunks
     .checked_mul(num_frames)
     .and_then(|n| n.checked_mul(num_speakers))
-    .ok_or(Error::Shape(
-      "num_chunks * num_frames * num_speakers overflows usize",
-    ))?;
+    .ok_or(ShapeError::SegmentationsOverflow)?;
   if segmentations.len() != expected_seg_len {
-    return Err(Error::Shape(
-      "segmentations.len() must equal num_chunks * num_frames * num_speakers",
-    ));
+    return Err(ShapeError::SegmentationsLenMismatch.into());
   }
   if train_chunk_idx.len() != train_speaker_idx.len() {
-    return Err(Error::Shape(
-      "train_chunk_idx and train_speaker_idx must have the same length",
-    ));
+    return Err(ShapeError::TrainIndexLenMismatch.into());
   }
   let num_train = train_chunk_idx.len();
   if post_plda.nrows() != num_train {
-    return Err(Error::Shape("post_plda.nrows() must equal num_train"));
+    return Err(ShapeError::PostPldaRowMismatch.into());
   }
   let plda_dim = post_plda.ncols();
   if plda_dim == 0 {
@@ -274,12 +265,10 @@ pub fn assign_embeddings(
     // producing plausible hard_clusters from pure prior. A schema
     // drift in PLDA capture or downstream feeding the wrong array
     // would silently yield wrong diarization.
-    return Err(Error::Shape(
-      "post_plda must have at least one column (PLDA dimension)",
-    ));
+    return Err(ShapeError::ZeroPldaDim.into());
   }
   if phi.len() != plda_dim {
-    return Err(Error::Shape("phi.len() must equal post_plda.ncols()"));
+    return Err(ShapeError::PhiPldaDimMismatch.into());
   }
   // Validate train indices stay within bounds — out-of-range silently
   // poisons centroid math by reading garbage embeddings.
@@ -287,10 +276,10 @@ pub fn assign_embeddings(
     let c = train_chunk_idx[i];
     let s = train_speaker_idx[i];
     if c >= num_chunks {
-      return Err(Error::Shape("train_chunk_idx[i] out of range"));
+      return Err(ShapeError::TrainChunkIdxOutOfRange.into());
     }
     if s >= num_speakers {
-      return Err(Error::Shape("train_speaker_idx[i] out of range"));
+      return Err(ShapeError::TrainSpeakerIdxOutOfRange.into());
     }
   }
   // Validate that *every* row of `embeddings` and *every* entry of
@@ -303,12 +292,12 @@ pub fn assign_embeddings(
   // a plausible-looking but wrong assignment with no surfaced error.
   for v in embeddings.iter() {
     if !v.is_finite() {
-      return Err(Error::NonFinite("embeddings"));
+      return Err(NonFiniteField::Embeddings.into());
     }
   }
   for v in segmentations.iter() {
     if !v.is_finite() {
-      return Err(Error::NonFinite("segmentations"));
+      return Err(NonFiniteField::Segmentations.into());
     }
   }
   // Pyannote one-cluster fast path (`clustering.py:588-594`): when
@@ -328,10 +317,10 @@ pub fn assign_embeddings(
     );
   }
   if !(0.0..=f64::MAX).contains(&threshold) || !threshold.is_finite() || threshold <= 0.0 {
-    return Err(Error::Shape("threshold must be a positive finite scalar"));
+    return Err(ShapeError::InvalidThreshold.into());
   }
   if max_iters == 0 {
-    return Err(Error::Shape("max_iters must be at least 1"));
+    return Err(ShapeError::ZeroMaxIters.into());
   }
 
   // ── Stage 2: AHC on active embeddings ──────────────────────────

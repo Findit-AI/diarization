@@ -47,9 +47,42 @@ use crate::reconstruct::SlidingWindow;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   /// Input slice length doesn't match the declared `(num_chunks, ...)`
-  /// shape product. Includes the offending lengths in the message.
+  /// shape product, or geometry is invalid (zero / non-finite values).
   #[error("aggregate: shape: {0}")]
-  Shape(&'static str),
+  Shape(#[from] ShapeError),
+}
+
+/// Specific shape-violation reasons for [`Error::Shape`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeError {
+  #[error("num_chunks must be at least 1")]
+  ZeroNumChunks,
+  #[error("num_frames_per_chunk must be at least 1")]
+  ZeroNumFramesPerChunk,
+  #[error("num_speakers must be at least 1")]
+  ZeroNumSpeakers,
+  #[error("chunks_sw.duration must be a positive finite scalar")]
+  InvalidChunkDuration,
+  #[error("chunks_sw.step must be a positive finite scalar")]
+  InvalidChunkStep,
+  #[error("frames_sw_template.duration must be a positive finite scalar")]
+  InvalidFrameDuration,
+  #[error("frames_sw_template.step must be a positive finite scalar")]
+  InvalidFrameStep,
+  #[error("onset must be finite")]
+  NonFiniteOnset,
+  #[error("num_chunks * num_frames_per_chunk * num_speakers overflows usize")]
+  CountTensorSizeOverflow,
+  #[error("segmentations.len() must equal num_chunks * num_frames_per_chunk * num_speakers")]
+  SegmentationsLenMismatch,
+  #[error("num_chunks * num_frames_per_chunk overflows usize")]
+  HammingSizeOverflow,
+  #[error("per_chunk_value.len() must equal num_chunks * num_frames_per_chunk")]
+  HammingPerChunkValueLenMismatch,
+  #[error("chunk_step must be a positive finite scalar")]
+  InvalidHammingChunkStep,
+  #[error("frame_step must be a positive finite scalar")]
+  InvalidHammingFrameStep,
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -158,23 +191,19 @@ pub fn try_hamming_aggregate(
   // Non-positive / non-finite step values divide into a non-finite
   // start_frame that saturates to `i64::MAX` after the cast.
   if num_frames_per_chunk == 0 {
-    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+    return Err(ShapeError::ZeroNumFramesPerChunk.into());
   }
   if !chunk_step.is_finite() || chunk_step <= 0.0 {
-    return Err(Error::Shape("chunk_step must be a positive finite scalar"));
+    return Err(ShapeError::InvalidHammingChunkStep.into());
   }
   if !frame_step.is_finite() || frame_step <= 0.0 {
-    return Err(Error::Shape("frame_step must be a positive finite scalar"));
+    return Err(ShapeError::InvalidHammingFrameStep.into());
   }
   let expected = num_chunks
     .checked_mul(num_frames_per_chunk)
-    .ok_or(Error::Shape(
-      "num_chunks * num_frames_per_chunk overflows usize",
-    ))?;
+    .ok_or(ShapeError::HammingSizeOverflow)?;
   if per_chunk_value.len() != expected {
-    return Err(Error::Shape(
-      "per_chunk_value.len() must equal num_chunks * num_frames_per_chunk",
-    ));
+    return Err(ShapeError::HammingPerChunkValueLenMismatch.into());
   }
   let mut out = vec![0.0_f64; num_output_frames];
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
@@ -308,51 +337,39 @@ pub fn try_count_pyannote(
   // == 0` and `num_speakers == 0` are technically fillable but produce
   // semantically meaningless empty outputs, so refuse them too.
   if num_chunks == 0 {
-    return Err(Error::Shape("num_chunks must be at least 1"));
+    return Err(ShapeError::ZeroNumChunks.into());
   }
   if num_frames_per_chunk == 0 {
-    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+    return Err(ShapeError::ZeroNumFramesPerChunk.into());
   }
   if num_speakers == 0 {
-    return Err(Error::Shape("num_speakers must be at least 1"));
+    return Err(ShapeError::ZeroNumSpeakers.into());
   }
   let chunk_duration = chunks_sw.duration();
   let chunk_step = chunks_sw.step();
   let frame_duration = frames_sw_template.duration();
   let frame_step = frames_sw_template.step();
   if !chunk_duration.is_finite() || chunk_duration <= 0.0 {
-    return Err(Error::Shape(
-      "chunks_sw.duration must be a positive finite scalar",
-    ));
+    return Err(ShapeError::InvalidChunkDuration.into());
   }
   if !chunk_step.is_finite() || chunk_step <= 0.0 {
-    return Err(Error::Shape(
-      "chunks_sw.step must be a positive finite scalar",
-    ));
+    return Err(ShapeError::InvalidChunkStep.into());
   }
   if !frame_duration.is_finite() || frame_duration <= 0.0 {
-    return Err(Error::Shape(
-      "frames_sw_template.duration must be a positive finite scalar",
-    ));
+    return Err(ShapeError::InvalidFrameDuration.into());
   }
   if !frame_step.is_finite() || frame_step <= 0.0 {
-    return Err(Error::Shape(
-      "frames_sw_template.step must be a positive finite scalar",
-    ));
+    return Err(ShapeError::InvalidFrameStep.into());
   }
   if !onset.is_finite() {
-    return Err(Error::Shape("onset must be finite"));
+    return Err(ShapeError::NonFiniteOnset.into());
   }
   let expected = num_chunks
     .checked_mul(num_frames_per_chunk)
     .and_then(|n| n.checked_mul(num_speakers))
-    .ok_or(Error::Shape(
-      "num_chunks * num_frames_per_chunk * num_speakers overflows usize",
-    ))?;
+    .ok_or(ShapeError::CountTensorSizeOverflow)?;
   if segmentations.len() != expected {
-    return Err(Error::Shape(
-      "segmentations.len() must equal num_chunks * num_frames_per_chunk * num_speakers",
-    ));
+    return Err(ShapeError::SegmentationsLenMismatch.into());
   }
 
   // ── 1. Per-(chunk, frame) integer count of active speakers ─────

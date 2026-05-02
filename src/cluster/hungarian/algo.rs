@@ -159,19 +159,20 @@ pub type ChunkAssignment = <DefaultLayout as ChunkLayout>::Row;
 /// `(num_clusters, num_speakers)` before running kuhn_munkres, and the
 /// resulting `cluster → speaker` assignment is inverted.
 pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Error> {
+  use crate::cluster::hungarian::error::ShapeError;
   if chunks.is_empty() {
-    return Err(Error::Shape("chunks must contain at least one chunk"));
+    return Err(ShapeError::EmptyChunks.into());
   }
   let (num_speakers, num_clusters) = chunks[0].shape();
   if num_speakers == 0 {
-    return Err(Error::Shape("num_speakers must be at least 1"));
+    return Err(ShapeError::ZeroSpeakers.into());
   }
   if num_clusters == 0 {
-    return Err(Error::Shape("num_clusters must be at least 1"));
+    return Err(ShapeError::ZeroClusters.into());
   }
   for chunk in chunks {
     if chunk.shape() != (num_speakers, num_clusters) {
-      return Err(Error::Shape("all chunks must share the same shape"));
+      return Err(ShapeError::InconsistentChunkShape.into());
     }
   }
 
@@ -185,7 +186,7 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
   for chunk in chunks {
     for &v in chunk.iter() {
       if v.is_infinite() {
-        return Err(Error::NonFinite("soft_clusters contains +inf or -inf"));
+        return Err(crate::cluster::hungarian::error::NonFiniteError::InfInSoftClusters.into());
       }
     }
   }
@@ -207,9 +208,7 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
     }
   }
   if !any_finite {
-    return Err(Error::NonFinite(
-      "soft_clusters has no finite entries; cannot compute nanmin replacement",
-    ));
+    return Err(crate::cluster::hungarian::error::NonFiniteError::NoFiniteEntries.into());
   }
 
   let mut out = Vec::with_capacity(chunks.len());

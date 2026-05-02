@@ -253,12 +253,12 @@ impl OwnedDiarizationPipeline {
   ) -> Result<OfflineOutput, Error> {
     let cfg = &self.options;
     if samples.is_empty() {
-      return Err(Error::Shape("samples is empty"));
+      return Err(crate::offline::algo::ShapeError::EmptySamples.into());
     }
     let win = WINDOW_SAMPLES as usize;
     let step = cfg.step_samples() as usize;
     if step == 0 {
-      return Err(Error::Shape("step_samples must be > 0"));
+      return Err(crate::offline::algo::ShapeError::ZeroStepSamples.into());
     }
 
     // ── Stage 1: chunked sliding-window segmentation ───────────────
@@ -283,9 +283,7 @@ impl OwnedDiarizationPipeline {
         padded_chunk[..n].copy_from_slice(&samples[lo..end]);
       }
 
-      let logits = seg_model
-        .infer(&padded_chunk)
-        .map_err(|e| Error::Shape(box_leak_segment_err(e)))?;
+      let logits = seg_model.infer(&padded_chunk)?;
       // logits is [FRAMES_PER_WINDOW * POWERSET_CLASSES] row-major.
       for f in 0..FRAMES_PER_WINDOW {
         let mut row = [0.0_f32; POWERSET_CLASSES];
@@ -362,7 +360,7 @@ impl OwnedDiarizationPipeline {
             }
             continue;
           }
-          Err(e) => return Err(Error::Shape(box_leak_embed_err(e))),
+          Err(e) => return Err(e.into()),
         };
         // Pre-validate: if the raw norm is below the PLDA min, drop.
         // PLDA min is 0.01 (RawEmbedding::from_raw_array). Computing
@@ -438,17 +436,6 @@ impl Default for OwnedDiarizationPipeline {
   fn default() -> Self {
     Self::new()
   }
-}
-
-// Error-conversion helpers. The `offline::Error` enum is reused for
-// MVP; future revisions can add typed variants for segmentation /
-// embedding failures specifically.
-fn box_leak_segment_err(e: crate::segment::Error) -> &'static str {
-  // For MVP we just stringify; a typed variant is a follow-up.
-  Box::leak(format!("segment: {e}").into_boxed_str())
-}
-fn box_leak_embed_err(e: crate::embed::Error) -> &'static str {
-  Box::leak(format!("embed: {e}").into_boxed_str())
 }
 
 #[cfg(all(test, feature = "serde"))]

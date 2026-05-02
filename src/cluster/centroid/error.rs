@@ -7,10 +7,10 @@ pub enum Error {
   /// Input shape is invalid (mismatched dims, no surviving clusters,
   /// non-positive `sp_threshold`, etc.).
   #[error("centroid: shape error: {0}")]
-  Shape(&'static str),
+  Shape(#[from] ShapeError),
   /// A NaN/`±inf` entry was found in `q`, `sp`, or `embeddings`.
   #[error("centroid: non-finite value in {0}")]
-  NonFinite(&'static str),
+  NonFinite(#[from] NonFiniteField),
   /// A `sp[k]` value lands inside the SIMD-vs-scalar guard band around
   /// `sp_threshold`. The discrete alive/squashed decision could differ
   /// across CPU backends (NEON ↔ AVX2 ↔ AVX-512 reductions diverge by
@@ -34,4 +34,39 @@ pub enum Error {
     /// Upper bound of the guard band (exclusive).
     hi: f64,
   },
+}
+
+/// Specific shape-violation reasons for [`Error::Shape`].
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeError {
+  #[error("q must have at least one row")]
+  EmptyQ,
+  #[error("q must have at least one column")]
+  ZeroQClusters,
+  #[error("sp.len() must equal q.ncols()")]
+  SpQClusterMismatch,
+  #[error("embeddings.nrows() must equal q.nrows()")]
+  EmbeddingsQRowMismatch,
+  #[error("embeddings must have at least one column")]
+  ZeroEmbeddingDim,
+  #[error("sp_threshold must be finite")]
+  NonFiniteSpThreshold,
+  #[error("no clusters survive the sp threshold (would produce empty centroid set)")]
+  NoSurvivingClusters,
+  #[error(
+    "surviving cluster has non-positive total weight; \
+     cannot normalize without producing NaN"
+  )]
+  NonPositiveTotalWeight,
+}
+
+/// Field that contained a non-finite value.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum NonFiniteField {
+  #[error("q")]
+  Q,
+  #[error("sp")]
+  Sp,
+  #[error("embeddings")]
+  Embeddings,
 }

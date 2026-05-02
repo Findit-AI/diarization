@@ -179,8 +179,13 @@ fn vbx_rejects_zero_feature_dim() {
   let qinit = deterministic_qinit(t, s);
   let r = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 5);
   assert!(
-    matches!(r, Err(Error::Shape(msg)) if msg.contains("feature")),
-    "expected Shape(\"...feature...\") for d=0 input, got {r:?}"
+    matches!(
+      r,
+      Err(Error::Shape(
+        crate::cluster::vbx::error::ShapeError::ZeroXFeatureDim
+      ))
+    ),
+    "expected Shape(ZeroXFeatureDim) for d=0 input, got {r:?}"
   );
 }
 
@@ -227,7 +232,12 @@ fn vbx_rejects_qinit_with_nan_entry() {
   qinit[(2, 1)] = f64::NAN;
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(
-    matches!(result, Err(Error::NonFinite("qinit"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::Qinit
+      ))
+    ),
     "got {result:?}"
   );
 }
@@ -242,7 +252,12 @@ fn vbx_rejects_qinit_with_inf_entry() {
   qinit[(0, 0)] = f64::INFINITY;
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(
-    matches!(result, Err(Error::NonFinite("qinit"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::Qinit
+      ))
+    ),
     "got {result:?}"
   );
 }
@@ -481,7 +496,12 @@ fn vbx_rejects_x_with_nan() {
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(
-    matches!(result, Err(Error::NonFinite("x"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::X
+      ))
+    ),
     "got {result:?}"
   );
 }
@@ -494,7 +514,12 @@ fn vbx_rejects_x_with_pos_inf() {
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(
-    matches!(result, Err(Error::NonFinite("x"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::X
+      ))
+    ),
     "got {result:?}"
   );
 }
@@ -507,7 +532,12 @@ fn vbx_rejects_x_with_neg_inf() {
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
   assert!(
-    matches!(result, Err(Error::NonFinite("x"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::X
+      ))
+    ),
     "got {result:?}"
   );
 }
@@ -523,7 +553,12 @@ fn vbx_rejects_invalid_x_even_with_max_iters_zero() {
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
   let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
   assert!(
-    matches!(result, Err(Error::NonFinite("x"))),
+    matches!(
+      result,
+      Err(Error::NonFinite(
+        crate::cluster::vbx::error::NonFiniteField::X
+      ))
+    ),
     "boundary validation must run even at max_iters=0; got {result:?}"
   );
 }

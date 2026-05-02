@@ -22,7 +22,7 @@
 //! callers reach the pipeline via [`crate::Diarizer`].
 
 mod algo;
-mod error;
+pub mod error;
 
 #[cfg(test)]
 mod parity_tests;

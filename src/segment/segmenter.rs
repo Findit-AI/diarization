@@ -140,7 +140,7 @@ impl Segmenter {
   /// otherwise identical output.
   pub fn try_new(opts: SegmentOptions) -> Result<Self, Error> {
     if opts.step_samples() == 0 {
-      return Err(Error::InvalidOptions("step_samples must be > 0"));
+      return Err(crate::segment::error::InvalidOptionsReason::ZeroStepSamples.into());
     }
     let onset = opts.onset_threshold();
     let offset = opts.offset_threshold();

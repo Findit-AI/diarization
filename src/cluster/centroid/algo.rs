@@ -49,40 +49,41 @@ pub fn weighted_centroids(
   embeddings: &DMatrix<f64>,
   sp_threshold: f64,
 ) -> Result<DMatrix<f64>, Error> {
+  use crate::cluster::centroid::error::{NonFiniteField, ShapeError};
   let (num_train, num_init) = q.shape();
   if num_train == 0 {
-    return Err(Error::Shape("q must have at least one row"));
+    return Err(ShapeError::EmptyQ.into());
   }
   if num_init == 0 {
-    return Err(Error::Shape("q must have at least one column"));
+    return Err(ShapeError::ZeroQClusters.into());
   }
   if sp.len() != num_init {
-    return Err(Error::Shape("sp.len() must equal q.ncols()"));
+    return Err(ShapeError::SpQClusterMismatch.into());
   }
   if embeddings.nrows() != num_train {
-    return Err(Error::Shape("embeddings.nrows() must equal q.nrows()"));
+    return Err(ShapeError::EmbeddingsQRowMismatch.into());
   }
   let embed_dim = embeddings.ncols();
   if embed_dim == 0 {
-    return Err(Error::Shape("embeddings must have at least one column"));
+    return Err(ShapeError::ZeroEmbeddingDim.into());
   }
   if !sp_threshold.is_finite() {
-    return Err(Error::Shape("sp_threshold must be finite"));
+    return Err(ShapeError::NonFiniteSpThreshold.into());
   }
   // Validate finite values across all inputs.
   for v in q.iter() {
     if !v.is_finite() {
-      return Err(Error::NonFinite("q"));
+      return Err(NonFiniteField::Q.into());
     }
   }
   for v in sp.iter() {
     if !v.is_finite() {
-      return Err(Error::NonFinite("sp"));
+      return Err(NonFiniteField::Sp.into());
     }
   }
   for v in embeddings.iter() {
     if !v.is_finite() {
-      return Err(Error::NonFinite("embeddings"));
+      return Err(NonFiniteField::Embeddings.into());
     }
   }
 
@@ -120,9 +121,7 @@ pub fn weighted_centroids(
   // Identify surviving clusters (sp > threshold).
   let alive: Vec<usize> = (0..num_init).filter(|&k| sp[k] > sp_threshold).collect();
   if alive.is_empty() {
-    return Err(Error::Shape(
-      "no clusters survive the sp threshold (would produce empty centroid set)",
-    ));
+    return Err(ShapeError::NoSurvivingClusters.into());
   }
 
   // Compute weighted sums + total weight per surviving cluster.
@@ -160,10 +159,7 @@ pub fn weighted_centroids(
   }
   for &w_total in &w_totals {
     if w_total <= 0.0 {
-      return Err(Error::Shape(
-        "surviving cluster has non-positive total weight; \
-         cannot normalize without producing NaN",
-      ));
+      return Err(ShapeError::NonPositiveTotalWeight.into());
     }
   }
   // Normalize: row-wise divide by w_total. The axpy primitive doesn't

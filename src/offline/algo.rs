@@ -16,13 +16,48 @@ use nalgebra::{DMatrix, DVector};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error("offline: {0}")]
-  Shape(&'static str),
+  Shape(#[from] ShapeError),
   #[error("offline: pipeline: {0}")]
   Pipeline(#[from] crate::pipeline::Error),
   #[error("offline: reconstruct: {0}")]
   Reconstruct(#[from] crate::reconstruct::Error),
   #[error("offline: plda: {0}")]
   Plda(#[from] crate::plda::Error),
+  /// Propagated from segmentation ONNX inference inside the
+  /// `OwnedDiarizationPipeline` audio entrypoint.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("offline: segment: {0}")]
+  Segment(#[from] crate::segment::Error),
+  /// Propagated from embedding ONNX inference inside the
+  /// `OwnedDiarizationPipeline` audio entrypoint.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("offline: embed: {0}")]
+  Embed(#[from] crate::embed::Error),
+}
+
+/// Specific shape-violation reasons for [`Error::Shape`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeError {
+  #[error("num_chunks must be at least 1")]
+  ZeroNumChunks,
+  #[error("num_speakers must be at least 1")]
+  ZeroNumSpeakers,
+  #[error("num_frames_per_chunk must be at least 1")]
+  ZeroNumFramesPerChunk,
+  #[error("raw_embeddings size overflow")]
+  RawEmbeddingsOverflow,
+  #[error("raw_embeddings.len() must equal num_chunks * num_speakers * EMBEDDING_DIM")]
+  RawEmbeddingsLenMismatch,
+  #[error("segmentations size overflow")]
+  SegmentationsOverflow,
+  #[error("segmentations.len() must equal num_chunks * num_frames_per_chunk * num_speakers")]
+  SegmentationsLenMismatch,
+  #[error("samples is empty")]
+  EmptySamples,
+  #[error("step_samples must be > 0")]
+  ZeroStepSamples,
 }
 
 /// Inputs to [`diarize_offline`].
@@ -318,31 +353,27 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
   // ── Boundary checks ────────────────────────────────────────────
   if num_chunks == 0 {
-    return Err(Error::Shape("num_chunks must be at least 1"));
+    return Err(ShapeError::ZeroNumChunks.into());
   }
   if num_speakers == 0 {
-    return Err(Error::Shape("num_speakers must be at least 1"));
+    return Err(ShapeError::ZeroNumSpeakers.into());
   }
   if num_frames_per_chunk == 0 {
-    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+    return Err(ShapeError::ZeroNumFramesPerChunk.into());
   }
   let expected_emb_len = num_chunks
     .checked_mul(num_speakers)
     .and_then(|n| n.checked_mul(EMBEDDING_DIM))
-    .ok_or(Error::Shape("raw_embeddings size overflow"))?;
+    .ok_or(ShapeError::RawEmbeddingsOverflow)?;
   if raw_embeddings.len() != expected_emb_len {
-    return Err(Error::Shape(
-      "raw_embeddings.len() must equal num_chunks * num_speakers * EMBEDDING_DIM",
-    ));
+    return Err(ShapeError::RawEmbeddingsLenMismatch.into());
   }
   let expected_seg_len = num_chunks
     .checked_mul(num_frames_per_chunk)
     .and_then(|n| n.checked_mul(num_speakers))
-    .ok_or(Error::Shape("segmentations size overflow"))?;
+    .ok_or(ShapeError::SegmentationsOverflow)?;
   if segmentations.len() != expected_seg_len {
-    return Err(Error::Shape(
-      "segmentations.len() must equal num_chunks * num_frames_per_chunk * num_speakers",
-    ));
+    return Err(ShapeError::SegmentationsLenMismatch.into());
   }
 
   // ── Stage 1: filter active (chunk, speaker) pairs ──────────────

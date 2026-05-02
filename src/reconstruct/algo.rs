@@ -232,42 +232,39 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     smoothing_epsilon,
   } = input;
 
+  use crate::reconstruct::error::{NonFiniteField, ShapeError, TimingError};
   // ── Boundary checks ────────────────────────────────────────────
   if num_chunks == 0 {
-    return Err(Error::Shape("num_chunks must be at least 1"));
+    return Err(ShapeError::ZeroNumChunks.into());
   }
   if num_frames_per_chunk == 0 {
-    return Err(Error::Shape("num_frames_per_chunk must be at least 1"));
+    return Err(ShapeError::ZeroNumFramesPerChunk.into());
   }
   if num_speakers == 0 {
-    return Err(Error::Shape("num_speakers must be at least 1"));
+    return Err(ShapeError::ZeroNumSpeakers.into());
   }
   if segmentations.len() != num_chunks * num_frames_per_chunk * num_speakers {
-    return Err(Error::Shape(
-      "segmentations.len() != num_chunks * num_frames_per_chunk * num_speakers",
-    ));
+    return Err(ShapeError::SegmentationsLenMismatch.into());
   }
   if hard_clusters.len() != num_chunks {
-    return Err(Error::Shape("hard_clusters.len() != num_chunks"));
+    return Err(ShapeError::HardClustersLenMismatch.into());
   }
   // Each `hard_clusters[c]` is `[i32; MAX_SPEAKER_SLOTS]` by type, so
   // its length is statically equal to `MAX_SPEAKER_SLOTS = 3`. We
   // require `num_speakers <= MAX_SPEAKER_SLOTS` so the body's
   // `0..num_speakers` indexing stays in-bounds.
   if num_speakers > crate::segment::options::MAX_SPEAKER_SLOTS as usize {
-    return Err(Error::Shape(
-      "num_speakers must be <= MAX_SPEAKER_SLOTS (3)",
-    ));
+    return Err(ShapeError::TooManySpeakers.into());
   }
   if num_output_frames == 0 {
     // Zero output frames with nonempty chunks/segmentations is a
     // schema/timing drift signal, not a valid input. Returning an
     // empty grid would make a downstream caller computing
     // `grid.len() / num_output_frames` divide by zero.
-    return Err(Error::Shape("num_output_frames must be at least 1"));
+    return Err(ShapeError::ZeroNumOutputFrames.into());
   }
   if count.len() != num_output_frames {
-    return Err(Error::Shape("count.len() != num_output_frames"));
+    return Err(ShapeError::CountLenMismatch.into());
   }
   // count[t] = instantaneous active speaker count at output frame t.
   // Pyannote derives this from `aggregate(sum(binarized_seg, axis=-1))`
@@ -279,15 +276,15 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // fabricate dummy speakers in the top-K binarize.
   for &c in count {
     if c > MAX_COUNT_PER_FRAME {
-      return Err(Error::Shape("count entry exceeds MAX_COUNT_PER_FRAME (64)"));
+      return Err(ShapeError::CountAboveMax.into());
     }
   }
   for w in [chunks_sw, frames_sw] {
     if !w.duration.is_finite() || !w.step.is_finite() || !w.start.is_finite() {
-      return Err(Error::Timing("non-finite sliding-window parameter"));
+      return Err(TimingError::NonFiniteParameter.into());
     }
     if w.duration <= 0.0 || w.step <= 0.0 {
-      return Err(Error::Timing("non-positive duration or step"));
+      return Err(TimingError::NonPositiveDurationOrStep.into());
     }
   }
   // Reject all non-finite segmentation values (NaN and ±inf). Pyannote's
@@ -299,7 +296,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // `diarization::cluster::hungarian`'s ±inf rejection at the solver boundary.
   for &v in segmentations {
     if !v.is_finite() {
-      return Err(Error::NonFinite("segmentations"));
+      return Err(NonFiniteField::Segmentations.into());
     }
   }
 
@@ -315,14 +312,10 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
         continue;
       }
       if k < 0 {
-        return Err(Error::Shape(
-          "hard_clusters contains a negative id other than UNMATCHED",
-        ));
+        return Err(ShapeError::HardClustersNegativeId.into());
       }
       if k > MAX_CLUSTER_ID {
-        return Err(Error::Shape(
-          "hard_clusters id exceeds MAX_CLUSTER_ID (1023)",
-        ));
+        return Err(ShapeError::HardClustersIdAboveMax.into());
       }
     }
   }

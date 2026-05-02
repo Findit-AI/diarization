@@ -218,8 +218,13 @@ fn rejects_nan_in_non_train_embedding_row() {
   );
   let result = assign_embeddings(&input);
   assert!(
-    matches!(result, Err(crate::pipeline::Error::NonFinite("embeddings"))),
-    "expected NonFinite(embeddings), got {result:?}"
+    matches!(
+      result,
+      Err(crate::pipeline::Error::NonFinite(
+        crate::pipeline::error::NonFiniteField::Embeddings
+      ))
+    ),
+    "expected NonFinite(Embeddings), got {result:?}"
   );
 }
 
@@ -267,8 +272,10 @@ fn rejects_nan_in_segmentations() {
   assert!(
     matches!(
       result,
-      Err(crate::pipeline::Error::NonFinite("segmentations"))
+      Err(crate::pipeline::Error::NonFinite(
+        crate::pipeline::error::NonFiniteField::Segmentations
+      ))
     ),
-    "expected NonFinite(segmentations), got {result:?}"
+    "expected NonFinite(Segmentations), got {result:?}"
   );
 }

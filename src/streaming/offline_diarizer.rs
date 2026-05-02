@@ -72,7 +72,7 @@ const SLOTS_PER_CHUNK: usize = 3;
 #[derive(Debug, thiserror::Error)]
 pub enum StreamingError {
   #[error("streaming: shape: {0}")]
-  Shape(&'static str),
+  Shape(#[from] StreamingShapeError),
   #[error("streaming: segment: {0}")]
   Segment(String),
   #[error("streaming: embed: {0}")]
@@ -81,6 +81,17 @@ pub enum StreamingError {
   Offline(#[from] crate::offline::Error),
   #[error("streaming: reconstruct: {0}")]
   Reconstruct(#[from] crate::reconstruct::Error),
+}
+
+/// Specific shape-violation reasons for [`StreamingError::Shape`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingShapeError {
+  #[error("voice range samples is empty")]
+  EmptyVoiceRange,
+  #[error("step_samples must be > 0")]
+  ZeroStepSamples,
+  #[error("all accumulated voice ranges are empty")]
+  AllRangesEmpty,
 }
 
 /// Configuration for [`StreamingOfflineDiarizer`].
@@ -227,12 +238,12 @@ impl StreamingOfflineDiarizer {
   ) -> Result<(), StreamingError> {
     let cfg = &self.options.diarization;
     if samples.is_empty() {
-      return Err(StreamingError::Shape("voice range samples is empty"));
+      return Err(StreamingShapeError::EmptyVoiceRange.into());
     }
     let win = WINDOW_SAMPLES as usize;
     let step = cfg.step_samples() as usize;
     if step == 0 {
-      return Err(StreamingError::Shape("step_samples must be > 0"));
+      return Err(StreamingShapeError::ZeroStepSamples.into());
     }
 
     let num_chunks = if samples.len() <= win {
@@ -385,9 +396,7 @@ impl StreamingOfflineDiarizer {
     }
     let total_chunks: usize = self.ranges.iter().map(|r| r.num_chunks).sum();
     if total_chunks == 0 {
-      return Err(StreamingError::Shape(
-        "all accumulated voice ranges are empty",
-      ));
+      return Err(StreamingShapeError::AllRangesEmpty.into());
     }
 
     // ── 1. Concatenate per-range tensors ───────────────────────────
