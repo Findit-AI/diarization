@@ -52,8 +52,7 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     // call would compute its own per-tail sum (one rounding) and
     // then `sum += that` (a second rounding), drifting by ½ ulp on
     // odd `n` and breaking the bit-identical contract that AHC /
-    // VBx / centroid / Hungarian rely on. Codex adversarial review
-    // HIGH (round 4).
+    // VBx / centroid / Hungarian rely on.    // HIGH (round 4).
     while i < n {
       sum = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), sum);
       i += 1;

@@ -23,8 +23,7 @@ use crate::segment::options::{FRAMES_PER_WINDOW, WINDOW_SAMPLES};
 ///
 /// **Use only for window-local offsets.** Absolute frame indices grow
 /// with stream length and will exceed `u32::MAX` after ~74 hours at
-/// 16 kHz; for those, use [`frame_to_sample_u64`] instead. Codex
-/// review MEDIUM.
+/// 16 kHz; for those, use [`frame_to_sample_u64`] instead.
 #[inline]
 pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
   let n = frame_idx as u64 * WINDOW_SAMPLES as u64;
@@ -39,7 +38,7 @@ pub(crate) const fn frame_to_sample(frame_idx: u32) -> u32 {
 /// `u32` helper above truncates after ~74 h of audio at 16 kHz and
 /// would silently wrap public timestamps.
 ///
-/// Codex review MEDIUM. Spec §15 #54.
+/// Spec §15 #54.
 #[inline]
 pub(crate) const fn frame_to_sample_u64(frame_idx: u64) -> u64 {
   let n = frame_idx * WINDOW_SAMPLES as u64;
@@ -168,7 +167,7 @@ mod tests {
     }
   }
 
-  /// Codex review MEDIUM regression: absolute frame indices on long
+  /// regression: absolute frame indices on long
   /// streams routinely exceed `u32::MAX`. The old u32-only helper
   /// truncated, silently wrapping `Action::VoiceSpan` ranges past
   /// ~74 h. The u64 helper must (a) agree with the u32 helper for

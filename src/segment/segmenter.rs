@@ -111,7 +111,7 @@ pub struct Segmenter {
   /// drain replays the stash before polling new actions; without it,
   /// `Action::NeedsInference` was popped + lost on every transient
   /// failure (the `WindowId` stayed in `pending`, but no caller-
-  /// reachable handle remained to retry it). Codex review HIGH.
+  /// reachable handle remained to retry it).
   ///
   /// `cfg`-gated because it is only consumed by the `ort`-feature
   /// streaming helpers; the field stays always-present to keep
@@ -124,7 +124,7 @@ impl Segmenter {
   ///
   /// # Panics
   /// Panics if `opts.step_samples() == 0`. Zero step would hang the
-  /// streaming pump (Codex review post-rev-9). Defense-in-depth: the
+  /// streaming pump (). Defense-in-depth: the
   /// option setters [`SegmentOptions::with_step_samples`] /
   /// [`SegmentOptions::set_step_samples`] already panic on zero, so
   /// this trip only fires if a future refactor constructs a
@@ -240,7 +240,7 @@ impl Segmenter {
     // step_samples. The latest possible tail anchor (from plan_starts in
     // finish()) is at total_samples_pushed - WINDOW_SAMPLES. Keep at least
     // the rolling last-WINDOW_SAMPLES window so a later tail can replay
-    // audio with correct absolute alignment (Codex review).
+    // audio with correct absolute alignment.
     let next_regular_start = (self.next_window_idx + 1) as u64 * self.opts.step_samples() as u64;
     let tail_floor = self
       .total_samples_pushed
@@ -291,7 +291,7 @@ impl Segmenter {
   /// or a re-run of the same model). Without this validation, NaN
   /// propagates through `softmax_row` and downstream comparisons treat
   /// the entire window as silent — silently dropping the audio with no
-  /// retry path. Codex review HIGH.
+  /// retry path.
   pub fn push_inference(&mut self, id: WindowId, scores: &[f32]) -> Result<(), Error> {
     let expected = FRAMES_PER_WINDOW * POWERSET_CLASSES;
     if scores.len() != expected {
@@ -432,7 +432,7 @@ impl Segmenter {
       // rounds to 921 and frame_to_sample(921) = 250_187).
       if let Some(start_frame) = self.voice_run_start.take() {
         // Absolute frame → sample: must be u64 end-to-end. The legacy
-        // u32 cast wrapped after ~74 h at 16 kHz. Codex review MEDIUM.
+        // u32 cast wrapped after ~74 h at 16 kHz.
         let s0 = frame_to_sample_u64(start_frame).min(self.total_samples);
         self.feed_merge_cursor(s0, self.total_samples);
         self.voice_hyst.reset();
@@ -455,7 +455,7 @@ impl Segmenter {
   ///     window (scheduled by [`Self::finish`] at
   ///     `max(0, total_samples_pushed - WINDOW_SAMPLES)`) could land
   ///     on frames that have already been finalized — its
-  ///     contribution would be silently dropped. Codex review HIGH.
+  ///     contribution would be silently dropped.
   /// - **Post-finish + pending empty:** `total_frames` (entire stream
   ///   finalized).
   fn next_finalization_boundary(&self) -> u64 {
@@ -478,7 +478,7 @@ impl Segmenter {
     // skipped by reconstruction (it has a defensive guard against
     // frames < base_frame). Pre-finish, we don't know whether finish
     // will be called soon, so we always include this term — it costs
-    // at most one window of extra buffering. Codex review HIGH.
+    // at most one window of extra buffering.
     let tail_safe_frame = if self.finished {
       // After finish, the tail (if any) has already been scheduled
       // and is in `pending`; the earliest_pending term covers it.
@@ -501,7 +501,7 @@ impl Segmenter {
   /// `start_frame` / `end_frame` are absolute stream-wide frame
   /// indices; we convert with the u64 helper so timestamps stay
   /// correct past ~74 h. The previous u32-clamp path silently wrapped
-  /// `Action::VoiceSpan` ranges. Codex review MEDIUM.
+  /// `Action::VoiceSpan` ranges.
   fn feed_merge_cursor_frames(&mut self, start_frame: u64, end_frame: u64) {
     let s0 = frame_to_sample_u64(start_frame);
     let s1 = frame_to_sample_u64(end_frame);
@@ -635,9 +635,8 @@ impl Segmenter {
   /// **Do not use this for finalization** in a downstream
   /// reconstruction pump — it ignores the not-yet-emitted tail anchor.
   /// Use [`Self::tail_safe_finalization_boundary_samples`] instead.
-  /// Codex review HIGH.
+  ///
   #[cfg(test)]
-  #[allow(dead_code)]
   pub(crate) fn peek_next_window_start(&self) -> u64 {
     if self.finished {
       return u64::MAX;
@@ -651,7 +650,7 @@ impl Segmenter {
   ///
   /// Pre-finish: `min(next regular window start, earliest pending
   /// window start, total_samples_pushed - WINDOW_SAMPLES)`. The third
-  /// term is the load-bearing one fixed by Codex review HIGH:
+  /// term is the load-bearing one fixed by:
   /// `finish()` schedules a tail anchor at `total_samples_pushed -
   /// WINDOW_SAMPLES` (clamped to 0), and frames before that are
   /// touched by the tail's contribution. Without it, a stream like
@@ -836,7 +835,7 @@ mod tests {
   /// the pending entry is consumed so the caller can retry. Without
   /// this gate, `softmax_row` produces `NaN` probabilities, downstream
   /// comparisons treat the window as silent, and the audio is silently
-  /// dropped. Codex review HIGH.
+  /// dropped.
   #[test]
   fn push_inference_rejects_non_finite_and_keeps_pending() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
@@ -1033,7 +1032,7 @@ mod tests {
     }
   }
 
-  /// Codex review HIGH: `clear()` must drop any stashed Layer-2
+  ///: `clear()` must drop any stashed Layer-2
   /// inference so a fresh session doesn't accidentally retry one from
   /// the previous session. We exercise the field directly here because
   /// the streaming helpers populating it require an ONNX runtime not
@@ -1144,7 +1143,7 @@ mod tests {
     assert_eq!(s.peek_next_window_start(), u64::MAX);
   }
 
-  /// Codex review HIGH regression: with the default step of 40_000
+  /// regression: with the default step of 40_000
   /// and WINDOW_SAMPLES=160_000, a 230_000-sample stream:
   ///   - schedules regular windows at 0 (covers 0..160k) and 40k
   ///     (covers 40k..200k); a window at 80k would need 240k samples
@@ -1218,7 +1217,7 @@ mod tests {
 
   #[test]
   fn tail_window_audio_aligned_with_claimed_start() {
-    // Codex review HIGH-severity regression: with default step = 40_000
+    //-severity regression: with default step = 40_000
     // and WINDOW_SAMPLES = 160_000, push 230_000 samples in one shot.
     // Two regular windows fire (idx 0 → 0, idx 1 → 40_000). finish()
     // then schedules a tail window at 230_000 - 160_000 = 70_000.

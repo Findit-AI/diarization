@@ -17,7 +17,7 @@ set -ex
 # filter scopes to ~12 differential / panic / boundary tests with
 # total runtime well under a minute even under emulation.
 #
-# Pattern mirrors siglip2's `avx512-sde` CI job. Codex CI sweep.
+# Pattern mirrors siglip2's `avx512-sde` CI job.
 
 TARGET="x86_64-unknown-linux-gnu"
 
@@ -47,7 +47,7 @@ sde64 -version
 # Mirrors `ci/sde_avx512.sh`'s expanded test scope. Pyannote-parity
 # tests run under SDE-emulated Haswell (AVX2 + FMA, no AVX-512) so
 # AVX2-induced ulp drift on threshold-sensitive decisions surfaces
-# in CI. Codex review MEDIUM round 6.
+# in CI.
 RUSTFLAGS="-Dwarnings --cfg diarization_disable_avx512" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -hsw --" \
 cargo test \

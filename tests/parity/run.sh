@@ -3,12 +3,12 @@
 #
 # Requires:
 # - models/segmentation-3.0.onnx and models/wespeaker_resnet34_lm.onnx
-# - models/plda/xvec_transform.npz and models/plda/plda.npz (Phase 0)
+# - models/plda/xvec_transform.npz and models/plda/plda.npz
 # - uv (https://docs.astral.sh/uv/)
 # - the clip path; defaults to the canonical 2-speaker fixture
 #
 # Behavior:
-# - If <fixture-dir>/manifest.json is missing, runs Phase-0 capture first.
+# - If <fixture-dir>/manifest.json is missing, runs intermediate capture first.
 # - Then runs dia and pyannote, computes DER.
 
 set -euo pipefail
@@ -28,7 +28,7 @@ fi
 uv pip install -e . > /dev/null
 
 if [ ! -f "$MANIFEST" ]; then
-  echo "[run.sh] no manifest at $MANIFEST; running Phase-0 capture..."
+  echo "[run.sh] no manifest at $MANIFEST; running capture..."
   uv run python capture_intermediates.py "$ABS_CLIP"
 else
   echo "[run.sh] reusing existing snapshot at $SNAPSHOT_DIR"

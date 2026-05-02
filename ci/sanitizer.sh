@@ -21,7 +21,7 @@ TARGET="x86_64-unknown-linux-gnu"
 # Not our bug, not fixable in our code; scoping to `ops::` skips them.
 #
 # This is the same pattern siglip2's CI uses for its SIMD-only sanitizer
-# coverage. Codex CI sweep.
+# coverage.
 
 # Run address sanitizer
 RUSTFLAGS="-Z sanitizer=address" \

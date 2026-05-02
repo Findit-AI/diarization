@@ -233,8 +233,7 @@ impl SegmentModel {
     // (axes swapped) or `[FRAMES_PER_WINDOW * POWERSET_CLASSES]` (rank
     // 1) — would otherwise pass the count check, and `push_inference`
     // would softmax groups of 7 values that are not class logits for
-    // one frame, silently corrupting all speaker probabilities. Codex
-    // review HIGH.
+    // one frame, silently corrupting all speaker probabilities.
     let dims: &[i64] = shape.as_ref();
     let n_frames = FRAMES_PER_WINDOW as i64;
     let n_classes = POWERSET_CLASSES as i64;
@@ -273,7 +272,7 @@ impl Segmenter {
   /// This is the streaming entry point that mirrors
   /// `silero::Session::process_stream`.
   ///
-  /// **Retry contract** (Codex review HIGH): if a previous call left a
+  /// **Retry contract** (): if a previous call left a
   /// stashed inference (a transient `model.infer` failure or
   /// `Error::NonFiniteScores` from `push_inference`), this call
   /// retries the stash BEFORE pushing new audio. On a stash retry
@@ -303,7 +302,7 @@ impl Segmenter {
   /// Retries any stashed inference before calling `finish()` so that
   /// the segmenter is not left half-finished if the stash retry fails.
   /// `finish()` is idempotent, so re-driving `finish_stream` after a
-  /// retryable error is safe. Codex review HIGH.
+  /// retryable error is safe.
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn finish_stream<F>(&mut self, model: &mut SegmentModel, mut emit: F) -> Result<(), Error>
   where
@@ -324,8 +323,7 @@ impl Segmenter {
     // polling new actions. Without this, an `infer`/`push_inference`
     // failure popped `Action::NeedsInference`, returned Err, and lost
     // the in-flight `(WindowId, samples)` pair forever — `WindowId`
-    // stayed in `pending` and finalization could stall. Codex review
-    // HIGH.
+    // stayed in `pending` and finalization could stall.
     //
     // Two retryable failure modes share the stash, mirroring the
     // diarizer's `pending_seg_inference` semantics:
@@ -356,7 +354,7 @@ impl Segmenter {
         Action::NeedsInference { id, samples } => {
           // Stash before invoking the model so a transient failure
           // (or non-finite logits) doesn't lose the action handle.
-          // Codex review HIGH.
+          //
           match model.infer(&samples) {
             Ok(scores) => match self.push_inference(id, &scores) {
               Ok(()) => {}

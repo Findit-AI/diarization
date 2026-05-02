@@ -4,7 +4,7 @@
 //! the generalized-eigh setup once. Thereafter `xvec_transform` and
 //! `plda_transform` are pure read-only mappings.
 
-use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use nalgebra::{DMatrix, DVector};
 
 use crate::{
   embed::NORM_EPSILON,
@@ -18,7 +18,7 @@ use crate::{
 /// Minimum allowed L2 norm for a raw WeSpeaker embedding at the
 /// [`RawEmbedding`] boundary.
 ///
-/// Calibrated against the captured Phase-0 distribution: across the
+/// Calibrated against the captured distribution: across the
 /// 654 raw WeSpeaker embeddings in
 /// `tests/parity/fixtures/01_dialogue/raw_embeddings.npz` the
 /// observed range is `[0.536, 6.97]` with median 2.07. `0.01` sits
@@ -38,9 +38,9 @@ use crate::{
 /// fixed `-mean1`-direction into a finite `sqrt(128)`-normed PLDA
 /// stage-1 output that VBx treats as a legitimate (constant)
 /// speaker. This produces silent fabricated speaker evidence from
-/// a dead embedder. Codex review HIGH (round 7).
+/// a dead embedder.
 ///
-/// # Calibration limitation and Phase-5 integration intent (Codex review MEDIUM round 9)
+/// # Calibration limitation
 ///
 /// The threshold is derived from a single 2-speaker conversational
 /// fixture. Domain-shifted, very short, very quiet, or future-runtime
@@ -49,11 +49,10 @@ use crate::{
 /// no equivalent guard, so this is a deliberate divergence.
 ///
 /// The trade-off was accepted because the alternative (silent
-/// fabricated speaker evidence from a dead embedder) is the
-/// no-observability failure mode rounds 4 and 7 closed, and the
-/// guard returns [`Result`] rather than panicking — the caller owns
-/// the health-check policy. Phase-5 integration (see
-/// `src/lib.rs:62-72`) is the correct layer to:
+/// fabricated speaker evidence from a dead embedder) is a
+/// no-observability failure mode, and the guard returns [`Result`]
+/// rather than panicking — the caller owns the health-check policy.
+/// The integration layer is the correct place to:
 ///
 /// 1. Re-validate against multi-corpus captures (varied audio
 ///    domains, very-short utterances, low-energy speech).
@@ -94,13 +93,13 @@ pub(crate) const RAW_EMBEDDING_MIN_NORM: f64 = 0.01;
 ///
 /// Construction is `#[cfg(test)] pub(crate)` — production builds
 /// cannot construct a `RawEmbedding` at all. The only production
-/// path from a raw WeSpeaker vector to PLDA features will be via
-/// `EmbedModel::embed_raw` once Phase 5 lands; that path will own
-/// its own typed entry inside `diarization::plda` so the boundary stays
-/// sealed. (Codex review MEDIUM: a public `plda-fixtures` Cargo
-/// feature was previously used as the gate, but additive features
-/// are globally unified, so any downstream crate enabling it would
-/// have re-exposed the constructor for the entire build.)
+/// path from a raw WeSpeaker vector to PLDA features is via
+/// `EmbedModel::embed_raw`; that path owns its own typed entry inside
+/// `diarization::plda` so the boundary stays sealed. (A public
+/// `plda-fixtures` Cargo feature was previously used as the gate,
+/// but additive features are globally unified, so any downstream
+/// crate enabling it would have re-exposed the constructor for the
+/// entire build.)
 ///
 /// # Type-safety contract
 ///
@@ -126,7 +125,7 @@ impl RawEmbedding {
   /// and silently produce a finite `sqrt(128)`-normed PLDA stage-1
   /// vector that downstream VBx would treat as legitimate speaker
   /// evidence. Rejecting at the **uncentered** input here catches
-  /// that class. Codex review HIGH.
+  /// that class.
   ///
   /// # Errors
   ///
@@ -137,15 +136,13 @@ impl RawEmbedding {
   ///   see [`RAW_EMBEDDING_MIN_NORM`]). Catches all-zero, near-zero
   ///   (e.g. `[1e-13; 256]`), and other degraded-embedder outputs
   ///   that an `NORM_EPSILON`-only floor would have passed straight
-  ///   through into `xvec_transform`'s centering step. Codex
-  ///   review HIGH (round 7).
+  ///   through into `xvec_transform`'s centering step.
   ///
-  /// Phase 5c: now `pub` (was `#[cfg(test)] pub(crate)`). The offline
-  /// diarization path (`offline::OfflineDiarizer`) calls this on the
-  /// per-chunk per-speaker masked WeSpeaker output. The validation is
-  /// load-bearing: it rejects all-zero / near-zero degraded embedder
-  /// outputs that would silently pass `xvec_transform`'s post-centering
-  /// norm guard.
+  /// The offline diarization path (`offline::OfflineDiarizer`) calls
+  /// this on the per-chunk per-speaker masked WeSpeaker output. The
+  /// validation is load-bearing: it rejects all-zero / near-zero
+  /// degraded embedder outputs that would silently pass
+  /// `xvec_transform`'s post-centering norm guard.
   pub fn from_raw_array(arr: [f32; EMBEDDING_DIMENSION]) -> Result<Self, Error> {
     if !arr.iter().all(|v| v.is_finite()) {
       return Err(Error::NonFiniteInput);
@@ -180,8 +177,7 @@ impl RawEmbedding {
 /// via the `pub(super)` `from_xvec_output`). Parity tests use a
 /// `#[cfg(test)] pub(crate)` constructor that loads from a captured
 /// pyannote run and validates the norm; that constructor cannot be
-/// reached from production builds or downstream crates. Codex
-/// review HIGH.
+/// reached from production builds or downstream crates.
 ///
 /// # Type-safety contract
 ///
@@ -243,7 +239,7 @@ impl PostXvecEmbedding {
 
 /// Minimum allowed `‖input - mean1‖` after the first centering step.
 ///
-/// Calibrated against the captured Phase-0 distribution rather than
+/// Calibrated against the captured distribution rather than
 /// f32 quantization noise: across the 654 raw WeSpeaker embeddings
 /// in `tests/parity/fixtures/01_dialogue/raw_embeddings.npz`, the
 /// observed centered-norm range is `[1.36, 7.08]` with median 2.45.
@@ -263,22 +259,21 @@ impl PostXvecEmbedding {
 /// jitter direction to unit norm, and the rest of the pipeline
 /// would whiten that into a fabricated speaker-evidence vector
 /// indistinguishable from a real embedding. Calibrating to the
-/// data closes that window. Codex review HIGH (round 6).
+/// data closes that window.
 ///
-/// # Calibration limitation and Phase-5 integration intent (Codex review MEDIUM round 9)
+/// # Calibration limitation
 ///
 /// Same caveat as [`RAW_EMBEDDING_MIN_NORM`]: the `0.1` threshold
 /// is derived from a single 2-speaker conversational fixture.
 /// Pyannote does not have an equivalent guard, so this is a
-/// deliberate divergence — the trade-off was made because rounds 5
-/// and 6 documented multiple `mean1`-collapse attacks where the
-/// L2-normalize amplifies pure quantization or attacker-controlled
-/// jitter into a finite `sqrt(128)`-normed PLDA output. Phase-5
-/// integration owns the production health-check policy:
-/// telemetry, multi-corpus validation, fallback, and (if needed)
-/// per-deployment threshold tuning. The guard returns
-/// [`Result`] rather than panicking so the integration layer can
-/// observe + skip rather than abort.
+/// deliberate divergence — the trade-off was made because multiple
+/// `mean1`-collapse attacks were documented where the L2-normalize
+/// amplifies pure quantization or attacker-controlled jitter into a
+/// finite `sqrt(128)`-normed PLDA output. The integration layer owns
+/// the production health-check policy: telemetry, multi-corpus
+/// validation, fallback, and (if needed) per-deployment threshold
+/// tuning. The guard returns [`Result`] rather than panicking so the
+/// integration layer can observe + skip rather than abort.
 ///
 /// If the model weights or the embedder are ever changed, this
 /// constant must be re-validated against fresh captured data —
@@ -295,7 +290,7 @@ pub(crate) const XVEC_CENTERED_MIN_NORM: f64 = 0.1;
 ///
 /// Mirrors `pyannote.audio.utils.vbx.vbx_setup` + `xvec_tf` + `plda_tf`
 /// (`utils/vbx.py:181-218` in pyannote.audio 4.0.4). Validated
-/// against the Phase-0 captured artifacts via `src/plda/parity_tests.rs`.
+/// against the captured artifacts via `src/plda/parity_tests.rs`.
 pub struct PldaTransform {
   // xvec_tf factors
   mean1: DVector<f64>,
@@ -304,12 +299,9 @@ pub struct PldaTransform {
   sqrt_in_dim: f64,  // sqrt(EMBEDDING_DIMENSION)
   sqrt_out_dim: f64, // sqrt(PLDA_DIMENSION)
 
-  // plda_tf factors (filled in by P1 Task 4 — generalized eigh).
-  #[allow(dead_code)]
+  // plda_tf factors (used by `plda_transform` and `phi()`).
   plda_mu: DVector<f64>,
-  #[allow(dead_code)]
   plda_eigenvectors_desc: DMatrix<f64>,
-  #[allow(dead_code)]
   phi: DVector<f64>,
 }
 
@@ -331,8 +323,6 @@ impl PldaTransform {
     let XvecWeights { mean1, mean2, lda } = load_xvec();
     let PldaWeights {
       mu,
-      tr: _, // kept in the loader for diagnostic / future use
-      psi: _,
       eigenvectors_desc,
       phi_desc,
     } = load_plda();
@@ -385,7 +375,7 @@ impl PldaTransform {
   ///   rejects both the `mean1.astype(f32)` collapse-to-mean attack
   ///   and the more sophisticated `mean1 + small_jitter` variants
   ///   that an earlier f32-quantization-noise-based threshold would
-  ///   have admitted. Codex review HIGH (round 6).
+  ///   have admitted. (round 6).
   pub fn xvec_transform(&self, input: &RawEmbedding) -> Result<PostXvecEmbedding, Error> {
     // Input finite-ness is enforced by `RawEmbedding::from_raw_array`,
     // so we don't re-validate here. Intermediate-vector checks happen
@@ -454,7 +444,7 @@ impl PldaTransform {
   ///
   /// `post_xvec` must be a [`PostXvecEmbedding`]. Distribution +
   /// finite-ness are enforced by that type — `plda_transform` itself
-  /// does no validation. Codex review HIGH (stage-2 analogue of the
+  /// does no validation. (stage-2 analogue of the
   /// `RawEmbedding` boundary).
   pub fn plda_transform(&self, post_xvec: &PostXvecEmbedding) -> [f64; PLDA_DIMENSION] {
     // 1. Center: x = post_xvec - plda_mu.
@@ -485,7 +475,7 @@ impl PldaTransform {
   }
 
   /// Eigenvalue diagonal `phi` (descending) — `pyannote.audio.core.plda.PLDA.phi`.
-  /// Consumed by VBx in Phase 2 as the across-class covariance diagonal.
+  /// Consumed by VBx as the across-class covariance diagonal.
   pub fn phi(&self) -> &[f64] {
     self.phi.as_slice()
   }
@@ -521,81 +511,6 @@ fn checked_l2_normalize_in_place_with_min(
   }
   *v /= n;
   Ok(())
-}
-
-/// Solve the generalized symmetric eigenvalue problem
-/// `B v = λ W v`, returning eigenvalues and eigenvectors sorted
-/// **descending** by `λ`. Matches scipy's `eigh(B, W)` followed by
-/// `[::-1]` reversal, which is what pyannote does in `vbx_setup`
-/// (`utils/vbx.py:206-208`).
-///
-/// `W` must be symmetric positive-definite (the algorithm
-/// Cholesky-decomposes it).
-///
-/// # Algorithm
-///
-/// 1. Cholesky `W = L L^T`.
-/// 2. Substitution `B' = L^{-1} B L^{-T}` (computed via two
-///    triangular solves; never form `L^{-1}` explicitly).
-/// 3. `B' = Y Λ Y^T` (ordinary symmetric eigh).
-/// 4. Recover `V = L^{-T} Y` (one upper-triangular solve).
-/// 5. Sort columns of `V` and entries of `Λ` by descending eigenvalue.
-fn generalized_eigh_descending(
-  b: &DMatrix<f64>,
-  w: &DMatrix<f64>,
-) -> Result<(DVector<f64>, DMatrix<f64>), Error> {
-  let n = b.nrows();
-  debug_assert_eq!(b.ncols(), n);
-  debug_assert_eq!(w.shape(), (n, n));
-
-  // Step 1: Cholesky. nalgebra's `cholesky()` returns Option<Cholesky>
-  // and is `None` if the input isn't positive-definite.
-  let chol = w.clone().cholesky().ok_or(Error::WNotPositiveDefinite)?;
-  let l = chol.l(); // lower triangular
-
-  // Step 2: Compute B' = L^{-1} B L^{-T}.
-  // First Y = L^{-1} B  via solve_lower_triangular(L, B).
-  let y = l
-    .solve_lower_triangular(b)
-    .expect("L is square + nonsingular by construction");
-  // Then B' = Y * L^{-T}. Take the transpose:
-  //   (Y * L^{-T})^T = L^{-1} * Y^T
-  // so we solve L * Z = Y^T → Z = L^{-1} Y^T = (Y L^{-T})^T → B' = Z^T.
-  let bp_t = l
-    .solve_lower_triangular(&y.transpose())
-    .expect("L is nonsingular");
-  let bp = bp_t.transpose();
-
-  // Step 3: ordinary symmetric eigh on B'.
-  let SymmetricEigen {
-    eigenvalues,
-    eigenvectors,
-  } = SymmetricEigen::new(bp);
-
-  // Step 4: recover V = L^{-T} Y_eig. L^T is upper-triangular; solve
-  // L^T V = Y_eig for V (each column independently).
-  let l_t = l.transpose();
-  let v = l_t
-    .solve_upper_triangular(&eigenvectors)
-    .expect("L^T is nonsingular");
-
-  // Step 5: sort by eigenvalue descending. Build a permutation of
-  // column indices, then materialise sorted matrix + vector.
-  let mut idx: Vec<usize> = (0..n).collect();
-  idx.sort_by(|&a, &b| {
-    eigenvalues[b]
-      .partial_cmp(&eigenvalues[a])
-      .unwrap_or(std::cmp::Ordering::Equal)
-  });
-
-  let mut sorted_vals = DVector::<f64>::zeros(n);
-  let mut sorted_vecs = DMatrix::<f64>::zeros(n, n);
-  for (out_col, &src_col) in idx.iter().enumerate() {
-    sorted_vals[out_col] = eigenvalues[src_col];
-    sorted_vecs.set_column(out_col, &v.column(src_col));
-  }
-
-  Ok((sorted_vals, sorted_vecs))
 }
 
 #[cfg(test)]

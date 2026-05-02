@@ -14,15 +14,7 @@
 //! ```
 //!
 //! Output: contiguous labels `0..k` of length `num_train`, ready to feed
-//! VBx's softmax-of-one-hot `qinit` construction (Phase 2).
-//!
-//! ## Standalone — no `Diarizer` integration yet
-//!
-//! Phase 4 ships this as a pure-math module. Integration with the full
-//! diarization pipeline lands in Phase 5. Until then `diarization::cluster::ahc` is
-//! crate-private (see `src/lib.rs`).
-
-#![allow(dead_code, unused_imports)]
+//! VBx's softmax-of-one-hot `qinit` construction.
 
 #[cfg(test)]
 pub(crate) mod algo;

@@ -52,7 +52,7 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     // Scalar tail must FMA each element directly into `total` —
     // routing through `scalar::dot(&a[i..], &b[i..])` rounds twice
     // (per-tail sum, then add into `total`), drifting by ½ ulp on
-    // odd `n`. Codex adversarial review HIGH (round 4).
+    // odd `n`.
     while i < n {
       total = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), total);
       i += 1;

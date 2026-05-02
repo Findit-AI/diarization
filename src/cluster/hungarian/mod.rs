@@ -7,15 +7,6 @@
 //! bipartite matching as `Vec<i32>` of length `num_speakers`. Unmatched
 //! speakers (possible when `num_speakers > num_clusters`) carry the sentinel
 //! [`UNMATCHED`] (`-2`).
-//!
-//! ## Standalone — no `Diarizer` integration yet
-//!
-//! Phase 3 ships this as a pure-math module. Integration (`Diarizer`
-//! consuming VBx + Hungarian → centroid AHC → per-frame diarization) lands
-//! in Phase 5. Until then `diarization::cluster::hungarian` is crate-private (see
-//! `src/lib.rs`).
-
-#![allow(dead_code, unused_imports)]
 
 mod algo;
 mod error;

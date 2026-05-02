@@ -6,7 +6,7 @@
 //! NaN entries with the *global* `np.nanmin(soft_clusters)`, and runs
 //! `scipy.optimize.linear_sum_assignment(cost, maximize=True)` per chunk.
 //!
-//! ## Tie-breaking divergence from scipy (Codex review HIGH round 3)
+//! ## Tie-breaking divergence from scipy
 //!
 //! `pathfinding::kuhn_munkres` produces a maximum-weight matching, but on
 //! tied optima its label choice can differ from
@@ -58,7 +58,7 @@ mod sealed {
 /// **sealed** (the supertrait `sealed::Sealed` is private) — external
 /// crates cannot add their own layouts. New layouts must land in
 /// `dia` itself, paired with:
-/// 1. A captured Phase-0 fixture from the upstream model's reference
+/// 1. A captured fixture from the upstream model's reference
 ///    Python pipeline.
 /// 2. A parity test in `cluster::hungarian::parity_tests` (or the
 ///    relevant downstream module) validating the new `SLOTS` count
@@ -181,8 +181,7 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
   // can wedge the solver per the crate's own docs. Production cosine
   // distances are always finite, so `±inf` here indicates upstream
   // corruption — surface a clear typed error rather than silently
-  // proceed with values that may panic the solver. Codex review HIGH
-  // round 2 of Phase 3.
+  // proceed with values that may panic the solver.
   for chunk in chunks {
     for &v in chunk.iter() {
       if v.is_infinite() {

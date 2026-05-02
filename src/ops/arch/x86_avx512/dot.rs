@@ -40,8 +40,7 @@ pub(crate) unsafe fn dot(a: &[f64], b: &[f64]) -> f64 {
     let acc = _mm512_add_pd(acc0, acc1);
     let mut sum = _mm512_reduce_add_pd(acc);
     // Scalar tail must FMA each element directly into `sum` —
-    // routing through `scalar::dot` rounds twice. Codex adversarial
-    // review HIGH (round 4).
+    // routing through `scalar::dot` rounds twice.
     while i < n {
       sum = f64::mul_add(*a.get_unchecked(i), *b.get_unchecked(i), sum);
       i += 1;

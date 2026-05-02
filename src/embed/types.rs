@@ -54,7 +54,7 @@ impl Embedding {
     let n = sq.sqrt() as f32;
     // !n.is_finite() catches NaN/inf inputs — the squared sum + sqrt
     // chain propagates non-finite into n. The `n < NORM_EPSILON` clause
-    // rejects degenerate (zero-or-near-zero norm) inputs. Codex review.
+    // rejects degenerate (zero-or-near-zero norm) inputs.
     if !n.is_finite() || n < NORM_EPSILON {
       return None;
     }
@@ -140,7 +140,7 @@ impl<A, T> EmbeddingResult<A, T> {
   // `ort`. Under `--no-default-features` the constructor is unused but
   // we keep it reachable so `cargo test --no-default-features` (used
   // by SDE / miri CI lanes) compiles under `-Dwarnings`.
-  // Codex review MEDIUM round 10.
+  //
   #[allow(dead_code)]
   pub(crate) fn new(
     embedding: Embedding,
@@ -212,7 +212,7 @@ mod tests {
 
   #[test]
   fn normalize_from_nan_returns_none() {
-    // Codex review HIGH regression: NaN raw input previously produced
+    // regression: NaN raw input previously produced
     // Some(Embedding) containing NaNs because `n = NaN` and `NaN < eps`
     // is false. is_finite() check catches this.
     let mut v = [0.5f32; EMBEDDING_DIM];

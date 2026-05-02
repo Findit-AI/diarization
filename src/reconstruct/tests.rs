@@ -19,7 +19,7 @@ fn default_swins() -> (SlidingWindow, SlidingWindow) {
 /// `Inference.aggregate` would replace NaN with 0 + mask, but a NaN
 /// segmentation is realistically upstream model corruption. The Rust
 /// port surfaces it as a clear typed error rather than silently
-/// producing a degraded RTTM (Codex review MEDIUM round 2 of Phase 5).
+/// producing a degraded RTTM ().
 #[test]
 fn rejects_nan_segmentation() {
   let (chunks_sw, frames_sw) = default_swins();
@@ -68,8 +68,7 @@ fn rejects_pos_inf_segmentation() {
 /// `timestamps[num_frames - 1]`, not `timestamps[num_frames]`.
 /// Pyannote's `Binarize.__call__` uses `t = timestamps[-1]` for the
 /// final region's end. Closing one step past would over-extend
-/// end-of-file speakers by `frames_sw.step`. Codex review MEDIUM
-/// round 3 of Phase 5.
+/// end-of-file speakers by `frames_sw.step`.
 #[test]
 fn rttm_eof_active_span_closes_at_last_frame_center() {
   let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
@@ -122,7 +121,7 @@ fn rttm_eof_single_final_frame_active_emits_no_span() {
 /// Negative ids other than `UNMATCHED` are rejected at the boundary.
 /// Without this guard, `-1` would silently drop the speaker from any
 /// cluster mapping (the speakers_in_k filter never matches negative
-/// `k_iter`). Codex review MEDIUM round 4 of Phase 5.
+/// `k_iter`).
 #[test]
 fn rejects_negative_cluster_id_other_than_unmatched() {
   let (chunks_sw, frames_sw) = default_swins();
@@ -189,8 +188,7 @@ fn rejects_cluster_id_above_max() {
 
 /// `count[t]` exceeding MAX_CLUSTER_ID is rejected. Without this guard
 /// a corrupt count value (e.g. `255`) drives `num_clusters` to 255 and
-/// fabricates ~250 dummy speakers in the top-K binarize. Codex review
-/// HIGH round 5 of Phase 5.
+/// fabricates ~250 dummy speakers in the top-K binarize.
 #[test]
 fn rejects_count_above_max_cluster_id() {
   let (chunks_sw, frames_sw) = default_swins();
@@ -277,8 +275,7 @@ fn rttm_relabel_str_sort_orders_10_before_2() {
 /// `num_output_frames == 0` with nonempty chunks is rejected — a
 /// schema/timing drift would otherwise return an empty grid and
 /// silently mislead downstream callers (especially those computing
-/// `grid.len() / num_output_frames`). Codex review MEDIUM round 7
-/// of Phase 5.
+/// `grid.len() / num_output_frames`).
 #[test]
 fn rejects_zero_output_frames() {
   let (chunks_sw, frames_sw) = default_swins();

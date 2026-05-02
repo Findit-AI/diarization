@@ -4,7 +4,7 @@
 //! `pyannote.audio.pipelines.clustering.SpeakerEmbedding.__call__`
 //! (`clustering.py:570-625` in pyannote.audio 4.0.4):
 //!
-//! 1. Filter active embeddings (Phase 5a Task 4 — currently caller-supplied).
+//! 1. Filter active embeddings (currently caller-supplied).
 //! 2. AHC initialization on the active subset (`diarization::cluster::ahc`).
 //! 3. PLDA project (`diarization::plda::PldaTransform::project` — currently caller-supplied).
 //! 4. VBx EM iterations (`diarization::cluster::vbx::vbx_iterate`).
@@ -17,10 +17,9 @@
 //! and `UNMATCHED = -2` marks speakers with no surviving cluster (only
 //! possible when `num_speakers > num_alive_clusters`).
 //!
-//! Stage 8 (per-frame discrete diarization) is Phase 5b. Diarizer
-//! integration is Phase 5c. Until then `diarization::pipeline` is crate-private.
-
-#![allow(dead_code, unused_imports)]
+//! Stage 8 (per-frame discrete diarization) is handled by
+//! [`crate::reconstruct`]. `diarization::pipeline` is crate-private —
+//! callers reach the pipeline via [`crate::Diarizer`].
 
 mod algo;
 mod error;

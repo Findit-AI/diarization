@@ -4,7 +4,7 @@
 //! These helpers are the bridge between the raw `EmbedModel::embed_features`
 //! API (single fixed-length window) and the public `embed{,_weighted,_masked}`
 //! methods on `EmbedModel` (variable-length clips). They are `pub(crate)`
-//! because the public surface lives on `EmbedModel` itself (Task 27).
+//! because the public surface lives on `EmbedModel` itself.
 
 use crate::{
   embed::{
@@ -53,7 +53,6 @@ pub(crate) fn plan_starts(len: usize) -> Vec<usize> {
 /// Returns the **unnormalized** sum. Caller L2-normalizes via
 /// [`Embedding::normalize_from`](crate::embed::Embedding::normalize_from)
 /// (which surfaces [`Error::DegenerateEmbedding`] on zero-norm).
-#[allow(dead_code)] // wired into EmbedModel::embed in Task 27
 pub(crate) fn embed_unweighted(
   model: &mut EmbedModel,
   samples: &[f32],
@@ -106,7 +105,6 @@ pub(crate) fn embed_unweighted(
 ///   [`NORM_EPSILON`] (no signal to aggregate).
 ///
 /// Returns `(weighted_sum, num_windows, total_weight)`.
-#[allow(dead_code)] // wired into EmbedModel::embed_weighted in Task 27
 pub(crate) fn embed_weighted_inner(
   model: &mut EmbedModel,
   samples: &[f32],

@@ -6,11 +6,11 @@
 //! directly, on every architecture. AHC's `<= threshold` dendrogram
 //! cut is the one threshold-sensitive discrete decision in the
 //! cluster_vbx pipeline; using scalar pdist makes the AHC partition
-//! bit-equal across NEON / AVX2 / AVX-512 / scalar hosts. Codex review
-//! round 7 flagged that AVX2/AVX-512 reductions diverge from scalar by
-//! O(1e-15) ulps and any pair landing in that drift band would merge
-//! on one CPU family and split on another — the scalar-by-default
-//! policy here removes the risk without affecting downstream stages.
+//! bit-equal across NEON / AVX2 / AVX-512 / scalar hosts. AVX2/AVX-512
+//! reductions diverge from scalar by O(1e-15) ulps and any pair
+//! landing in that drift band would merge on one CPU family and split
+//! on another — the scalar-by-default policy here removes the risk
+//! without affecting downstream stages.
 //!
 //! Differential tests at the primitive level live in
 //! [`crate::ops::differential_tests`]; they compare
@@ -91,8 +91,7 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
   // CPU-dependent speaker counts that are nearly impossible to
   // reproduce. NEON matches scalar bit-exact (verified by
   // `ops::differential_tests`), but AVX2/AVX-512 use wider-lane
-  // reductions and diverge by O(1e-15) relative. Codex review
-  // round 7-8.
+  // reductions and diverge by O(1e-15) relative.
   //
   // Why this is OK to "give up" SIMD here specifically: AHC's hot
   // path is exactly one `pdist_euclidean` (O(N² × D)), then scalar
@@ -139,8 +138,8 @@ fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
 ///
 /// Why max-per-subtree rather than the root's own dissimilarity:
 /// centroid linkage can produce *inversions* (a parent merge has lower
-/// dissimilarity than one of its children — Codex review HIGH round 1
-/// of Phase 4). A walk that only checks the root's `step.dissimilarity`
+/// dissimilarity than one of its children). A walk that only checks
+/// the root's `step.dissimilarity`
 /// would merge an entire subtree based on a low-dist parent even when
 /// an internal child merge is above the threshold. Scipy's fcluster
 /// (`scipy/cluster/_hierarchy.pyx::cluster_dist`) propagates the max
@@ -156,28 +155,28 @@ fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
 /// already produced canonical scan-order labels — which **scipy does
 /// not do**. Scipy's `fcluster` numbers clusters by tree-traversal
 /// order; the captured `ahc_init_labels.npy` starts with label `4` for
-/// row 0, not `0`. (Codex review MEDIUM round 2 of Phase 4.)
+/// row 0, not `0`.
 ///
-/// The captured Phase-4 parity test compares partitions, not exact
+/// The captured AHC parity test compares partitions, not exact
 /// label assignments — partition equivalence is sufficient for
 /// downstream clustering correctness (the labels are arbitrary
 /// integers naming the buckets; DER is invariant to relabeling).
 ///
-/// **TODO** (Phase 5 integration): if a Phase-5 end-to-end parity test
-/// runs `ahc_init → build qinit → vbx_iterate → q_final` and compares
+/// **TODO**: if a future end-to-end parity test runs
+/// `ahc_init → build qinit → vbx_iterate → q_final` and compares
 /// element-wise against captured `q_final`, the `qinit` column ordering
 /// will not match (since our labels are a permutation of scipy's). At
 /// that point, choose one of:
 /// 1. Implement scipy's exact tree-traversal label order here (drop
 ///    this canonicalization pass; align DFS push order with scipy's
 ///    `_hierarchy.pyx::cluster_dist`).
-/// 2. Have Phase 5 compare `q_final` modulo column permutation
-///    (mathematically equivalent — the permutation is recoverable
-///    from `(our_labels, scipy_labels)` matching).
+/// 2. Compare `q_final` modulo column permutation (mathematically
+///    equivalent — the permutation is recoverable from
+///    `(our_labels, scipy_labels)` matching).
 /// 3. Have `ahc_init` return `(labels, permutation_to_scipy)` so the
 ///    caller can build the column-permuted qinit explicitly.
 ///
-/// Either way, the Phase-4 contract is "produce a valid scipy-equivalent
+/// Either way, the contract here is "produce a valid scipy-equivalent
 /// partition", and the existing parity test enforces that.
 fn fcluster_distance_remap(steps: &[Step<f64>], n: usize, threshold: f64) -> Vec<usize> {
   // Single leaf — no merges; one cluster.

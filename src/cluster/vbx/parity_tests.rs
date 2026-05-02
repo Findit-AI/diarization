@@ -1,4 +1,4 @@
-//! Parity tests for `diarization::cluster::vbx` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::cluster::vbx` against the captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{plda_embeddings, vbx_state}.npz`
 //! and asserts that `vbx_iterate(post_plda, phi, qinit, fa, fb, max_iters)`
@@ -25,7 +25,7 @@ fn fixture(rel: &str) -> PathBuf {
   repo_root().join(rel)
 }
 
-/// Hard-fail if the Phase-0 fixtures are absent. Mirrors
+/// Hard-fail if the captured fixtures are absent. Mirrors
 /// `src/plda/parity_tests.rs::require_fixtures`.
 fn require_fixtures() {
   let required = [
@@ -43,7 +43,7 @@ fn require_fixtures() {
      These ship with the crate via `cargo publish`; a missing \
      fixture is a packaging error, not an opt-out. Re-run \
      `tests/parity/python/capture_intermediates.py` against the \
-     Phase-0 clip to regenerate, or restore the files from a \
+     reference clip to regenerate, or restore the files from a \
      full checkout."
   );
 }
@@ -207,7 +207,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   );
 }
 
-/// CI guard for Codex round 9 finding (MEDIUM): VBx reductions feed
+/// CI guard for finding (MEDIUM): VBx reductions feed
 /// the discrete `sp > SP_ALIVE_THRESHOLD` filter. AVX2/AVX-512
 /// reductions diverge from scalar/NEON by O(1e-15) relative; if any
 /// produced `pi[k]` lands inside that drift band of `SP_ALIVE_THRESHOLD

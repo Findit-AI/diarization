@@ -169,8 +169,7 @@ fn vbx_pi_sums_to_one() {
 /// must return bit-identical outputs. Catches regressions where, e.g.,
 /// Zero feature columns must error at the boundary rather than
 /// running the EM loop with no PLDA evidence (which produces
-/// finite-looking but meaningless gamma/pi). Codex adversarial
-/// review MEDIUM.
+/// finite-looking but meaningless gamma/pi).
 #[test]
 fn vbx_rejects_zero_feature_dim() {
   let t = 5;
@@ -208,15 +207,15 @@ fn vbx_is_deterministic() {
   }
 }
 
-// ── Input-value validation (Codex review MEDIUM round 1 of Phase 2) ─
+// ── Input-value validation ─
 //
-// Round 1 added validation for `qinit` (finite, nonnegative,
-// row-sum ≈ 1) and for `Fa`/`Fb` (positive, finite). Without these,
-// a malformed initializer or hyperparameter silently biases the
-// first speaker-model update and propagates garbage through the rest
-// of the run; pyannote does not validate these, so this is a
-// deliberate divergence to fail-fast at the boundary instead of
-// producing fabricated speaker evidence.
+// Boundary validation for `qinit` (finite, nonnegative, row-sum ≈ 1)
+// and for `Fa`/`Fb` (positive, finite). Without these, a malformed
+// initializer or hyperparameter silently biases the first speaker-
+// model update and propagates garbage through the rest of the run;
+// pyannote does not validate these, so this is a deliberate divergence
+// to fail-fast at the boundary instead of producing fabricated speaker
+// evidence.
 
 #[test]
 fn vbx_rejects_qinit_with_nan_entry() {
@@ -336,7 +335,7 @@ fn vbx_rejects_inf_fb() {
 /// loop returns gamma=qinit and pi=1/S, which is internally
 /// inconsistent for any non-uniform qinit (pi should equal
 /// `gamma.column_sum() / T`) but indistinguishable from a completed
-/// VBx run by the type system. Codex review MEDIUM round 7.
+/// VBx run by the type system.
 #[test]
 fn vbx_rejects_max_iters_zero() {
   let t = 6;
@@ -348,11 +347,10 @@ fn vbx_rejects_max_iters_zero() {
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
-/// Codex's round-7 recommended regression: a strongly non-uniform
-/// qinit (each row peaked on a different speaker) with `max_iters = 0`
-/// would return `gamma = qinit` and `pi = 1/S` — inconsistent
-/// (`pi` should equal `gamma.col_sum() / T`). Now blocked at the
-/// boundary by the max_iters check.
+/// Strongly non-uniform qinit (each row peaked on a different speaker)
+/// with `max_iters = 0` would return `gamma = qinit` and `pi = 1/S` —
+/// inconsistent (`pi` should equal `gamma.col_sum() / T`). Now blocked
+/// at the boundary by the max_iters check.
 #[test]
 fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
   let t = 10;
@@ -409,7 +407,7 @@ fn vbx_accepts_single_speaker_qinit() {
   assert!((out.pi()[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi()[0]);
 }
 
-// ── X / Phi non-finite hardening (Codex review MEDIUM round 5 of Phase 2) ─
+// ── X / Phi non-finite hardening ─
 //
 // The previous boundary accepted `+inf` Phi (the check used
 // `is_nan()` only) and didn't validate X at all. Either case
@@ -484,9 +482,9 @@ fn vbx_rejects_x_with_neg_inf() {
   );
 }
 
-/// Codex's specific concern: at `max_iters = 0` the loop never
-/// runs, so the generic NaN-intermediate guard never fires. Boundary
-/// validation must catch invalid inputs even when no iterations run.
+/// At `max_iters = 0` the loop never runs, so the generic NaN-
+/// intermediate guard never fires. Boundary validation must catch
+/// invalid inputs even when no iterations run.
 #[test]
 fn vbx_rejects_invalid_x_even_with_max_iters_zero() {
   let mut x = DMatrix::<f64>::zeros(5, 4);
@@ -513,7 +511,7 @@ fn vbx_rejects_invalid_phi_even_with_max_iters_zero() {
   );
 }
 
-// ── ELBO step classification (Codex review MEDIUM round 2 of Phase 2) ─
+// ── ELBO step classification () ─
 //
 // VB EM's monotonicity is a fundamental invariant. The previous
 // `delta < epsilon` convergence branch fired for both small-positive
@@ -527,7 +525,7 @@ use super::algo::{ElboStep, classify_elbo_step};
 
 // Most classifier tests use small-magnitude `prev`/`elbo` so the
 // scale-aware regression band collapses to ~atol (~1e-9). Two tests
-// near the bottom exercise the band at large magnitude (Codex round 3).
+// near the bottom exercise the band at large magnitude ().
 
 #[test]
 fn classify_elbo_step_continues_on_large_positive_delta() {
@@ -580,7 +578,7 @@ fn classify_elbo_step_zero_delta_is_converged() {
   );
 }
 
-// ── Scale-aware regression band (Codex review MEDIUM round 3 of Phase 2) ─
+// ── Scale-aware regression band () ─
 //
 // ELBO is an accumulated sum over T * S * D matrix entries plus T
 // per-frame terms; float roundoff scales with the magnitude of the
@@ -589,9 +587,9 @@ fn classify_elbo_step_zero_delta_is_converged() {
 // on numerically awkward but otherwise valid inputs. The
 // `atol + rtol * max(|prev|, |elbo|)` band absorbs that.
 
-/// Regression for the Codex round-3 reproduction case. Final delta
-/// of `-2.47e-8` at |ELBO| ≈ 2700 — outside an absolute `1e-9` band
-/// but well inside the scale-aware band (1e-9 + 1e-9 * 2700 ≈ 2.7e-6).
+/// Regression case: final delta of `-2.47e-8` at |ELBO| ≈ 2700 —
+/// outside an absolute `1e-9` band but well inside the scale-aware
+/// band (1e-9 + 1e-9 * 2700 ≈ 2.7e-6).
 #[test]
 fn classify_elbo_step_absorbs_relative_float_roundoff_at_large_magnitude() {
   let prev = -2700.0_f64;
@@ -601,7 +599,7 @@ fn classify_elbo_step_absorbs_relative_float_roundoff_at_large_magnitude() {
     classify_elbo_step(delta, prev, elbo, 1.0e-4),
     ElboStep::Converged,
     "scale-aware band must absorb a delta the absolute tolerance \
-     would have rejected — Codex's round-3 reproduction case"
+     would have rejected"
   );
 }
 
@@ -619,9 +617,9 @@ fn classify_elbo_step_still_rejects_material_regression_at_large_magnitude() {
   }
 }
 
-// ── Stop reason: converged vs max-iters-reached (Codex review MEDIUM round 10) ─
+// ── Stop reason: converged vs max-iters-reached () ─
 //
-// Codex round 10 pointed out that `vbx_iterate` returned the same
+// pointed out that `vbx_iterate` returned the same
 // shape of `Ok` for two semantically distinct cases:
 //   - Converged within max_iters (early break on ElboStep::Converged)
 //   - max_iters reached without ever converging (loop falls through)

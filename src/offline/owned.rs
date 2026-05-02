@@ -1,4 +1,4 @@
-//! Phase 5d: end-to-end audio→RTTM offline diarization.
+//! End-to-end audio→RTTM offline diarization.
 //!
 //! `OwnedDiarizationPipeline` is the speakrs-comparable batch
 //! entrypoint: take owned 16 kHz mono samples, run segmentation +
@@ -266,7 +266,7 @@ impl OwnedDiarizationPipeline {
     let num_chunks = if samples.len() <= win {
       1
     } else {
-      ((samples.len() - win) + step - 1) / step + 1
+      (samples.len() - win).div_ceil(step) + 1
     };
 
     let mut padded_chunk = vec![0.0_f32; win];

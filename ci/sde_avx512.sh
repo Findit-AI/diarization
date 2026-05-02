@@ -15,7 +15,7 @@ set -ex
 # filter scopes to ~12 differential / panic / boundary tests with total
 # runtime well under a minute even under emulation.
 #
-# Pattern mirrors siglip2's `avx512-sde` CI job. Codex CI sweep.
+# Pattern mirrors siglip2's `avx512-sde` CI job.
 
 TARGET="x86_64-unknown-linux-gnu"
 
@@ -41,8 +41,7 @@ sde64 -version
 # decisions (AHC `<= threshold` cuts, VBx alive-cluster gates,
 # centroid argmax) that ulp drift could flip. We run all of them
 # under SDE so an AVX-512-induced cluster decision flip is caught
-# in CI rather than at runtime on AVX-512 hosts. Codex review
-# MEDIUM round 6.
+# in CI rather than at runtime on AVX-512 hosts.
 #
 # `aggregate::parity_tests` is also included (count-tensor exact
 # match) since the count loop is on the SIMD path under

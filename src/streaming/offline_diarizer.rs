@@ -1,7 +1,5 @@
 //! Voice-range-driven streaming diarizer that produces pyannote-
 //! equivalent global speaker assignments.
-#![allow(clippy::needless_range_loop, clippy::useless_vec)]
-//!
 //!
 //! Architecture: [`StreamingOfflineDiarizer::push_voice_range`] runs
 //! the heavy stages 1+2 (sliding-window segmentation + masked

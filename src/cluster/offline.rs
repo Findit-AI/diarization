@@ -24,7 +24,7 @@ pub(crate) fn validate_offline_input(
   // methods allocate dense N×N matrices and the eigen / linkage paths
   // are O(N³). Without this guard, a long session's
   // `collected_embeddings` could OOM the process or block for minutes
-  // before returning. Codex review MEDIUM.
+  // before returning.
   if embeddings.len() > MAX_OFFLINE_INPUT {
     return Err(Error::InputTooLarge {
       n: embeddings.len(),
@@ -95,7 +95,7 @@ pub fn cluster_offline(
   match opts.method() {
     OfflineMethod::Agglomerative { linkage } => agglomerative::cluster(embeddings, linkage, opts),
     OfflineMethod::Spectral => match spectral::cluster(embeddings, opts) {
-      // Codex review MEDIUM: spectral's normalized Laplacian is
+      //: spectral's normalized Laplacian is
       // undefined when any node has zero positive affinity (an
       // orthogonal/antipodal outlier). Failing the whole batch on
       // a single outlier is hostile to post-hoc reclustering — fall
@@ -223,7 +223,7 @@ mod tests {
     assert_eq!(n, 3);
   }
 
-  /// Codex review MEDIUM regression: three orthogonal embeddings
+  /// regression: three orthogonal embeddings
   /// would trip spectral's `AllDissimilar` (each node has zero
   /// affinity to the others). The `OfflineMethod::Spectral` path now
   /// falls back to Agglomerative + Average so the outliers become
@@ -262,7 +262,7 @@ mod tests {
 
   #[test]
   fn input_too_large_errors() {
-    // Codex review MEDIUM: dense offline methods must reject inputs
+    //: dense offline methods must reject inputs
     // beyond MAX_OFFLINE_INPUT before allocating an N×N matrix. We
     // construct N+1 embeddings via repeating a known-good unit vector
     // — they all have identical contents, but the cap fires before
@@ -286,7 +286,7 @@ mod tests {
     assert_eq!(n, 2);
   }
 
-  /// Codex review MEDIUM: documents that `similarity_threshold` is
+  ///: documents that `similarity_threshold` is
   /// IGNORED by `OfflineMethod::Spectral` for `N >= 3`. Two extreme
   /// thresholds must produce the same outcome (Ok labels OR Err);
   /// any drift would mean the docs lie. If a future revision wires

@@ -10,15 +10,7 @@
 //!
 //! The result is a `(num_alive_clusters, embed_dim)` matrix used as the
 //! reference set for downstream e2k distance / Hungarian assignment
-//! (Phase 3) inside the diarization pipeline (Phase 5).
-//!
-//! ## Standalone — no `Diarizer` integration yet
-//!
-//! Phase 4 ships this as a pure-math module. Integration with the full
-//! diarization pipeline lands in Phase 5. Until then `diarization::cluster::centroid` is
-//! crate-private (see `src/lib.rs`).
-
-#![allow(dead_code, unused_imports)]
+//! inside the diarization pipeline.
 
 #[cfg(test)]
 pub(crate) mod algo;

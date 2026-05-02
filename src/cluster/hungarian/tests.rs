@@ -132,7 +132,7 @@ fn deterministic_on_repeated_calls() {
   assert_eq!(a, b);
 }
 
-// ── nan_to_num semantics (Codex review MEDIUM round 1 of Phase 3) ─
+// ── nan_to_num semantics ─
 //
 // Pyannote runs `np.nan_to_num(soft_clusters, nan=np.nanmin(soft_clusters))`
 // before per-chunk matching. The Rust port replicates this:
@@ -152,7 +152,7 @@ fn nan_in_single_chunk_replaced_with_min() {
 }
 
 /// NaN replacement uses the *global* min across all chunks, not the per-
-/// chunk min — this is the pyannote contract Codex called out.
+/// chunk min — this matches pyannote's contract.
 ///
 /// Setup: chunk 0 = [[0.9, 0.5], [0.7, NaN]]. Chunk 1 contains -5.0.
 /// - Local nanmin (0.5) replacement of chunk 0's NaN:
@@ -177,11 +177,11 @@ fn nan_replacement_uses_global_nanmin_across_chunks() {
 }
 
 /// `±inf` is **rejected** at the boundary rather than substituted with
-/// numpy's `f64::MAX`/`f64::MIN` defaults. Two reasons (Codex review
-/// HIGH round 2): production cosine distances are always finite, so
-/// `±inf` is upstream corruption, not a well-defined edge case; and
-/// feeding `f64::MAX` into `kuhn_munkres`'s slack arithmetic risks
-/// overflow per the crate's own docs.
+/// numpy's `f64::MAX`/`f64::MIN` defaults. Two reasons: production
+/// cosine distances are always finite, so `±inf` is upstream corruption,
+/// not a well-defined edge case; and feeding `f64::MAX` into
+/// `kuhn_munkres`'s slack arithmetic risks overflow per the crate's own
+/// docs.
 #[test]
 fn rejects_pos_inf_entry() {
   let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
@@ -221,7 +221,7 @@ fn rejects_when_all_entries_non_finite() {
   assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
 }
 
-// ── Tie-breaking invariants (Codex review HIGH round 3 of Phase 3) ─
+// ── Tie-breaking invariants ─
 //
 // `pathfinding::kuhn_munkres` and `scipy.optimize.linear_sum_assignment`
 // can return different label permutations on tied optima. See the
@@ -301,11 +301,10 @@ fn achieved_total(cost: &DMatrix<f64>, assign: &[i32]) -> f64 {
   total
 }
 
-/// Codex's counterexample: 3x2 with two equal zero rows. Both
-/// `[1, -2, 0]` (pathfinding) and `[-2, 1, 0]` (scipy) are valid
-/// optima with total = 1.0. The invariants we enforce: total cost
-/// equals the brute-force max, exactly one speaker is UNMATCHED, and
-/// matched cluster ids are distinct.
+/// 3x2 with two equal zero rows: both `[1, -2, 0]` (pathfinding) and
+/// `[-2, 1, 0]` (scipy) are valid optima with total = 1.0. The
+/// invariants we enforce: total cost equals the brute-force max, exactly
+/// one speaker is UNMATCHED, and matched cluster ids are distinct.
 #[test]
 fn tied_3x2_returns_some_optimal_matching() {
   let cost = DMatrix::<f64>::from_row_slice(3, 2, &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0]);

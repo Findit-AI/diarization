@@ -186,7 +186,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
 /// caller that needs a forced speaker count must either
 /// post-process VBx output or wait for this feature to land.
 ///
-/// **TODO** (Codex review HIGH round 2 of Phase 5): add
+/// **TODO**: add
 /// `num_clusters: Option<usize>`, `min_clusters: Option<usize>`,
 /// `max_clusters: Option<usize>` to the input struct and port
 /// pyannote's KMeans branch when an auto-VBx count violates the
@@ -234,7 +234,7 @@ pub fn assign_embeddings(
   // products would otherwise wrap silently in release builds, letting
   // a malformed caller match the equality check with a tiny buffer
   // and reach allocation/index code with bogus shape metadata. Mirrors
-  // `offline::algo`. Codex review HIGH round 7.
+  // `offline::algo`.
   let expected_emb_rows = num_chunks
     .checked_mul(num_speakers)
     .ok_or(Error::Shape("num_chunks * num_speakers overflows usize"))?;
@@ -273,8 +273,7 @@ pub fn assign_embeddings(
     // resulting posterior is independent of the input embeddings,
     // producing plausible hard_clusters from pure prior. A schema
     // drift in PLDA capture or downstream feeding the wrong array
-    // would silently yield wrong diarization. Codex review MEDIUM
-    // round 7 of Phase 5.
+    // would silently yield wrong diarization.
     return Err(Error::Shape(
       "post_plda must have at least one column (PLDA dimension)",
     ));
@@ -302,7 +301,6 @@ pub fn assign_embeddings(
   // a non-train row would silently become a soft cost that
   // `constrained_argmax` rewrites to the global `nanmin` — yielding
   // a plausible-looking but wrong assignment with no surfaced error.
-  // Codex adversarial review MEDIUM (this commit).
   for v in embeddings.iter() {
     if !v.is_finite() {
       return Err(Error::NonFinite("embeddings"));
@@ -319,7 +317,7 @@ pub fn assign_embeddings(
   // `hard_clusters = np.zeros((num_chunks, num_speakers))` —
   // i.e. every speaker in every chunk gets cluster 0. This handles
   // short clips, sparse speech, or single-usable-speaker recordings
-  // without erroring. Codex review HIGH round 1 of Phase 5.
+  // without erroring.
   if num_train < 2 {
     // Build directly via TrustedLen iterator collect — no
     // `Vec`-then-`Arc` round-trip.
@@ -400,7 +398,7 @@ pub fn assign_embeddings(
   // could flip a near-tie centroid argmax across CPU families. NEON
   // matches scalar bit-exact, but x86 does not — using the scalar
   // primitives here keeps Hungarian assignments deterministic across
-  // every supported architecture. Codex review HIGH round 8.
+  // every supported architecture.
   let centroid_norm_sq: Vec<f64> = centroid_buf
     .chunks_exact(embed_dim)
     .map(|row| crate::ops::scalar::dot(row, row))
@@ -503,8 +501,7 @@ fn build_qinit(ahc_clusters: &[usize], num_init: usize) -> DMatrix<f64> {
 /// worst possible cost and is NOT preferred over genuinely-similar
 /// embeddings. Returning `1.0` (mid-similarity) instead — as the
 /// previous version did — would have let a corrupt zero-vector
-/// embedding tie or beat a real low-similarity match. Codex review
-/// HIGH round 3 of Phase 5.
+/// embedding tie or beat a real low-similarity match.
 ///
 /// Cosine distance variant that takes pre-computed `||row||²` for
 /// both inputs. Used by stage 6's hot inner loop where `norm_sq_b` is

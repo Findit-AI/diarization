@@ -126,21 +126,21 @@ fn bench(c: &mut Criterion) {
     let inp = load(name);
     group.bench_with_input(BenchmarkId::from_parameter(name), &inp, |b, inp| {
       b.iter(|| {
-        let input = AssignEmbeddingsInput {
-          embeddings: &inp.embeddings,
-          num_chunks: inp.num_chunks,
-          num_speakers: inp.num_speakers,
-          segmentations: &inp.segmentations,
-          num_frames: inp.num_frames,
-          post_plda: &inp.post_plda,
-          phi: &inp.phi,
-          train_chunk_idx: &inp.train_chunk_idx,
-          train_speaker_idx: &inp.train_speaker_idx,
-          threshold: inp.threshold,
-          fa: inp.fa,
-          fb: inp.fb,
-          max_iters: inp.max_iters,
-        };
+        let input = AssignEmbeddingsInput::new(
+          &inp.embeddings,
+          inp.num_chunks,
+          inp.num_speakers,
+          &inp.segmentations,
+          inp.num_frames,
+          &inp.post_plda,
+          &inp.phi,
+          &inp.train_chunk_idx,
+          &inp.train_speaker_idx,
+        )
+        .with_threshold(inp.threshold)
+        .with_fa(inp.fa)
+        .with_fb(inp.fb)
+        .with_max_iters(inp.max_iters);
         let hard = assign_embeddings(black_box(&input)).expect("assign_embeddings");
         black_box(hard);
       });

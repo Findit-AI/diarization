@@ -38,8 +38,7 @@ pub const MAX_AUTO_SPEAKERS: u32 = 15;
 /// modern CPU — comfortably within an interactive offline-recluster
 /// budget. The previous cap of 5_000 allowed `5_000² × 8 B ≈ 200 MB`
 /// per dense matrix and minutes of CPU; that was a documented
-/// "defense in depth" bound but not actually safe. Codex review
-/// MEDIUM.
+/// "defense in depth" bound but not actually safe.
 ///
 /// Callers reclustering long sessions should down-sample collected
 /// embeddings to a representative subset rather than feed every
@@ -65,7 +64,7 @@ pub enum Linkage {
 /// Offline clustering algorithm.
 ///
 /// **Threshold semantics differ by variant** — `similarity_threshold` is
-/// consumed by some methods and ignored by others (Codex review MEDIUM):
+/// consumed by some methods and ignored by others:
 ///
 /// | Variant            | Reads `similarity_threshold` |
 /// |--------------------|------------------------------|
@@ -89,7 +88,7 @@ pub enum OfflineMethod {
     /// The HAC linkage criterion.
     linkage: Linkage,
   },
-  /// Spectral clustering (filled in by Phase 4).
+  /// Spectral clustering.
   #[default]
   Spectral,
 }
@@ -148,7 +147,7 @@ impl OfflineClusterOptions {
   /// **Not all [`OfflineMethod`] variants consume this.** See
   /// [`OfflineMethod`] for the per-variant table. Notably,
   /// [`OfflineMethod::Spectral`] (the default) ignores it for
-  /// `N >= 3`. Codex review MEDIUM.
+  /// `N >= 3`.
   pub fn similarity_threshold(&self) -> f32 {
     self.similarity_threshold
   }
@@ -174,7 +173,7 @@ impl OfflineClusterOptions {
   /// Set the similarity threshold (builder).
   ///
   /// # Panics
-  /// Panics if `t` is NaN/±inf or outside `[-1.0, 1.0]`. Codex review MEDIUM.
+  /// Panics if `t` is NaN/±inf or outside `[-1.0, 1.0]`.
   pub fn with_similarity_threshold(mut self, t: f32) -> Self {
     validate_similarity_threshold(t);
     self.similarity_threshold = t;
@@ -210,7 +209,7 @@ impl OfflineClusterOptions {
   /// Set the similarity threshold (in-place).
   ///
   /// # Panics
-  /// Panics if `t` is NaN/±inf or outside `[-1.0, 1.0]`. Codex review MEDIUM.
+  /// Panics if `t` is NaN/±inf or outside `[-1.0, 1.0]`.
   pub fn set_similarity_threshold(&mut self, t: f32) -> &mut Self {
     validate_similarity_threshold(t);
     self.similarity_threshold = t;

@@ -2,7 +2,7 @@
 //! intermediates of a fixture (raw_embeddings, segmentations,
 //! count, etc.) and emit RTTM.
 //!
-//! Use to measure dia's Phase 5c lower-bound DER vs pyannote — the
+//! Use to measure dia's lower-bound DER vs pyannote — the
 //! output diverges from `reference.rttm` only by:
 //!  - PLDA self-projection ulp drift (we project from raw f32 vs
 //!    pyannote's captured f64 post_plda).
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{line}");
   }
   eprintln!(
-    "# offline (Phase 5c, captured tensors): {} spans, {} clusters",
+    "# offline (captured tensors): {} spans, {} clusters",
     out.spans_slice().len(),
     out.num_clusters()
   );

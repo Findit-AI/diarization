@@ -17,7 +17,7 @@ pub enum StopReason {
   /// The loop ran all `max_iters` iterations without ever firing
   /// the convergence check. The output is the best estimate seen,
   /// but downstream consumers should decide whether to accept it,
-  /// retry with a higher cap, or reject. Codex review MEDIUM round 10.
+  /// retry with a higher cap, or reject.
   MaxIterationsReached,
 }
 
@@ -86,7 +86,7 @@ const ELBO_REGRESSION_ATOL: f64 = 1.0e-9;
 /// Relative scaling for the ELBO regression tolerance. ELBO is an
 /// accumulated sum over `T * S * D` matrix entries plus `T` per-frame
 /// terms; float roundoff therefore scales with the working magnitude
-/// of the ELBO itself. Codex round 3 reproduced a final delta of
+/// of the ELBO itself. reproduced a final delta of
 /// `~-2.47e-8` for finite community-Fa/Fb inputs at |ELBO| ≈ 2700,
 /// well outside an absolute `1e-9` band but ~9× *inside* the
 /// scale-aware band `1e-9 + 1e-9 * 2700 ≈ 2.7e-6`. The previous
@@ -124,8 +124,7 @@ pub(super) enum ElboStep {
 /// over `T * S * D` matrix entries plus `T` per-frame terms; float
 /// roundoff therefore scales with magnitude, and an absolute
 /// tolerance calibrated against a single fixture would error out on
-/// numerically awkward but otherwise valid inputs (Codex review
-/// MEDIUM round 3).
+/// numerically awkward but otherwise valid inputs.
 ///
 /// Pyannote's `vbx.py:133-136` uses `if ELBO - prev < epsilon: break`
 /// for both small-positive convergence AND any negative regression,
@@ -207,7 +206,7 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 ///
 /// `qinit` row-sum tolerance is `1e-9` — pyannote's caller produces
 /// a softmaxed initializer that is unit-normalized to within float
-/// roundoff, and Phase-0 captured rows are within `~1e-15` of 1.0.
+/// roundoff, and the captured rows are within `~1e-15` of 1.0.
 pub fn vbx_iterate(
   x: &DMatrix<f64>,
   phi: &DVector<f64>,
@@ -225,7 +224,7 @@ pub fn vbx_iterate(
     // valid clustering instead of a typed shape error. The pipeline
     // entrypoint has its own zero-PLDA-dim guard, but `vbx_iterate`
     // is public — direct callers must fail at this boundary too.
-    // Codex adversarial review MEDIUM.
+    //
     return Err(Error::Shape("X must have at least one feature column"));
   }
   if phi.len() != d {
@@ -248,8 +247,7 @@ pub fn vbx_iterate(
   // accepted `+inf` because `inf > 0.0` is true and `inf.is_nan()`
   // is false; an infinite eigenvalue from a corrupted PLDA upstream
   // would have flowed into `sqrt(Phi)` and `1 + Fa/Fb * gamma_sum *
-  // Phi`, producing NaN/Inf intermediates downstream. Codex review
-  // MEDIUM round 5.
+  // Phi`, producing NaN/Inf intermediates downstream.
   for (i, p) in phi.iter().enumerate() {
     if !p.is_finite() || *p <= 0.0 {
       return Err(Error::NonPositivePhi(*p, i));
@@ -262,8 +260,7 @@ pub fn vbx_iterate(
   //   - poison G/rho in the pre-loop and surface as a generic
   //     `NonFinite("ELBO")` later instead of a clear input error.
   // The boundary contract is "non-finite intermediates are hard
-  // failures"; admitting non-finite inputs violates that. Codex
-  // review MEDIUM round 5.
+  // failures"; admitting non-finite inputs violates that.
   if x.iter().any(|v| !v.is_finite()) {
     return Err(Error::NonFinite("x"));
   }
@@ -273,7 +270,7 @@ pub fn vbx_iterate(
   // not summing to 1, NaN) produces finite-looking posteriors after
   // the first update and biases the speaker model silently. Also
   // matters at `max_iters == 0`, which returns `qinit` directly as
-  // the output `gamma`. Codex review MEDIUM (round 1 of Phase 2).
+  // the output `gamma`.
   const QINIT_ROW_SUM_TOLERANCE: f64 = 1.0e-9;
   for tt in 0..t {
     let mut row_sum = 0.0;

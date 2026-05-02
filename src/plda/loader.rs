@@ -56,13 +56,14 @@ pub(super) struct XvecWeights {
   pub lda: DMatrix<f64>,   // (256, 128) row-major in the source numpy
 }
 
-/// `plda_tf`-stage weights extracted from `plda.npz`. These are the
-/// raw arrays prior to the generalized-eigh setup that `PldaTransform`
-/// performs in its constructor.
+/// `plda_tf`-stage weights consumed by `PldaTransform::new`.
+///
+/// The raw `tr` and `psi` source arrays from `plda.npz` are not stored
+/// here — `PldaTransform` only needs the pre-computed
+/// `eigenvectors_desc` / `phi_desc` derived from them, so the raw
+/// matrices are loaded only by the loader's shape-validation tests.
 pub(super) struct PldaWeights {
-  pub mu: DVector<f64>,  // (128,)
-  pub tr: DMatrix<f64>,  // (128, 128) row-major in the source numpy
-  pub psi: DVector<f64>, // (128,)
+  pub mu: DVector<f64>, // (128,)
   /// Pre-computed eigenvectors of the generalized eigenvalue problem
   /// `B v = λ W v` (where `B = inv(tr.T / psi @ tr)` and `W = inv(tr.T
   /// @ tr)`), sorted descending by eigenvalue. Columns are unit-norm
@@ -89,8 +90,6 @@ pub(super) fn load_xvec() -> XvecWeights {
 pub(super) fn load_plda() -> PldaWeights {
   PldaWeights {
     mu: bytes_to_vector(MU_BYTES, PLDA_DIMENSION),
-    tr: bytes_to_row_major_matrix(TR_BYTES, PLDA_DIMENSION, PLDA_DIMENSION),
-    psi: bytes_to_vector(PSI_BYTES, PLDA_DIMENSION),
     eigenvectors_desc: bytes_to_row_major_matrix(
       EIGENVECTORS_DESC_BYTES,
       PLDA_DIMENSION,
@@ -183,8 +182,11 @@ mod loader_internal_tests {
 
     let plda = load_plda();
     assert_eq!(plda.mu.len(), PLDA_DIMENSION);
-    assert_eq!(plda.tr.shape(), (PLDA_DIMENSION, PLDA_DIMENSION));
-    assert_eq!(plda.psi.len(), PLDA_DIMENSION);
+    assert_eq!(
+      plda.eigenvectors_desc.shape(),
+      (PLDA_DIMENSION, PLDA_DIMENSION)
+    );
+    assert_eq!(plda.phi_desc.len(), PLDA_DIMENSION);
   }
 
   /// Cross-check against Python-printed reference values from

@@ -39,6 +39,6 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 # (`ops::`), scalar dispatcher forced via `diarization_force_scalar`
 # (miri can't evaluate intrinsics), `--no-default-features` (skips ort
 # C++ runtime that miri can't FFI-call). See `miri_tb.sh` for the full
-# rationale. Codex CI sweep.
+# rationale.
 export RUSTFLAGS="${RUSTFLAGS:-} --cfg diarization_force_scalar"
 cargo miri test --lib --target "$TARGET" --no-default-features ops::

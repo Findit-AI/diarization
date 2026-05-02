@@ -14,14 +14,13 @@ use crate::ops::{avx2_available, avx512_available};
 /// after runtime CPU-feature detection. Callers needing byte-identical
 /// scalar output across CPU families (e.g. for threshold-sensitive
 /// discrete decisions) call [`crate::ops::scalar::dot`] directly.
-/// Codex review round 8.
 ///
 /// # Panics
 ///
 /// If `a.len() != b.len()`. This is enforced *unconditionally* — the
 /// arch SIMD kernels read raw pointers bounded only by `a.len()` and
 /// would otherwise load past `b` end in release builds, where their
-/// `debug_assert!` is a no-op. Codex adversarial review HIGH.
+/// `debug_assert!` is a no-op.
 #[inline]
 pub fn dot(a: &[f64], b: &[f64]) -> f64 {
   assert_eq!(

@@ -7,7 +7,7 @@ use nalgebra::{DMatrix, DVector};
 /// Pyannote's hardcoded `sp > 1e-7` filter (clustering.py:619). Speakers
 /// whose VBx prior `sp` falls below this floor are treated as
 /// extinguished and their `q`-column is dropped before centroid
-/// computation. Captured `sp_final` for the Phase-0 fixture has 2
+/// computation. Captured `sp_final` for the reference fixture has 2
 /// surviving values (~0.85 + 0.15) and 17 squashed values at ~1.76e-14,
 /// well below the threshold.
 pub const SP_ALIVE_THRESHOLD: f64 = 1.0e-7;
@@ -97,7 +97,7 @@ pub fn weighted_centroids(
   // (`vbx::parity_tests::vbx_pi_has_safe_margin_from_sp_alive_threshold`),
   // so the band never fires on realistic inputs but catches
   // adversarial / pathological data the SIMD path can't safely
-  // resolve. Codex review HIGH round 10.
+  // resolve.
   if sp_threshold > 0.0 {
     let lo = sp_threshold * 0.01;
     let hi = sp_threshold * 100.0;

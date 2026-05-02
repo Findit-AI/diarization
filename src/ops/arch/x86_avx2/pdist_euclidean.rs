@@ -59,7 +59,7 @@ pub(crate) unsafe fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f6
         // reference's single-rounding FMA. `sq += diff * diff` is
         // two roundings — every odd-tail step would drift by ½ ulp,
         // which can flip AHC threshold cuts on non-vector-aligned
-        // dimensions. Codex adversarial review MEDIUM.
+        // dimensions.
         while k < d {
           let diff = *row_i_ptr.add(k) - *row_j_ptr.add(k);
           sq = f64::mul_add(diff, diff, sq);

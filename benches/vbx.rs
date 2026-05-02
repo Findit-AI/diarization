@@ -1,7 +1,7 @@
 //! VBx EM-iteration throughput baseline.
 //!
 //! Times `diarization::cluster::vbx::vbx_iterate` end-to-end on each captured
-//! Phase-0 fixture, holding the inputs constant across iterations. The
+//! fixture, holding the inputs constant across iterations. The
 //! per-iteration time covers all `max_iters = 20` EM rounds plus the
 //! pre-loop matrix setup.
 //!

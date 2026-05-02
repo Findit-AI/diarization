@@ -12,7 +12,6 @@ use crate::ops::scalar;
 /// 2. `y.len() == x.len()` (debug-asserted).
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-#[allow(dead_code)] // Step 3: scaffolded; centroid wiring lands later.
 pub(crate) unsafe fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
   debug_assert_eq!(y.len(), x.len(), "x86_avx2::axpy: length mismatch");
   let n = y.len();

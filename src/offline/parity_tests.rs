@@ -1,6 +1,6 @@
-//! Phase 5c parity: `offline::diarize_offline` end-to-end vs the
-//! captured pyannote fixtures. Asserts bit-exact match on
-//! `hard_clusters`, the discrete diarization grid, and RTTM lines.
+//! Parity: `offline::diarize_offline` end-to-end vs the captured
+//! pyannote fixtures. Asserts bit-exact match on `hard_clusters`, the
+//! discrete diarization grid, and RTTM lines.
 
 use crate::{
   offline::{OfflineInput, diarize_offline},
@@ -79,8 +79,8 @@ fn run_offline_parity(fixture_dir: &str) {
   .with_fb(fb_arr[0])
   .with_max_iters(max_iters_arr[0] as usize)
   .with_min_duration_off(min_dur_off_arr[0]);
-  // Phase 5c parity: bit-exact pyannote argmax (no smoothing) is the
-  // default, no with_smoothing_epsilon override needed.
+  // Bit-exact pyannote argmax (no smoothing) is the default — no
+  // `with_smoothing_epsilon` override needed.
 
   let out = diarize_offline(&input).expect("diarize_offline");
 
@@ -101,10 +101,10 @@ fn run_offline_parity(fixture_dir: &str) {
   // shift cluster boundaries, producing a slightly different RTTM
   // line count.
   //
-  // Phase 5c contract: the offline pipeline produces *pyannote-
-  // equivalent* output, not bit-identical. Strict bit-exact parity
-  // is asserted by `pipeline::parity_tests` (which feeds the
-  // captured `post_plda` directly into `assign_embeddings`).
+  // The offline pipeline produces *pyannote-equivalent* output, not
+  // bit-identical. Strict bit-exact parity is asserted by
+  // `pipeline::parity_tests` (which feeds the captured `post_plda`
+  // directly into `assign_embeddings`).
   //
   // The metric here is total span coverage: each speaker's emitted
   // duration must match within ~1%. RTTM line count alone is not a
@@ -163,7 +163,7 @@ fn diarize_offline_matches_pyannote_05_four_speaker() {
 /// cluster decision at chunk 6. The end-to-end span-duration check
 /// here uses the same 5% tolerance as the other 5 fixtures and is
 /// what production callers actually depend on (matches streaming-
-/// offline DER ≤ 0.19% on this fixture). Codex review HIGH round 6.
+/// offline DER ≤ 0.19% on this fixture).
 #[test]
 fn diarize_offline_matches_pyannote_06_long_recording() {
   run_offline_parity("06_long_recording");

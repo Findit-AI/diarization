@@ -1,5 +1,5 @@
 //! Parity test for `diarization::cluster::centroid::weighted_centroids` against
-//! pyannote's captured `clustering.npz['centroids']` (Phase-0 fixture).
+//! pyannote's captured `clustering.npz['centroids']`.
 //!
 //! Loads:
 //! - `vbx_state.npz` for `q_final` and `sp_final` (VBx posterior).

@@ -1,7 +1,6 @@
 //! Numerical primitives shared across the diarization algorithms.
 //!
-//! Five primitives cover the hot paths identified in the Phase 5
-//! benchmarks (`benches/{vbx,ahc,centroid,pipeline}.rs`):
+//! Four primitives cover the production hot paths:
 //!
 //! - [`dot`] — f64 dot product. Used by VBx (`gamma.column_sum`,
 //!   `rho_alpha_t` row), AHC (per-row L2 norm), pipeline (cosine
@@ -10,8 +9,6 @@
 //!   (`centroids[k] += w * embeddings[t]`).
 //! - [`pdist_euclidean`] — pairwise condensed Euclidean distance.
 //!   Used by AHC (the dominant N²·D inner loop).
-//! - [`inv_l_row`] — VBx-specific Eq. 17 row:
-//!   `out[d] = 1 / (1 + fa_over_fb * gamma_sum_s * phi[d])`.
 //! - [`logsumexp_row`] — numerically-stable `ln(Σ exp(row))`. Used by
 //!   VBx's responsibility update.
 //!
@@ -22,16 +19,14 @@
 //!
 //! - [`scalar`] — always-compiled reference implementation. The math
 //!   contract is anchored here.
-//! - [`arch::neon`] — aarch64 NEON. (Empty in Step 2; populated in
-//!   Step 3.)
-//! - [`arch::x86_avx2`], [`arch::x86_avx512`] — x86_64 tiers. (Empty
-//!   in Step 2.)
-//! - [`arch::wasm_simd128`] — wasm32 simd128. (Empty in Step 2.)
+//! - [`arch::neon`] — aarch64 NEON.
+//! - [`arch::x86_avx2`], [`arch::x86_avx512`] — x86_64 tiers.
+//! - [`arch::wasm_simd128`] — wasm32 simd128.
 //!
-//! Public dispatchers in [`self`] (`dot`, `axpy`, `pdist_euclidean`,
-//! `exp_inplace`, `logsumexp_row`, `inv_l_row`) always select the
-//! best-available SIMD backend at runtime. Callers needing scalar
-//! output explicitly call [`scalar::dot`], [`scalar::axpy`], etc.
+//! Public dispatchers in [`self`] (`dot`, `axpy`, `logsumexp_row`)
+//! always select the best-available SIMD backend at runtime. Callers
+//! needing scalar output explicitly call [`scalar::dot`],
+//! [`scalar::axpy`], etc.
 //!
 //! ## SIMD selection per call site
 //!
@@ -60,16 +55,16 @@
 //!   end-to-end is therefore not deliverable. Algorithm robustness
 //!   against ulp drift is validated empirically by `parity_tests`
 //!   modules (DER ≤ 0.4% on all 6 captured fixtures, every arch).
-//!
-//! Codex adversarial review chain (rounds 3 → 8) records the
-//! reasoning behind the per-call-site SIMD policy.
 
 pub(crate) mod arch;
 mod dispatch;
 pub mod scalar;
 
-#[allow(unused_imports)] // Step 2: axpy/inv_l_row scaffolded; wired in Step 3.
-pub use dispatch::{axpy, axpy_f32, dot, exp_inplace, inv_l_row, logsumexp_row, pdist_euclidean};
+#[cfg(feature = "ort")]
+pub use dispatch::axpy_f32;
+#[cfg(feature = "_bench")]
+pub use dispatch::pdist_euclidean;
+pub use dispatch::{axpy, dot, logsumexp_row};
 
 // ─── runtime CPU-feature detection ───────────────────────────────────
 //
@@ -78,14 +73,8 @@ pub use dispatch::{axpy, axpy_f32, dot, exp_inplace, inv_l_row, logsumexp_row, p
 // `diarization_force_scalar` overrides everything for testing — set
 // it via `RUSTFLAGS="--cfg diarization_force_scalar"` to bypass any
 // SIMD backend.
-//
-// Step 2: only the std variants are written. We're always linking
-// std today (the `_no_std` toggle was removed in Phase 0). When/if
-// no_std support returns, mirror colconv's `cfg!(feature = "std")`
-// double-impl pattern.
 
 #[cfg(target_arch = "aarch64")]
-#[allow(dead_code)] // Step 2: not yet called by any dispatcher.
 pub(crate) fn neon_available() -> bool {
   if cfg!(diarization_force_scalar) {
     return false;
@@ -94,7 +83,6 @@ pub(crate) fn neon_available() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
 pub(crate) fn avx2_available() -> bool {
   if cfg!(diarization_force_scalar) || cfg!(diarization_disable_avx2) {
     return false;
@@ -105,12 +93,11 @@ pub(crate) fn avx2_available() -> bool {
   // (2013), but VIA's Eden X4, hypervisor-masked guests, and a few
   // Pentium/Celeron parts ship AVX2 without FMA. Without this guard
   // those CPUs would hit `#UD` on the first FMA instruction instead
-  // of falling through to scalar. Codex adversarial review HIGH.
+  // of falling through to scalar.
   std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
 }
 
 #[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
 pub(crate) fn avx512_available() -> bool {
   if cfg!(diarization_force_scalar) || cfg!(diarization_disable_avx512) {
     return false;
@@ -121,7 +108,6 @@ pub(crate) fn avx512_available() -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
 pub(crate) const fn simd128_available() -> bool {
   // WASM has no runtime CPU detection — the simd128 feature is fixed
   // at produce-time via `target_feature = "simd128"`.
@@ -132,7 +118,7 @@ pub(crate) const fn simd128_available() -> bool {
 mod differential_tests {
   //! Scalar vs SIMD differential tests.
   //!
-  //! Contract (Codex adversarial review, multiple rounds):
+  //! Contract:
   //! - On `aarch64` (the deployment target), scalar and the NEON
   //!   backend produce **bit-identical** results for all five
   //!   primitives. Achieved by:
@@ -185,8 +171,7 @@ mod differential_tests {
   /// FMA contract. Without per-tail `f64::mul_add` into the running
   /// sum, the SIMD kernels would drift by ½ ulp from the scalar
   /// reference and break VBx + cosine-distance threshold-sensitive
-  /// decisions on odd embedding/PLDA dimensions. Codex adversarial
-  /// review HIGH (round 4).
+  /// decisions on odd embedding/PLDA dimensions.
   #[test]
   fn dot_odd_dim_match() {
     for d in [1usize, 3, 5, 7, 9, 17, 33, 65, 129] {
@@ -283,8 +268,7 @@ mod differential_tests {
   /// scalar tail must use `f64::mul_add`. Without this, an odd-d
   /// run drifts by ½ ulp per tail step on the SIMD path, which
   /// can flip AHC merges around the threshold for embeddings whose
-  /// dim isn't a multiple of the vector width. Codex adversarial
-  /// review MEDIUM.
+  /// dim isn't a multiple of the vector width.
   #[test]
   fn pdist_euclidean_odd_dim_match() {
     let mut rng = ChaCha20Rng::seed_from_u64(0x2031);
@@ -318,7 +302,7 @@ mod differential_tests {
   /// Mismatched `dot` lengths must `panic!` (not UB). The dispatcher
   /// enforces `a.len() == b.len()` unconditionally before routing to
   /// the unsafe SIMD kernel — this test would silently OOB-read `b`
-  /// if that guard were debug-only. Codex adversarial review HIGH.
+  /// if that guard were debug-only.
   #[test]
   #[should_panic(expected = "ops::dot")]
   fn dot_dispatch_panics_on_length_mismatch() {

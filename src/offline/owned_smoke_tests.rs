@@ -1,4 +1,4 @@
-//! Phase 5d smoke tests: run `OwnedDiarizationPipeline` end-to-end
+//! Smoke tests: run `OwnedDiarizationPipeline` end-to-end
 //! on a fixture's `clip_16k.wav` and validate the output is sane
 //! (non-empty spans, finite timestamps, total duration consistent).
 //!

@@ -20,7 +20,7 @@ pub enum Error {
   /// algorithm requires `0 < Phi[d] < ∞` for `sqrt(Phi)` and
   /// `1 + … * Phi` to be well-defined; `+inf` would poison
   /// downstream intermediates without surfacing a clear cause at
-  /// the boundary. Codex review MEDIUM round 5.
+  /// the boundary.
   #[error("Phi must be strictly positive and finite; saw {0:.3e} at index {1}")]
   NonPositivePhi(f64, usize),
 
@@ -33,8 +33,7 @@ pub enum Error {
   /// caller wants the last-known-good state, re-invoke with
   /// `max_iters` set to `iter` (the regression-triggering iteration
   /// index). Pyannote prints a `WARNING:` to stdout and keeps the
-  /// regressed state; this is a deliberate fail-fast divergence
-  /// (Codex review MEDIUM round 2 of Phase 2).
+  /// regressed state; this is a deliberate fail-fast divergence.
   #[error("ELBO regressed by {delta:.3e} at iteration {iter} (beyond float-roundoff tolerance)")]
   ElboRegression { iter: usize, delta: f64 },
 }

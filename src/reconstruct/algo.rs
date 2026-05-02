@@ -13,8 +13,7 @@ use crate::{
 /// cluster count after VBx (typically 1–4). `1024` is ~256× any
 /// realistic speaker count; it stops a corrupt or malicious caller
 /// from driving the `num_clusters * num_chunks * num_frames_per_chunk`
-/// allocation into the multi-GB range. Codex review MEDIUM round 4
-/// of Phase 5.
+/// allocation into the multi-GB range.
 pub const MAX_CLUSTER_ID: i32 = 1023;
 
 /// Hard upper bound on `count[t]` (instantaneous active speaker count
@@ -25,7 +24,7 @@ pub const MAX_CLUSTER_ID: i32 = 1023;
 /// Capping at `64` allows comfortable headroom over realistic values
 /// while catching `u8::MAX = 255`-style sentinel corruption that would
 /// drive `num_clusters` and the top-K binarize past the actual
-/// speaker space. Codex review HIGH round 5 of Phase 5.
+/// speaker space.
 pub const MAX_COUNT_PER_FRAME: u8 = 64;
 
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
@@ -264,8 +263,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     // Zero output frames with nonempty chunks/segmentations is a
     // schema/timing drift signal, not a valid input. Returning an
     // empty grid would make a downstream caller computing
-    // `grid.len() / num_output_frames` divide by zero. Codex review
-    // MEDIUM round 7 of Phase 5.
+    // `grid.len() / num_output_frames` divide by zero.
     return Err(Error::Shape("num_output_frames must be at least 1"));
   }
   if count.len() != num_output_frames {
@@ -278,8 +276,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // overlap_factor * num_speakers ≈ 30. `MAX_COUNT_PER_FRAME = 64`
   // allows headroom while catching u8::MAX=255 sentinel corruption that
   // would expand `num_clusters` past the actual speaker space and
-  // fabricate dummy speakers in the top-K binarize. Codex review HIGH
-  // round 5 of Phase 5.
+  // fabricate dummy speakers in the top-K binarize.
   for &c in count {
     if c > MAX_COUNT_PER_FRAME {
       return Err(Error::Shape("count entry exceeds MAX_COUNT_PER_FRAME (64)"));
@@ -298,9 +295,8 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // missingness via a parallel mask, but the realistic source of NaN is
   // upstream model corruption (torch nan-prop), and a silent fallback
   // here lets a degraded inference dependency produce plausible-but-
-  // wrong RTTM output. Surfacing it as a clear typed error matches the
-  // Phase 3 round-2 decision for `diarization::cluster::hungarian` (±inf rejection at the
-  // solver boundary). Codex review MEDIUM round 2 of Phase 5.
+  // wrong RTTM output. Surfacing it as a clear typed error matches
+  // `diarization::cluster::hungarian`'s ±inf rejection at the solver boundary.
   for &v in segmentations {
     if !v.is_finite() {
       return Err(Error::NonFinite("segmentations"));
@@ -308,7 +304,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   }
 
   // Validate cluster ids: `UNMATCHED` (-2) is allowed; non-negative
-  // values must be in `[0, MAX_CLUSTER_ID]`. Codex review MEDIUM
+  // values must be in `[0, MAX_CLUSTER_ID]`.
   // round 4: a stray negative id (e.g. -1) silently dropped active
   // speech under the previous code (skipped by the speakers_in_k
   // filter), and a corrupt large positive id could drive the

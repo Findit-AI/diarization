@@ -97,7 +97,7 @@ pub fn discrete_to_spans(
     // Closing one step past the last frame would over-extend
     // end-of-file speakers by `frames_sw.step` and convert a single
     // final-frame run into a non-empty span where pyannote emits
-    // none. Codex review MEDIUM round 3 of Phase 5.
+    // none.
     if let Some(s) = active_start {
       let start = frame_start + s as f64 * frame_step + center_offset;
       let end = frame_start + (num_frames - 1) as f64 * frame_step + center_offset;

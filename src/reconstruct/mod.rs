@@ -10,13 +10,6 @@
 //!   `Inference.aggregate(skip_average=True)` overlap-add on the
 //!   clustered segmentations, then top-`count[t]` binarizes per frame.
 //!
-//! ## Standalone — no `Diarizer` integration yet
-//!
-//! Phase 5b ships this as a pure-math module. Diarizer rewiring +
-//! RTTM emission is Phase 5c.
-
-#![allow(dead_code, unused_imports)]
-
 mod algo;
 mod error;
 

@@ -54,7 +54,7 @@ fn rejects_no_surviving_clusters() {
   ));
 }
 
-/// Codex review HIGH round 10. VBx reductions are SIMD on x86, so a
+/// VBx reductions are SIMD on x86, so a
 /// `sp` value landing within ulp drift of `SP_ALIVE_THRESHOLD` would
 /// flip the alive/squashed decision across CPU backends. The guard
 /// band `[threshold * 0.01, threshold * 100]` rejects those inputs

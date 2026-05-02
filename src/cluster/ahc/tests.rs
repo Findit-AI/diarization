@@ -142,7 +142,7 @@ fn labels_are_encounter_order_contiguous() {
   assert!(seen.iter().all(|&s| s), "labels {labels:?} not contiguous");
 }
 
-// ── Centroid-linkage inversion (Codex review HIGH round 1 of Phase 4) ─
+// ── Centroid-linkage inversion ─
 //
 // Centroid linkage (the method pyannote uses) does not produce
 // monotonic dendrograms in general — a parent merge can have a

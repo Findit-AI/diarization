@@ -12,14 +12,14 @@ use crate::ops::{avx2_available, avx512_available};
 ///
 /// Routes to the best available SIMD backend per arch + runtime
 /// detection. Callers needing scalar output explicitly call
-/// [`crate::ops::scalar::axpy`]. Codex review round 8.
+/// [`crate::ops::scalar::axpy`].
 ///
 /// # Panics
 ///
 /// If `y.len() != x.len()`. Enforced unconditionally so a release-mode
 /// safe-Rust caller cannot bypass the precondition into the unsafe
 /// SIMD kernel (which only `debug_assert!`s and would OOB-read `x`
-/// otherwise). Codex adversarial review HIGH.
+/// otherwise).
 #[inline]
 pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
   assert_eq!(
@@ -72,8 +72,7 @@ pub fn axpy(y: &mut [f64], alpha: f64, x: &[f64]) {
 // is unused but must stay reachable so SDE / miri jobs that build
 // without `ort` can still verify the SIMD-policy doesn't regress.
 // `RUSTFLAGS=-Dwarnings` would otherwise turn the dead-code warning
-// into a hard error and skip backend coverage entirely. Codex review
-// MEDIUM round 10.
+// into a hard error and skip backend coverage entirely.
 #[allow(dead_code)]
 pub fn axpy_f32(y: &mut [f32], alpha: f32, x: &[f32]) {
   assert_eq!(

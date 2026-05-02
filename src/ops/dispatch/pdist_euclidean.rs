@@ -17,10 +17,9 @@ use crate::ops::{avx2_available, avx512_available};
 /// If `n * d` overflows `usize`, or if `rows.len() != n * d`. Enforced
 /// unconditionally — the arch SIMD kernels stride raw pointers by
 /// `i * d` for `i` in `0..n` and would walk off the slice end in
-/// release builds where their `debug_assert!` is a no-op. Codex
-/// adversarial review HIGH.
+/// release builds where their `debug_assert!` is a no-op.
 // Production AHC uses `ops::scalar::pdist_euclidean` directly for
-// determinism (round 8). The SIMD dispatcher stays for differential
+// determinism. The SIMD dispatcher stays for differential
 // tests (`ops::differential_tests`) and benches (`benches/ops.rs`).
 #[inline]
 #[allow(dead_code)]

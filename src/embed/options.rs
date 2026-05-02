@@ -161,7 +161,6 @@ impl EmbedModelOptions {
 
   /// Apply the option set to a `SessionBuilder`. Used internally by
   /// [`EmbedModel`](crate::embed::EmbedModel).
-  #[allow(dead_code)] // wired into EmbedModel::from_file_with_options in Task 25
   pub(crate) fn apply(
     self,
     mut builder: SessionBuilder,

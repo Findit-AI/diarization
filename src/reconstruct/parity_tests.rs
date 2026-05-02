@@ -1,5 +1,5 @@
 //! End-to-end parity test: `diarization::reconstruct::reconstruct`
-//! against pyannote's captured `discrete_diarization` (Phase-0 fixture).
+//! against pyannote's captured `discrete_diarization`.
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
@@ -91,7 +91,7 @@ fn reconstruct_matches_pyannote_discrete_diarization_05_four_speaker() {
 /// [`reconstruct_within_tolerance_06_long_recording`] below — same
 /// data flow, but compares per-frame discrete labels under a
 /// Hungarian-optimal cluster permutation with a bounded mismatch
-/// fraction. Codex review HIGH round 9.
+/// fraction.
 #[test]
 #[ignore = "T=1004 GEMM-roundoff partition drift; CI coverage in reconstruct_within_tolerance_06_long_recording"]
 fn reconstruct_matches_pyannote_discrete_diarization_06_long_recording() {
@@ -112,8 +112,7 @@ fn reconstruct_matches_pyannote_discrete_diarization_06_long_recording() {
 /// Bound chosen with headroom over the observed mismatch rate
 /// (streaming-offline DER on this fixture is 0.19 % — per-frame
 /// label confusion is typically slightly higher because DER applies
-/// a 0.5 s collar; 5 % is a comfortable bound). Codex review HIGH
-/// round 9.
+/// a 0.5 s collar; 5 % is a comfortable bound).
 #[test]
 fn reconstruct_within_tolerance_06_long_recording() {
   run_reconstruct_parity_with_tolerance("06_long_recording", 0.05);
@@ -260,7 +259,7 @@ fn run_reconstruct_parity(fixture_dir: &str) {
 /// mismatch fraction instead of bit-exact. For long fixtures where
 /// chunk-level cluster ids diverge from pyannote's by GEMM-roundoff
 /// drift but the per-frame label content is still essentially
-/// equivalent. Codex review HIGH round 9.
+/// equivalent.
 fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f64) {
   require_fixtures(fixture_dir);
   let base = format!("tests/parity/fixtures/{fixture_dir}");

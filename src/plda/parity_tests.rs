@@ -1,4 +1,4 @@
-//! Parity tests for `diarization::plda` against the Phase-0 captured artifacts.
+//! Parity tests for `diarization::plda` against the captured artifacts.
 //!
 //! Loads `tests/parity/fixtures/01_dialogue/{raw_embeddings, plda_embeddings}.npz`
 //! and asserts that the Rust transforms reproduce the captured pyannote
@@ -6,20 +6,19 @@
 //!
 //! **Hard-fails** when fixtures are absent. The fixtures are committed
 //! to the repo and shipped via `cargo publish`; a missing fixture is a
-//! packaging or sparse-checkout error, never an opt-out. Codex review
-//! MEDIUM (round 8): an earlier silent `eprintln` skip let the
-//! high-risk algorithm port silently stop being parity-checked when
-//! `cargo test` reported all green.
+//! packaging or sparse-checkout error, never an opt-out. An earlier
+//! silent `eprintln` skip let the high-risk algorithm port silently
+//! stop being parity-checked when `cargo test` reported all green.
 //!
 //! Lives **inside** the crate (under `#[cfg(test)]`) rather than as an
 //! integration test in `tests/`. The reason is that
 //! [`RawEmbedding::from_raw_array`] and
 //! [`PostXvecEmbedding::from_pyannote_capture`] are
 //! `#[cfg(test)] pub(crate)` — neither downstream crates nor a
-//! separate integration-test crate can construct them, by design
-//! (Codex review MEDIUM). Integration tests live in `tests/` only
-//! when they exercise the *external* public API; this test is a
-//! parity check against the algorithm's internals.
+//! separate integration-test crate can construct them, by design.
+//! Integration tests live in `tests/` only when they exercise the
+//! *external* public API; this test is a parity check against the
+//! algorithm's internals.
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
@@ -38,7 +37,7 @@ fn fixture(rel: &str) -> PathBuf {
   repo_root().join(rel)
 }
 
-/// Hard-fail if the Phase-0 fixtures are absent. The fixtures are
+/// Hard-fail if the captured fixtures are absent. The fixtures are
 /// checked into the repo (KB-sized) and shipped via `cargo publish`,
 /// so a missing fixture is a packaging or sparse-checkout error,
 /// never a normal-flow case.
@@ -58,7 +57,7 @@ fn require_fixtures() {
      These ship with the crate via `cargo publish`; a missing \
      fixture is a packaging error, not an opt-out. Re-run \
      `tests/parity/python/capture_intermediates.py` against the \
-     Phase-0 clip to regenerate, or restore the files from a \
+     reference clip to regenerate, or restore the files from a \
      full checkout."
   );
 }
@@ -272,7 +271,7 @@ fn phi_matches_pyannote_descending_eigenvalues() {
   // regression that returned raw `psi` or mis-scaled eigenvalues
   // would slip through xvec/plda projection parity (the previous
   // structural-only test) but break VBx posterior updates.
-  // Codex review MEDIUM (round 8a).
+  // (round 8a).
   let plda_emb_path = fixture("tests/parity/fixtures/01_dialogue/plda_embeddings.npz");
   let (phi_expected_flat, phi_expected_shape) = read_npz_array::<f64>(&plda_emb_path, "phi");
   assert_eq!(phi_expected_shape, vec![PLDA_DIMENSION as u64]);

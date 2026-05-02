@@ -1,5 +1,5 @@
 //! Parity test for `diarization::cluster::ahc::ahc_init` against pyannote's captured
-//! `ahc_init_labels.npy` (Phase-0 fixture).
+//! `ahc_init_labels.npy`.
 //!
 //! Loads:
 //! - `tests/parity/fixtures/01_dialogue/raw_embeddings.npz` (raw 256-dim
@@ -8,7 +8,7 @@
 //!   (`train_chunk_idx` / `train_speaker_idx` for the active-frame
 //!   filter pyannote applies before AHC).
 //! - `tests/parity/fixtures/01_dialogue/ahc_state.npz` (the `threshold`
-//!   pyannote was configured with at capture time — Phase-4 Task 0).
+//!   pyannote was configured with at capture time).
 //! - `tests/parity/fixtures/01_dialogue/ahc_init_labels.npy` (the
 //!   ground-truth labels after `np.unique(return_inverse=True)`).
 //!

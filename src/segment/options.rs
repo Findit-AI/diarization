@@ -42,7 +42,7 @@ pub const POWERSET_CLASSES: usize = 7;
 /// Maximum simultaneous speakers per window.
 pub const MAX_SPEAKER_SLOTS: u8 = 3;
 
-// Hysteresis-threshold validation predicates (Codex review HIGH).
+// Hysteresis-threshold validation predicates ().
 //
 // Setters previously stored arbitrary `f32`. NaN turns every `p >=
 // threshold` comparison false (segmenter goes permanently silent);
@@ -148,7 +148,7 @@ impl SegmentOptions {
   ///
   /// # Panics
   /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
-  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
+  /// resulting pair would violate `offset <= onset`.
   pub const fn with_onset_threshold(mut self, v: f32) -> Self {
     assert!(
       check_hysteresis_threshold(v),
@@ -165,7 +165,7 @@ impl SegmentOptions {
   ///
   /// # Panics
   /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
-  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
+  /// resulting pair would violate `offset <= onset`.
   pub const fn with_offset_threshold(mut self, v: f32) -> Self {
     assert!(
       check_hysteresis_threshold(v),
@@ -183,7 +183,7 @@ impl SegmentOptions {
   /// # Panics
   /// Panics if `v == 0`. Zero step would hang the streaming pump
   /// (`schedule_ready_windows` would emit windows starting at 0
-  /// forever). Codex review post-rev-9.
+  /// forever).
   pub const fn with_step_samples(mut self, v: u32) -> Self {
     assert!(v > 0, "step_samples must be > 0");
     self.step_samples = v;
@@ -209,7 +209,7 @@ impl SegmentOptions {
   ///
   /// # Panics
   /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
-  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
+  /// resulting pair would violate `offset <= onset`.
   pub fn set_onset_threshold(&mut self, v: f32) -> &mut Self {
     assert!(
       check_hysteresis_threshold(v),
@@ -227,7 +227,7 @@ impl SegmentOptions {
   ///
   /// # Panics
   /// Panics if `v` is NaN/±inf or outside `[0.0, 1.0]`, or if the
-  /// resulting pair would violate `offset <= onset`. Codex review HIGH.
+  /// resulting pair would violate `offset <= onset`.
   pub fn set_offset_threshold(&mut self, v: f32) -> &mut Self {
     assert!(
       check_hysteresis_threshold(v),
@@ -317,7 +317,7 @@ mod tests {
     o.set_step_samples(0);
   }
 
-  // Codex review HIGH: hysteresis threshold setters reject invalid
+  //: hysteresis threshold setters reject invalid
   // values. With NaN, every `p >= threshold` is false → segmenter
   // permanently silent. With > 1.0, same effect. With < 0.0, every
   // probability is "active" → segmenter permanently active. With

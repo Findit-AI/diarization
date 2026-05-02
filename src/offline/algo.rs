@@ -1,4 +1,4 @@
-//! Phase 5c offline diarization orchestrator.
+//! Offline diarization orchestrator.
 
 use std::sync::Arc;
 

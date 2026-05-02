@@ -17,7 +17,7 @@ use thiserror::Error;
 /// so that a degraded upstream embedder (NaN/Inf from a misconfigured
 /// ONNX runtime, near-zero output post-centering) surfaces as an
 /// explicit error instead of silently producing NaN that propagates
-/// into VBx / clustering. Codex review MEDIUM.
+/// into VBx / clustering.
 #[derive(Debug, Error)]
 pub enum Error {
   /// The within-class covariance matrix `W = inv(tr.T @ tr)` is not
@@ -57,7 +57,7 @@ pub enum Error {
   ///
   /// Returning whitened features for any of these would silently
   /// drift VBx clustering off the captured pyannote distribution.
-  /// Codex review HIGH.
+  ///
   #[error(
     "PLDA: post-xvec norm {actual:.6} too far from expected sqrt(D_out) {expected:.6} \
      (tolerance {tolerance:.0e}); not a post-xvec_tf vector"

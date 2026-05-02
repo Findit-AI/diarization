@@ -86,7 +86,7 @@ fn new_is_deterministic() {
   assert_eq!(pa, pb);
 }
 
-// ── Validation tests (Codex review MEDIUM + HIGH) ──────────────────
+// ── Validation tests ( + HIGH) ──────────────────
 //
 // Input finite-ness is now enforced at `RawEmbedding::from_raw_array`
 // construction — `xvec_transform` cannot receive a non-finite input
@@ -129,14 +129,12 @@ fn raw_embedding_rejects_neg_inf() {
   );
 }
 
-// ── Degenerate-input rejection (Codex review HIGH rounds 4 + 7) ───
+// ── Degenerate-input rejection ───
 //
-// from_raw_array originally only checked finiteness, which let
-// an all-zero ONNX output reach xvec_transform; round 4 added
-// a `‖arr‖ < NORM_EPSILON` floor.
-//
-// Round 7 escalated: NORM_EPSILON = 1e-12 is below the literal
-// floating-point noise floor of f32, so a degraded embedder
+// `from_raw_array` only checking finiteness was insufficient: an
+// all-zero ONNX output reached xvec_transform, and a `‖arr‖ <
+// NORM_EPSILON` floor with `NORM_EPSILON = 1e-12` is below the
+// literal floating-point noise floor of f32, so a degraded embedder
 // returning `[1e-13; 256]` (norm 1.6e-12) passed the boundary,
 // then `x - mean1 ≈ -mean1` produced a centered norm of `‖mean1‖`
 // well above XVEC_CENTERED_MIN_NORM, and the L2-normalize
@@ -170,7 +168,7 @@ fn raw_embedding_rejects_near_zero_vector() {
   );
 }
 
-/// Tiny-but-nonzero attack (Codex round 7). Per-element `1e-13`,
+/// Tiny-but-nonzero attack (). Per-element `1e-13`,
 /// total norm `1.6e-12` — sits *just above* `NORM_EPSILON = 1e-12`,
 /// 9 orders of magnitude below the smallest real raw norm of 0.536.
 /// With the previous `NORM_EPSILON`-based floor this would have
@@ -230,7 +228,7 @@ fn raw_embedding_accepts_normal_magnitude_input() {
 //     jitter direction into a fabricated speaker-evidence vector.
 //     The current threshold XVEC_CENTERED_MIN_NORM = 0.1 (data-
 //     calibrated against real centered-norm minimum of 1.36) closes
-//     the window. Codex review HIGH (round 6).
+//     the window. (round 6).
 
 /// Regression for the (a) collapse-to-mean attack. Input is
 /// `mean1.astype(f32)` exactly; centered f64 vector is pure
@@ -313,7 +311,7 @@ fn xvec_transform_rejects_mean1_plus_small_jitter() {
   );
 }
 
-// ── PostXvecEmbedding boundary (Codex review HIGH stage 2) ─────────
+// ── PostXvecEmbedding boundary ( stage 2) ─────────
 //
 // `plda_transform` no longer accepts a bare `[f64; 128]` — its input
 // is now `&PostXvecEmbedding`, a newtype that enforces the post-`xvec_tf`
@@ -389,7 +387,7 @@ fn xvec_to_plda_round_trip_uses_post_xvec_type() {
   let _ = plda.plda_transform(&post); // infallible — no Result on stage 2
 }
 
-// ── RawEmbedding domain enforcement (Codex review HIGH) ────────────
+// ── RawEmbedding domain enforcement () ────────────
 
 /// Feeding an L2-normalized vector (the wrong distribution for PLDA)
 /// produces a materially-different output than feeding the

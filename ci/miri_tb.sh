@@ -59,6 +59,6 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 #    function calls anyway, so these would error before our test
 #    code runs.
 #
-# Codex CI sweep — pattern mirrors siglip2's miri job.
+# — pattern mirrors siglip2's miri job.
 export RUSTFLAGS="${RUSTFLAGS:-} --cfg diarization_force_scalar"
 cargo miri test --lib --target "$TARGET" --no-default-features ops::

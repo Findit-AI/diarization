@@ -1,7 +1,7 @@
 //! Pyannote-equivalent `Inference.aggregate` primitives.
 //!
-//! Refactor 1 (this commit): the **count tensor** computation that
-//! drives [`crate::reconstruct::reconstruct`]'s top-K binarization.
+//! The **count tensor** computation drives
+//! [`crate::reconstruct::reconstruct`]'s top-K binarization.
 //!
 //! ## What pyannote does
 //!

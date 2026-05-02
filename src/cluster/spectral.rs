@@ -136,7 +136,7 @@ pub(crate) fn compute_degrees(a: &DMatrix<f64>) -> Result<Vec<f64>, Error> {
 /// scaling — `O(N²)` time and zero auxiliary allocation. The previous
 /// implementation materialized a dense `N × N` diagonal matrix and
 /// ran two `O(N³)` matmuls, which dominated runtime for the dense
-/// path. Codex review MEDIUM.
+/// path.
 pub(crate) fn normalized_laplacian(a: &DMatrix<f64>, d: &[f64]) -> DMatrix<f64> {
   let n = a.nrows();
   let inv_sqrt: Vec<f64> = d.iter().map(|&di| 1.0 / di.sqrt()).collect();
@@ -248,7 +248,7 @@ pub(crate) fn pick_k(eigenvalues: &[f64], n: usize, target_speakers: Option<u32>
 /// (each is `dim`-dimensional).
 ///
 /// Pinned to specific `rand` 0.10 call sites for byte-determinism per
-/// spec §5.5 step 8 / §11.9. Task 2's keystream fixture enforces this
+/// spec §5.5 step 8 / §11.9. The keystream fixture enforces this
 /// across rand patch versions:
 /// - First centroid: `Uniform::new(0, N).unwrap().sample(&mut rng)`.
 /// - Cumulative-mass crossing: `rng.random::<f64>()` (StandardUniform,
@@ -431,8 +431,8 @@ mod kmeans_seed_tests {
     // Reference fixture for byte-determinism. Pins kmeans_pp_seed
     // output for a known input+seed. Future drift in the cumulative-
     // mass walk, summation order, f64 reductions, or rand 0.10
-    // upgrades would fail this assertion FIRST — before Task 21
-    // amplifies the failure into a label-stability regression.
+    // upgrades would fail this assertion FIRST — before label
+    // stability regresses downstream.
     //
     // Companion to tests/chacha_keystream_fixture.rs (which pins the
     // underlying ChaCha8Rng keystream); this fixture pins the
@@ -564,7 +564,7 @@ mod eigen_tests {
   #[test]
   fn pipeline_two_clear_clusters_separates_eigenvalues() {
     // End-to-end smoke: 6 embeddings forming two well-separated groups
-    // (3 near unit(0), 3 near unit(10)) → run through the full Phase-3
+    // (3 near unit(0), 3 near unit(10)) → run through the full
     // pipeline up to eigendecomposition. Expect:
     //   - All N eigenvalues finite and >= 0 (PSD Laplacian).
     //   - Smallest eigenvalue close to 0 (single connected component

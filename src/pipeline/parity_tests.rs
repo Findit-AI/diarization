@@ -1,5 +1,5 @@
 //! End-to-end parity test: `diarization::pipeline::assign_embeddings` against
-//! pyannote's captured `clustering.npz['hard_clusters']` (Phase-0 fixture).
+//! pyannote's captured `clustering.npz['hard_clusters']`.
 //!
 //! Inputs (all from the captured fixtures):
 //! - `raw_embeddings.npz['embeddings']` — 3D (chunks × speakers × dim) raw
@@ -8,16 +8,16 @@
 //!   per-frame speaker probabilities.
 //! - `plda_embeddings.npz['post_plda', 'phi', 'train_chunk_idx',
 //!   'train_speaker_idx']` — pre-PLDA outputs that `cluster_vbx` would
-//!   compute internally; we accept them pre-computed because Phase 1
-//!   already validated PLDA parity on these exact arrays.
+//!   compute internally; we accept them pre-computed because PLDA parity
+//!   is already validated on these exact arrays.
 //! - `ahc_state.npz['threshold']` — AHC linkage cutoff (0.6).
 //! - `vbx_state.npz['fa', 'fb', 'max_iters']` — VBx hyperparameters.
 //!
 //! Expected: `clustering.npz['hard_clusters']` (chunks × speakers, int8).
 //! Comparison is **partition-equivalent** (canonicalized via
 //! encounter-order on each chunk) — same trade-off documented in the
-//! Phase 4 ahc parity test (scipy fcluster's traversal-order labels
-//! permute the cluster ids; partition is the actual contract).
+//! AHC parity test (scipy fcluster's traversal-order labels permute the
+//! cluster ids; partition is the actual contract).
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
@@ -118,7 +118,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters_05_four_speaker() {
 /// per-cell mismatch fraction. That's the right metric (user-visible
 /// per-frame speaker label) for catching catastrophic regressions
 /// without false-failing on the documented chunk-level partition
-/// drift. Codex review HIGH rounds 6 → 9.
+/// drift.
 ///
 /// This strict bit-exact pipeline-level test stays `#[ignore]` so a
 /// future nalgebra/matrixmultiply bump that fixes the GEMM-roundoff

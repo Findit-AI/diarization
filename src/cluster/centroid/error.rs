@@ -16,7 +16,7 @@ pub enum Error {
   /// across CPU backends (NEON ↔ AVX2 ↔ AVX-512 reductions diverge by
   /// O(1e-15) relative). Caller must rerun on a deterministic path or
   /// surface the input as ambiguous. See `weighted_centroids` for
-  /// the band definition. Codex review HIGH round 10.
+  /// the band definition.
   #[error(
     "centroid: sp[{cluster}] = {value:.3e} lands within the SIMD guard band \
      [{lo:.0e}, {hi:.0e}] around sp_threshold = {threshold:.0e}; \

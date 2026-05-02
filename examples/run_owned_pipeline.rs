@@ -1,6 +1,6 @@
-//! Phase 5d entrypoint: run `OwnedDiarizationPipeline` on a 16 kHz
+//! End-to-end entrypoint: run `OwnedDiarizationPipeline` on a 16 kHz
 //! mono WAV and print RTTM lines to stdout. Mirrors the existing
-//! `tests/parity/src/main.rs` entry but uses the new offline path
+//! `tests/parity/src/main.rs` entry but uses the offline path
 //! (full pyannote `community-1` clustering) instead of the streaming
 //! online clusterer.
 //!
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
 
   eprintln!(
-    "# dia (Phase 5d offline): {} spans, {} clusters",
+    "# dia (offline): {} spans, {} clusters",
     out.spans().len(),
     out.num_clusters()
   );

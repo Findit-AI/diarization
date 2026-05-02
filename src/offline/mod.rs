@@ -1,4 +1,4 @@
-//! Offline (non-streaming) diarization — Phase 5c.
+//! Offline (non-streaming) diarization.
 //!
 //! Wraps the full pyannote `cluster_vbx` flow: PLDA projection on
 //! active embeddings → AHC initial clustering → VBx EM → centroid
@@ -28,9 +28,7 @@
 //! 1. The captured pyannote fixtures (`tests/parity/fixtures/*/`)
 //!    — used by the parity tests in this module.
 //! 2. Custom ONNX inference using [`crate::segment::SegmentModel`] +
-//!    [`crate::embed::EmbedModel`] (Phase 5d will provide an
-//!    end-to-end orchestrator that ties this together with audio
-//!    samples in; for now the caller wires it).
+//!    [`crate::embed::EmbedModel`].
 //!
 //! ## Why not feature-gate this behind `ort`
 //!

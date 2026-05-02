@@ -8,7 +8,7 @@ use nalgebra::{DMatrix, DVector};
 /// pyannote returns `hard_clusters = np.zeros((num_chunks,
 /// num_speakers))`. The Rust port must do the same instead of
 /// erroring — short clips, sparse speech, and single-usable-speaker
-/// recordings all hit this path. Codex review HIGH round 1 of Phase 5.
+/// recordings all hit this path.
 #[test]
 fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   let num_chunks = 3;
@@ -50,7 +50,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
 /// `num_chunks * num_frames * num_speakers`) would wrap silently in
 /// release builds, letting a malformed caller match the equality
 /// checks with a tiny buffer and reach the `num_train < 2` fast
-/// path with bogus shape metadata. Codex review HIGH round 7.
+/// path with bogus shape metadata.
 #[test]
 fn rejects_overflowing_chunks_times_speakers() {
   let num_chunks = usize::MAX / 2 + 2;
@@ -121,7 +121,7 @@ fn rejects_overflowing_chunks_times_frames_times_speakers() {
 /// Zero-column `post_plda` is rejected at the boundary — a schema drift
 /// or wrong array fed to the pipeline would otherwise let VBx iterate
 /// on no PLDA evidence and produce plausible hard_clusters from prior
-/// alone. Codex review MEDIUM round 7 of Phase 5.
+/// alone.
 #[test]
 fn rejects_zero_column_post_plda() {
   let num_chunks = 3;
@@ -187,12 +187,11 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
   }
 }
 
-/// Codex adversarial review MEDIUM (this commit). NaN/inf in the
-/// FULL embeddings matrix — including rows outside the train subset
-/// — must surface `Error::NonFinite("embeddings")` at the boundary,
-/// not silently flow into stage-6 cosine scoring where Hungarian's
-/// `nan_to_num` would rewrite the resulting NaN cost to global
-/// `nanmin` and produce a plausible-looking but wrong assignment.
+/// NaN/inf in the FULL embeddings matrix — including rows outside the
+/// train subset — must surface `Error::NonFinite("embeddings")` at the
+/// boundary, not silently flow into stage-6 cosine scoring where
+/// Hungarian's `nan_to_num` would rewrite the resulting NaN cost to
+/// global `nanmin` and produce a plausible-looking but wrong assignment.
 #[test]
 fn rejects_nan_in_non_train_embedding_row() {
   let num_chunks = 4;
@@ -239,7 +238,7 @@ fn rejects_nan_in_non_train_embedding_row() {
 /// Same precondition for `segmentations`: stage 7 sums all entries
 /// for the inactive-speaker mask. A NaN in segmentations would make
 /// `sum_activity` non-zero (NaN ≠ 0) for every speaker, defeating the
-/// inactive-speaker override. Codex adversarial review MEDIUM (this
+/// inactive-speaker override.(this
 /// commit).
 #[test]
 fn rejects_nan_in_segmentations() {

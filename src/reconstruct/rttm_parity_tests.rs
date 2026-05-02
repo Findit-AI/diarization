@@ -182,10 +182,10 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   // Diff per line: warn on mismatches but don't fail bit-exact yet —
   // the reference file uses pyannote's relabeling (SPEAKER_NN by
   // encounter order). Our output should have the same encounter
-  // order if hard_clusters identity-maps to scipy's labels (Phase 5a
-  // showed {0:0, 1:1}); if it doesn't, the labels need a permutation.
-  // For this test, count: line-count parity + total per-cluster
-  // duration parity (within tolerance).
+  // order if hard_clusters identity-maps to scipy's labels; if it
+  // doesn't, the labels need a permutation. For this test, count:
+  // line-count parity + total per-cluster duration parity (within
+  // tolerance).
 
   // Parse a list of (start, duration, label) from each side.
   fn parse_rttm(lines: impl Iterator<Item = String>) -> Vec<(f64, f64, String)> {
@@ -204,7 +204,7 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
 
   // Per-label total active duration. RTTM spans of the same speaker
   // tile a per-frame active region; the totals should match exactly
-  // since the per-frame grid is bit-identical (Phase 5b parity).
+  // since the per-frame grid is bit-identical.
   use std::collections::HashMap;
   let mut got_total: HashMap<String, f64> = HashMap::new();
   for (_, d, l) in &got_parsed {
