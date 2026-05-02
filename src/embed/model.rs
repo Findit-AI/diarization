@@ -195,7 +195,26 @@ mod ort_backend {
         weights_flat,
       ))?,
     ])?;
-    let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    // Per-call shape contract: the ResNet's output must be exactly
+    // `[n, EMBEDDING_DIM]`. Validating only the element count (`n *
+    // EMBEDDING_DIM`) lets a custom/exporter-drifted model that emits
+    // `[EMBEDDING_DIM, n]`, `[1, n * EMBEDDING_DIM]`, or any rank-1
+    // flattening pass through. Each chunk would then be silently
+    // mis-stridden into PLDA/clustering as if it were `[n, 256]` — the
+    // resulting embeddings are corrupted but finite, so no downstream
+    // validation catches it. We reject any shape divergence at the ABI
+    // boundary before reading rows.
+    let dims: &[i64] = shape.as_ref();
+    let expected_n = n as i64;
+    let expected_dim = EMBEDDING_DIM as i64;
+    if dims.len() != 2 || dims[0] != expected_n || dims[1] != expected_dim {
+      return Err(Error::InferenceOutputShape {
+        got: dims.to_vec(),
+        n,
+        embedding_dim: EMBEDDING_DIM,
+      });
+    }
     let expected = n * EMBEDDING_DIM;
     if data.len() != expected {
       return Err(Error::InferenceShapeMismatch {

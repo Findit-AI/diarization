@@ -49,9 +49,25 @@ pub enum Error {
   #[error("fbank computer initialization failed: {0}")]
   Fbank(String),
 
-  /// ONNX inference output had an unexpected shape.
+  /// ONNX inference output had an unexpected element count.
   #[error("inference scores length {got}, expected {expected}")]
   InferenceShapeMismatch { expected: usize, got: usize },
+
+  /// ONNX inference output had an unexpected tensor shape (rank or per-axis size),
+  /// even when the total element count would otherwise have matched. Catches
+  /// silently corrupting layout drift like `[EMBEDDING_DIM, n]` or
+  /// `[1, n * EMBEDDING_DIM]` from a custom/exporter-drifted model.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("inference output shape {got:?}, expected [{n}, {embedding_dim}]")]
+  InferenceOutputShape {
+    /// Actual shape from the ORT tensor.
+    got: Vec<i64>,
+    /// Batch dimension (clip count) the dispatcher passed in.
+    n: usize,
+    /// Per-row width the model is contracted to emit.
+    embedding_dim: usize,
+  },
 
   /// Load-time model shape verification failed.
   #[cfg(feature = "ort")]

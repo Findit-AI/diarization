@@ -88,6 +88,11 @@ pub enum ShapeError {
      (length-1 windows divide by zero in the hamming formula)"
   )]
   HammingNumFramesPerChunkBelowTwo,
+  #[error(
+    "num_output_frames overflows usize (chunk_duration / frame_step too large \
+     to represent or saturated past usize::MAX)"
+  )]
+  OutputFrameCountOverflow,
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -255,26 +260,60 @@ pub fn try_hamming_aggregate(
 ///
 /// # Panics
 ///
-/// Panics in debug builds if `num_chunks == 0` (subtraction overflow),
-/// or if `frame_step <= 0.0` (the divide produces a non-finite length
-/// that casts to a saturated `usize`). Callers should validate inputs
-/// before calling — [`try_count_pyannote`] does this at its boundary.
+/// Panics if `num_chunks == 0` (subtraction overflow), if `frame_step
+/// <= 0.0` (the divide produces a non-finite length), or if the
+/// resulting frame count overflows `usize`. Callers should validate
+/// inputs before calling — [`try_num_output_frames_pyannote`] surfaces
+/// these as `Result<usize, ShapeError>` instead, and
+/// [`try_count_pyannote`] uses the checked form at its boundary.
 pub fn num_output_frames_pyannote(
   num_chunks: usize,
   chunk_duration: f64,
   chunk_step: f64,
   frame_step: f64,
 ) -> usize {
-  assert!(
-    num_chunks >= 1,
-    "num_output_frames_pyannote: num_chunks must be at least 1"
-  );
-  assert!(
-    frame_step.is_finite() && frame_step > 0.0,
-    "num_output_frames_pyannote: frame_step must be a positive finite scalar"
-  );
+  try_num_output_frames_pyannote(num_chunks, chunk_duration, chunk_step, frame_step)
+    .expect("num_output_frames_pyannote: precondition violated; use try_num_output_frames_pyannote to handle")
+}
+
+/// Fallible variant of [`num_output_frames_pyannote`]. Validates that
+/// the geometry produces a finite, in-range output frame count.
+///
+/// # Errors
+///
+/// - [`ShapeError::ZeroNumChunks`] if `num_chunks == 0`.
+/// - [`ShapeError::InvalidFrameStep`] if `frame_step` is not a positive
+///   finite scalar.
+/// - [`ShapeError::OutputFrameCountOverflow`] if `chunk_duration /
+///   frame_step` is non-finite, negative, or rounds to a value that
+///   does not fit in `usize` (or whose `+1` would overflow). Catches
+///   pathological geometries like `chunk_duration = 1e15` with
+///   `frame_step = 1e-15`, where the float division stays finite but
+///   saturates `as usize` to `usize::MAX`.
+pub fn try_num_output_frames_pyannote(
+  num_chunks: usize,
+  chunk_duration: f64,
+  chunk_step: f64,
+  frame_step: f64,
+) -> Result<usize, ShapeError> {
+  if num_chunks == 0 {
+    return Err(ShapeError::ZeroNumChunks);
+  }
+  if !frame_step.is_finite() || frame_step <= 0.0 {
+    return Err(ShapeError::InvalidFrameStep);
+  }
   let last_chunk_end = chunk_duration + (num_chunks - 1) as f64 * chunk_step;
-  (last_chunk_end / frame_step).round_ties_even() as usize + 1
+  let frames_f = (last_chunk_end / frame_step).round_ties_even();
+  // Reject NaN/±inf and any value that would saturate `as usize` or
+  // overflow the `+ 1`. `usize::MAX as f64` is exactly representable
+  // (it's a power-of-two minus one rounded up to the nearest f64), so
+  // this comparison is monotonic.
+  if !frames_f.is_finite() || frames_f < 0.0 || frames_f >= usize::MAX as f64 {
+    return Err(ShapeError::OutputFrameCountOverflow);
+  }
+  (frames_f as usize)
+    .checked_add(1)
+    .ok_or(ShapeError::OutputFrameCountOverflow)
 }
 
 /// Bit-exact pyannote `speaker_count`. Returns the per-output-frame
@@ -439,8 +478,12 @@ pub fn try_count_pyannote(
   //             = round(chunk.start / frame_step)
   // (with frames.start = 0; the two 0.5 * frame_duration cancel.)
   let _ = frame_duration; // referenced in docs; cancels analytically here.
+  // Use the checked variant so a pathological geometry (e.g. enormous
+  // `chunk_duration` with tiny `frame_step`) surfaces as a typed
+  // `ShapeError` instead of a saturating `as usize` cast that would
+  // either OOM the `aggregated` Vec or overflow `+ 1` to wrap to zero.
   let num_output_frames =
-    num_output_frames_pyannote(num_chunks, chunk_duration, chunk_step, frame_step);
+    try_num_output_frames_pyannote(num_chunks, chunk_duration, chunk_step, frame_step)?;
 
   // ── 4. Aggregate (uniform weights, divide by overlapping count) ─
   let mut aggregated = vec![0.0_f64; num_output_frames];
@@ -580,6 +623,48 @@ mod try_variant_tests {
       sw(0.062, 0.0169),
     );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
+  }
+
+  /// Pathological-but-finite geometry: enormous `chunk_duration` with
+  /// tiny `frame_step`. The intermediate float division stays finite,
+  /// but `as usize` saturates to `usize::MAX`, then `+ 1` would either
+  /// panic in checked builds or wrap to 0 in release. The checked
+  /// helper must reject this with a typed `OutputFrameCountOverflow`
+  /// instead of OOMing the downstream Vec or producing junk output.
+  #[test]
+  fn try_num_output_frames_pyannote_rejects_overflow_geometry() {
+    let r = try_num_output_frames_pyannote(1, 1.0e15, 1.0, 1.0e-15);
+    assert!(
+      matches!(r, Err(ShapeError::OutputFrameCountOverflow)),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn try_count_pyannote_rejects_overflow_geometry() {
+    // 1 chunk, 4 frames, 2 speakers → segs len 8. `chunk_duration =
+    // 1e15`, `frame_step = 1e-15` makes num_output_frames overflow.
+    let segs: Vec<f64> = vec![0.0; 8];
+    let r = try_count_pyannote(&segs, 1, 4, 2, 0.5, sw(1.0e15, 1.0), sw(0.062, 1.0e-15));
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::OutputFrameCountOverflow))),
+      "got {r:?}"
+    );
+  }
+
+  /// `try_num_output_frames_pyannote` rejects bad inputs without
+  /// panicking. Mirrors the panic contract of `num_output_frames_pyannote`
+  /// but as `Result<_, ShapeError>`.
+  #[test]
+  fn try_num_output_frames_pyannote_rejects_zero_num_chunks() {
+    let r = try_num_output_frames_pyannote(0, 10.0, 1.0, 0.0169);
+    assert!(matches!(r, Err(ShapeError::ZeroNumChunks)), "got {r:?}");
+  }
+
+  #[test]
+  fn try_num_output_frames_pyannote_rejects_zero_frame_step() {
+    let r = try_num_output_frames_pyannote(3, 10.0, 1.0, 0.0);
+    assert!(matches!(r, Err(ShapeError::InvalidFrameStep)), "got {r:?}");
   }
 
   #[test]
