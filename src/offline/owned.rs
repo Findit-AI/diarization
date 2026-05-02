@@ -23,7 +23,7 @@
 //! path (`offline::diarize_offline`).
 
 use crate::{
-  aggregate::count_pyannote,
+  aggregate::try_count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
   offline::{Error, OfflineInput, OfflineOutput, diarize_offline},
   plda::PldaTransform,
@@ -397,7 +397,12 @@ impl OwnedDiarizationPipeline {
     let chunks_sw = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
     let frames_sw_template =
       SlidingWindow::new(0.0, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S);
-    let (count, frames_sw) = count_pyannote(
+    // Use the fallible variant: a malformed `onset` (NaN/inf via the
+    // public `with_onset` builder) would panic the infallible
+    // `count_pyannote` wrapper at `try_count_pyannote.expect(...)`.
+    // Surface it as a typed `Error::Aggregate` instead so untrusted
+    // config can never crash the process.
+    let (count, frames_sw) = try_count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
@@ -405,7 +410,7 @@ impl OwnedDiarizationPipeline {
       cfg.onset() as f64,
       chunks_sw,
       frames_sw_template,
-    )
+    )?
     .into_parts();
     let num_output_frames = count.len();
 

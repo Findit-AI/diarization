@@ -215,6 +215,15 @@ impl SegmentModel {
   pub fn infer(&mut self, samples: &[f32]) -> Result<Vec<f32>, Error> {
     debug_assert_eq!(samples.len(), WINDOW_SAMPLES as usize);
 
+    // Reject non-finite input at the boundary. The owned and streaming
+    // offline paths feed `infer`'s output directly into `softmax_row` /
+    // hard powerset argmax (bypassing the streaming `Segmenter`'s
+    // `NonFiniteScores` guard), so a NaN sample propagating through
+    // ORT into NaN logits would silently produce wrong diarization.
+    if samples.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
+
     self.input_scratch.clear();
     self.input_scratch.extend_from_slice(samples);
 
@@ -259,6 +268,16 @@ impl SegmentModel {
         expected,
         got: data.len(),
       });
+    }
+    // Reject non-finite logits before returning to the caller. The
+    // owned and streaming offline paths immediately softmax these
+    // values; a NaN here would propagate to a NaN-vs-NaN argmax and
+    // produce arbitrary hard powerset labels (i.e. silent wrong
+    // diarization). The streaming `Segmenter::push_inference` path
+    // has its own `NonFiniteScores` guard, but `infer` is also a
+    // public direct entrypoint and must enforce the contract itself.
+    if data.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteOutput);
     }
     Ok(data.to_vec())
   }

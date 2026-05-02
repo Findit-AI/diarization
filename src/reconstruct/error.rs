@@ -37,6 +37,10 @@ pub enum ShapeError {
   HardClustersNegativeId,
   #[error("hard_clusters id exceeds MAX_CLUSTER_ID (1023)")]
   HardClustersIdAboveMax,
+  #[error("num_chunks * num_frames_per_chunk * num_speakers overflows usize")]
+  SegmentationsSizeOverflow,
+  #[error("num_chunks * num_frames_per_chunk * num_clusters overflows usize")]
+  ClusteredSizeOverflow,
 }
 
 /// Field that contained a non-finite value.

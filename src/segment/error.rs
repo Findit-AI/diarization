@@ -57,6 +57,31 @@ pub enum Error {
     id: WindowId,
   },
 
+  /// `SegmentModel::infer` produced one or more non-finite logits
+  /// (`NaN`, `+inf`, `-inf`) — e.g. from a degraded ONNX provider, a
+  /// non-finite input sample, or numeric corruption upstream.
+  ///
+  /// Unlike [`Error::NonFiniteScores`], this variant has no
+  /// [`WindowId`] because it surfaces from the direct
+  /// `SegmentModel::infer` entrypoint used by the owned and streaming
+  /// offline paths (which do not own a `Segmenter`). Callers should
+  /// treat this as a transient backend failure and retry, or surface
+  /// the error.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("inference output contains non-finite logits (NaN / +inf / -inf)")]
+  NonFiniteOutput,
+
+  /// `SegmentModel::infer` was called with one or more non-finite
+  /// input samples (`NaN`, `+inf`, `-inf`). Realistic upstream sources
+  /// of bad samples are decoder bugs and corrupted audio buffers; we
+  /// reject them at the boundary so they cannot poison the ONNX
+  /// session and cascade into NaN logits / NaN-driven hard decisions.
+  #[cfg(feature = "ort")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+  #[error("input samples contain non-finite values (NaN / +inf / -inf)")]
+  NonFiniteInput,
+
   /// A loaded ONNX model's input or output dimensions don't match what
   /// `diarization::segment` expects (`[*, 1, 160000]` for input, `[*, 589, 7]` for
   /// output, where `*` is a free batch dimension).

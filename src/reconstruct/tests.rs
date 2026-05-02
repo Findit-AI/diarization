@@ -314,3 +314,35 @@ fn rejects_neg_inf_segmentation() {
   );
   assert!(matches!(reconstruct(&input), Err(Error::NonFinite(_))));
 }
+
+/// Adversarial dimensions whose product overflows usize must surface
+/// as a typed `Err(ShapeError::SegmentationsSizeOverflow)`, not wrap
+/// silently in release and reach allocation/index code with bogus
+/// shape metadata.
+#[test]
+fn rejects_segmentation_dimension_overflow() {
+  use crate::reconstruct::error::ShapeError;
+  let (chunks_sw, frames_sw) = default_swins();
+  // num_chunks * num_frames_per_chunk * num_speakers = 1 * (usize::MAX/2 + 1) * 2
+  // wraps to 0 in release, which would then trivially match an empty
+  // segmentations slice and let allocation/index code execute on
+  // wrapped metadata. The checked multiplication must reject this
+  // before the length check.
+  let segmentations: Vec<f64> = Vec::new();
+  let hard_clusters = vec![[0i32, 0, 0]];
+  let input = ReconstructInput::new(
+    &segmentations,
+    1,
+    usize::MAX / 2 + 1,
+    2,
+    &hard_clusters,
+    &[],
+    0,
+    chunks_sw,
+    frames_sw,
+  );
+  assert!(matches!(
+    reconstruct(&input),
+    Err(Error::Shape(ShapeError::SegmentationsSizeOverflow))
+  ));
+}

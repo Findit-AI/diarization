@@ -243,7 +243,17 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   if num_speakers == 0 {
     return Err(ShapeError::ZeroNumSpeakers.into());
   }
-  if segmentations.len() != num_chunks * num_frames_per_chunk * num_speakers {
+  // Use checked arithmetic at the public boundary: a malformed caller
+  // could pick dimensions whose product wraps in release (e.g.
+  // `num_frames_per_chunk = usize::MAX/2 + 1`, `num_speakers = 2`,
+  // wrapping to a small value), match the wrapped count with a tiny
+  // segmentations slice, and reach allocation/index code with bogus
+  // shape metadata. Reject overflow before the equality check.
+  let expected_seg_len = num_chunks
+    .checked_mul(num_frames_per_chunk)
+    .and_then(|n| n.checked_mul(num_speakers))
+    .ok_or(ShapeError::SegmentationsSizeOverflow)?;
+  if segmentations.len() != expected_seg_len {
     return Err(ShapeError::SegmentationsLenMismatch.into());
   }
   if hard_clusters.len() != num_chunks {
@@ -350,7 +360,14 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // Per-chunk: for each cluster k present in hard_clusters[c],
   // clustered[c, f, k] = max over speakers s where hard_clusters[c, s] == k
   //                       of segmentations[c, f, s].
-  let cs_size = num_chunks * num_frames_per_chunk * num_clusters;
+  // Checked product: `num_clusters` derives from `max_cluster + 1`
+  // which is bounded by MAX_CLUSTER_ID validation above, but the
+  // multi-axis product can still overflow on adversarial dimensions
+  // even if each axis individually is sane.
+  let cs_size = num_chunks
+    .checked_mul(num_frames_per_chunk)
+    .and_then(|n| n.checked_mul(num_clusters))
+    .ok_or(ShapeError::ClusteredSizeOverflow)?;
   let mut clustered = vec![0.0f64; cs_size];
   let mut clustered_mask = vec![false; cs_size]; // true = valid (not NaN)
 

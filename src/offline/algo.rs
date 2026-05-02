@@ -35,6 +35,12 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error("offline: embed: {0}")]
   Embed(#[from] crate::embed::Error),
+  /// Propagated from `aggregate::try_count_pyannote` when the count
+  /// tensor cannot be computed (e.g. invalid `onset` configuration).
+  /// This replaces a panic path through the infallible
+  /// `count_pyannote` wrapper used by the audio entrypoint.
+  #[error("offline: aggregate: {0}")]
+  Aggregate(#[from] crate::aggregate::Error),
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].

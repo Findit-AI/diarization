@@ -49,7 +49,7 @@
 use std::sync::Arc;
 
 use crate::{
-  aggregate::count_pyannote,
+  aggregate::try_count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
   offline::{OfflineInput, OwnedPipelineOptions, diarize_offline},
   plda::PldaTransform,
@@ -81,6 +81,12 @@ pub enum StreamingError {
   Offline(#[from] crate::offline::Error),
   #[error("streaming: reconstruct: {0}")]
   Reconstruct(#[from] crate::reconstruct::Error),
+  /// Propagated from `aggregate::try_count_pyannote` when the count
+  /// tensor cannot be computed (e.g. NaN/inf `onset` from a
+  /// misconfigured `OwnedPipelineOptions`). Replaces a panic path
+  /// through the infallible `count_pyannote` wrapper.
+  #[error("streaming: aggregate: {0}")]
+  Aggregate(#[from] crate::aggregate::Error),
 }
 
 /// Specific shape-violation reasons for [`StreamingError::Shape`].
@@ -343,7 +349,11 @@ impl StreamingOfflineDiarizer {
     let chunks_sw_local = SlidingWindow::new(0.0, chunk_duration_s, chunk_step_s);
     let frames_sw_template =
       SlidingWindow::new(0.0, PYANNOTE_FRAME_DURATION_S, PYANNOTE_FRAME_STEP_S);
-    let (count, frames_sw_local) = count_pyannote(
+    // Use the fallible variant: a malformed `onset` (NaN/inf via the
+    // public `with_onset` builder) would panic the infallible wrapper
+    // at `try_count_pyannote.expect(...)`. Surface it as a typed
+    // `StreamingError::Aggregate` so untrusted config can never crash.
+    let (count, frames_sw_local) = try_count_pyannote(
       &segmentations,
       num_chunks,
       FRAMES_PER_WINDOW,
@@ -351,7 +361,7 @@ impl StreamingOfflineDiarizer {
       cfg.onset() as f64,
       chunks_sw_local,
       frames_sw_template,
-    )
+    )?
     .into_parts();
 
     self.ranges.push(AccumulatedRange {
