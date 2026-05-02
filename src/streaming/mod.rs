@@ -31,5 +31,5 @@
 mod offline_diarizer;
 
 pub use offline_diarizer::{
-  DiarizedSpan, StreamingError, StreamingOfflineConfig, StreamingOfflineDiarizer,
+  DiarizedSpan, StreamingError, StreamingOfflineDiarizer, StreamingOfflineOptions,
 };

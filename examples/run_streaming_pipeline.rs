@@ -13,7 +13,7 @@ use diarization::{
   embed::EmbedModel,
   plda::PldaTransform,
   segment::SegmentModel,
-  streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer},
+  streaming::{StreamingOfflineDiarizer, StreamingOfflineOptions},
 };
 use silero::{
   Session as VadSession, SpeechOptions, SpeechSegment, SpeechSegmenter, StreamState as VadStream,
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut vad_stream = VadStream::new(vad_opts.sample_rate());
   let mut vad_segmenter = SpeechSegmenter::new(vad_opts);
 
-  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
+  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());
 
   // Stream the audio through silero to discover voice ranges, then
   // push each range's PCM through the diarizer eagerly. The voice-

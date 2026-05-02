@@ -1,9 +1,4 @@
 //! Phase 5d: end-to-end audio→RTTM offline diarization.
-#![allow(
-  clippy::manual_div_ceil,
-  clippy::needless_range_loop,
-  clippy::useless_vec
-)]
 //!
 //! `OwnedDiarizationPipeline` is the speakrs-comparable batch
 //! entrypoint: take owned 16 kHz mono samples, run segmentation +
@@ -51,7 +46,7 @@ pub const SLOTS_PER_CHUNK: usize = 3;
 /// from the community-1 config.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct OwnedPipelineConfig {
+pub struct OwnedPipelineOptions {
   #[cfg_attr(feature = "serde", serde(default = "default_step_samples"))]
   step_samples: u32,
   #[cfg_attr(feature = "serde", serde(default = "default_onset"))]
@@ -99,7 +94,7 @@ const fn default_smoothing_epsilon() -> Option<f32> {
   Some(0.1)
 }
 
-impl OwnedPipelineConfig {
+impl OwnedPipelineOptions {
   /// Construct with `community-1` defaults.
   pub const fn new() -> Self {
     Self {
@@ -203,7 +198,7 @@ impl OwnedPipelineConfig {
   }
 }
 
-impl Default for OwnedPipelineConfig {
+impl Default for OwnedPipelineOptions {
   fn default() -> Self {
     Self::new()
   }
@@ -214,27 +209,27 @@ impl Default for OwnedPipelineConfig {
 /// Borrows `&mut SegmentModel`, `&mut EmbedModel`, and `&PldaTransform`
 /// per [`run`](Self::run) call (they're caller-owned because both
 /// model types are `!Sync` — see [`crate::diarizer::Diarizer`] for
-/// the same pattern). Configuration is held in [`OwnedPipelineConfig`].
+/// the same pattern). Configuration is held in [`OwnedPipelineOptions`].
 pub struct OwnedDiarizationPipeline {
-  config: OwnedPipelineConfig,
+  options: OwnedPipelineOptions,
 }
 
 impl OwnedDiarizationPipeline {
-  /// Construct with the community-1 default config.
+  /// Construct with the community-1 default options.
   pub const fn new() -> Self {
     Self {
-      config: OwnedPipelineConfig::new(),
+      options: OwnedPipelineOptions::new(),
     }
   }
 
-  /// Construct with explicit config.
-  pub fn with_config(config: OwnedPipelineConfig) -> Self {
-    Self { config }
+  /// Construct with explicit options.
+  pub fn with_options(options: OwnedPipelineOptions) -> Self {
+    Self { options }
   }
 
-  /// Borrow the configuration.
-  pub fn config(&self) -> &OwnedPipelineConfig {
-    &self.config
+  /// Borrow the options.
+  pub fn options(&self) -> &OwnedPipelineOptions {
+    &self.options
   }
 
   /// Run diarization on owned 16 kHz mono samples.
@@ -256,7 +251,7 @@ impl OwnedDiarizationPipeline {
     plda: &PldaTransform,
     samples: &[f32],
   ) -> Result<OfflineOutput, Error> {
-    let cfg = &self.config;
+    let cfg = &self.options;
     if samples.is_empty() {
       return Err(Error::Shape("samples is empty"));
     }
@@ -462,9 +457,9 @@ mod serde_tests {
 
   #[test]
   fn owned_pipeline_config_default_roundtrip() {
-    let cfg = OwnedPipelineConfig::new();
+    let cfg = OwnedPipelineOptions::new();
     let json = serde_json::to_string(&cfg).expect("serialize");
-    let back: OwnedPipelineConfig = serde_json::from_str(&json).expect("deserialize");
+    let back: OwnedPipelineOptions = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(cfg.step_samples(), back.step_samples());
     assert_eq!(cfg.threshold(), back.threshold());
     assert_eq!(cfg.fa(), back.fa());
@@ -476,8 +471,8 @@ mod serde_tests {
   /// Empty JSON object → all defaults filled in.
   #[test]
   fn owned_pipeline_config_empty_json_uses_defaults() {
-    let cfg: OwnedPipelineConfig = serde_json::from_str("{}").expect("deserialize");
-    let want = OwnedPipelineConfig::new();
+    let cfg: OwnedPipelineOptions = serde_json::from_str("{}").expect("deserialize");
+    let want = OwnedPipelineOptions::new();
     assert_eq!(cfg.step_samples(), want.step_samples());
     assert_eq!(cfg.onset(), want.onset());
     assert_eq!(cfg.threshold(), want.threshold());

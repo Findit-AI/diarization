@@ -53,7 +53,7 @@ use std::sync::Arc;
 use crate::{
   aggregate::count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
-  offline::{OfflineInput, OwnedPipelineConfig, diarize_offline},
+  offline::{OfflineInput, OwnedPipelineOptions, diarize_offline},
   plda::PldaTransform,
   reconstruct::{
     ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans, reconstruct as reconstruct_grid,
@@ -88,27 +88,27 @@ pub enum StreamingError {
 /// Configuration for [`StreamingOfflineDiarizer`].
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StreamingOfflineConfig {
+pub struct StreamingOfflineOptions {
   #[cfg_attr(feature = "serde", serde(default))]
-  diarization: OwnedPipelineConfig,
+  diarization: OwnedPipelineOptions,
 }
 
-impl StreamingOfflineConfig {
+impl StreamingOfflineOptions {
   /// Construct with `community-1` diarization defaults.
   pub const fn new() -> Self {
     Self {
-      diarization: OwnedPipelineConfig::new(),
+      diarization: OwnedPipelineOptions::new(),
     }
   }
 
   /// Borrow the inner diarization parameters.
-  pub const fn diarization(&self) -> &OwnedPipelineConfig {
+  pub const fn diarization(&self) -> &OwnedPipelineOptions {
     &self.diarization
   }
 
   /// Builder: replace the diarization parameters.
   #[must_use]
-  pub const fn with_diarization(mut self, diarization: OwnedPipelineConfig) -> Self {
+  pub const fn with_diarization(mut self, diarization: OwnedPipelineOptions) -> Self {
     self.diarization = diarization;
     self
   }
@@ -157,7 +157,7 @@ impl DiarizedSpan {
 /// global clustering pass and returns spans on the original
 /// timeline.
 pub struct StreamingOfflineDiarizer {
-  config: StreamingOfflineConfig,
+  options: StreamingOfflineOptions,
   ranges: Vec<AccumulatedRange>,
 }
 
@@ -188,16 +188,16 @@ struct AccumulatedRange {
 }
 
 impl StreamingOfflineDiarizer {
-  pub fn new(config: StreamingOfflineConfig) -> Self {
+  pub fn new(options: StreamingOfflineOptions) -> Self {
     Self {
-      config,
+      options,
       ranges: Vec::new(),
     }
   }
 
-  /// Borrow the configuration.
-  pub fn config(&self) -> &StreamingOfflineConfig {
-    &self.config
+  /// Borrow the options.
+  pub fn options(&self) -> &StreamingOfflineOptions {
+    &self.options
   }
 
   /// Number of voice ranges accumulated so far.
@@ -227,7 +227,7 @@ impl StreamingOfflineDiarizer {
     abs_start_sample: u64,
     samples: &[f32],
   ) -> Result<(), StreamingError> {
-    let cfg = &self.config.diarization;
+    let cfg = &self.options.diarization;
     if samples.is_empty() {
       return Err(StreamingError::Shape("voice range samples is empty"));
     }
@@ -416,7 +416,7 @@ impl StreamingOfflineDiarizer {
     // gaps in absolute time), this global reconstruct would emit
     // garbage timings. So we ignore its reconstruct output and
     // re-reconstruct per range below.
-    let cfg = &self.config.diarization;
+    let cfg = &self.options.diarization;
     let chunks_sw_global = self.ranges[0].chunks_sw_local;
     let frames_sw_global = self.ranges[0].frames_sw_local;
     let input = OfflineInput::new(

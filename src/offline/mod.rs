@@ -54,4 +54,4 @@ pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
 
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
-pub use owned::{OwnedDiarizationPipeline, OwnedPipelineConfig, SLOTS_PER_CHUNK};
+pub use owned::{OwnedDiarizationPipeline, OwnedPipelineOptions, SLOTS_PER_CHUNK};

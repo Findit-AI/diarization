@@ -15,7 +15,7 @@ use diarization::{
   embed::EmbedModel,
   plda::PldaTransform,
   segment::SegmentModel,
-  streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer},
+  streaming::{StreamingOfflineOptions, StreamingOfflineDiarizer},
 };
 
 fn main() -> Result<()> {
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
   let mut emb = EmbedModel::from_file(&emb_path).context("load embed model")?;
   let plda = PldaTransform::new().context("load plda")?;
 
-  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
+  let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());
   diarizer
     .push_voice_range(&mut seg, &mut emb, 0, &samples)
     .context("push_voice_range")?;

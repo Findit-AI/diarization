@@ -38,14 +38,14 @@
 //! use diarization::embed::EmbedModel;
 //! use diarization::plda::PldaTransform;
 //! use diarization::segment::SegmentModel;
-//! use diarization::streaming::{StreamingOfflineConfig, StreamingOfflineDiarizer};
+//! use diarization::streaming::{StreamingOfflineOptions, StreamingOfflineDiarizer};
 //!
 //! // Segmentation + PLDA ship bundled in the crate; only the WeSpeaker
 //! // embedding model (27 MB) is BYO.
 //! let mut seg = SegmentModel::bundled()?;
 //! let mut emb = EmbedModel::from_file("models/wespeaker_resnet34_lm.onnx")?;
 //! let plda = PldaTransform::new()?;
-//! let mut d = StreamingOfflineDiarizer::new(StreamingOfflineConfig::default());
+//! let mut d = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());
 //!
 //! // Caller drives VAD externally; pushes one voice range at a time.
 //! let samples: Vec<f32> = vec![/* 16 kHz mono PCM */];
