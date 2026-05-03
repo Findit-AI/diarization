@@ -96,6 +96,33 @@ pub enum ShapeError {
   SmoothingEpsilonOutOfRange { value: Option<f32> },
 }
 
+/// `const fn` predicate: `v` is finite and `>= 0` (f64). Used for
+/// `min_duration_off`, a non-negative seconds quantity passed
+/// unchanged into RTTM span post-processing. Hand-coded with `v == v`
+/// (NaN check) and an `!= INFINITY` clause so it can be `const`
+/// (`f64::is_finite` is not yet `const`).
+#[inline]
+pub(crate) const fn check_min_duration_off(v: f64) -> bool {
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && v >= 0.0 && v != f64::INFINITY
+}
+
+/// `const fn` predicate: `v` is `None` or `Some(finite >= 0)` (f32).
+/// Used for the optional smoothing epsilon; `None` disables smoothing
+/// (bit-exact pyannote argmax) and is always valid.
+#[inline]
+pub(crate) const fn check_smoothing_epsilon(v: Option<f32>) -> bool {
+  match v {
+    None => true,
+    Some(x) => {
+      #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+      let not_nan = !(x != x);
+      not_nan && x >= 0.0 && x != f32::INFINITY
+    }
+  }
+}
+
 /// Inputs to [`diarize_offline`].
 ///
 /// Caller has already produced segmentation + raw-embedding tensors
@@ -198,8 +225,18 @@ impl<'a> OfflineInput<'a> {
   }
 
   /// Set the gap-merging threshold for span post-processing (builder).
+  ///
+  /// # Panics
+  /// Panics if `min_duration_off` is NaN/±inf or negative. RTTM span-
+  /// merge consumes this as a non-negative seconds quantity; `+inf`
+  /// merges every same-cluster gap and `NaN` silently disables the
+  /// merge (every comparison becomes false).
   #[must_use]
   pub const fn with_min_duration_off(mut self, min_duration_off: f64) -> Self {
+    assert!(
+      check_min_duration_off(min_duration_off),
+      "min_duration_off must be finite and >= 0"
+    );
     self.min_duration_off = min_duration_off;
     self
   }
@@ -207,8 +244,17 @@ impl<'a> OfflineInput<'a> {
   /// Set the temporal-smoothing epsilon for reconstruct (builder).
   /// `None` = bit-exact pyannote argmax. `Some(0.1)` recommended for
   /// `OwnedDiarizationPipeline`.
+  ///
+  /// # Panics
+  /// Panics if `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`.
+  /// `Some(+inf)` collapses top-k onto stable index order, `Some(NaN)`
+  /// makes every smoothing comparison false.
   #[must_use]
   pub const fn with_smoothing_epsilon(mut self, smoothing_epsilon: Option<f32>) -> Self {
+    assert!(
+      check_smoothing_epsilon(smoothing_epsilon),
+      "smoothing_epsilon must be None or Some(finite >= 0)"
+    );
     self.smoothing_epsilon = smoothing_epsilon;
     self
   }
@@ -397,6 +443,30 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   if num_frames_per_chunk == 0 {
     return Err(ShapeError::ZeroNumFramesPerChunk.into());
   }
+  // Defense-in-depth on the reconstruction knobs. The `OfflineInput`
+  // setters panic on out-of-range values, but a `pub const fn new()`
+  // call followed by direct field-by-field construction (or any
+  // future serde wrapper around `OfflineInput`) bypasses them. Both
+  // values flow unchanged into reconstruct/RTTM span emission;
+  // `+inf` smoothing collapses top-k onto stable index order and
+  // `+inf` min_duration_off merges every same-cluster gap, returning
+  // `Ok(_)` with corrupted spans. Surface the misconfiguration here.
+  if !check_min_duration_off(min_duration_off) {
+    return Err(
+      ShapeError::MinDurationOffOutOfRange {
+        value: min_duration_off,
+      }
+      .into(),
+    );
+  }
+  if !check_smoothing_epsilon(smoothing_epsilon) {
+    return Err(
+      ShapeError::SmoothingEpsilonOutOfRange {
+        value: smoothing_epsilon,
+      }
+      .into(),
+    );
+  }
   let expected_emb_len = num_chunks
     .checked_mul(num_speakers)
     .and_then(|n| n.checked_mul(EMBEDDING_DIM))
@@ -582,4 +652,241 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     num_clusters,
     spans,
   ))
+}
+
+#[cfg(test)]
+mod reconstruction_knob_validation_tests {
+  //! Round-14 fix: `diarize_offline` must reject NaN/±inf/negative
+  //! `min_duration_off` and `Some(NaN/±inf)`/`Some(<0)`
+  //! `smoothing_epsilon`. The setters panic on these, but a caller
+  //! can field-construct (or future-serde-bypass) an `OfflineInput`
+  //! with bad values; the runtime check at `diarize_offline` entry
+  //! surfaces a typed error before reconstruction silently corrupts
+  //! span boundaries / top-k smoothing.
+
+  use super::*;
+  use crate::reconstruct::SlidingWindow;
+
+  /// Build a minimal valid `OfflineInput` skeleton for predicate
+  /// tests. Tensors are sized to the smallest configuration that
+  /// passes the shape checks; their content does not matter because
+  /// the reconstruction-knob validation runs before any tensor work.
+  /// Field-by-field construction bypasses the `with_*` setter
+  /// panics, which is exactly what we are exercising.
+  fn build_input<'a>(
+    raw: &'a [f32],
+    seg: &'a [f64],
+    count: &'a [u8],
+    plda: &'a crate::plda::PldaTransform,
+    chunks_sw: SlidingWindow,
+    frames_sw: SlidingWindow,
+    min_duration_off: f64,
+    smoothing_epsilon: Option<f32>,
+  ) -> OfflineInput<'a> {
+    OfflineInput {
+      raw_embeddings: raw,
+      num_chunks: 1,
+      num_speakers: 3,
+      segmentations: seg,
+      num_frames_per_chunk: 4,
+      count,
+      num_output_frames: 4,
+      chunks_sw,
+      frames_sw,
+      plda,
+      threshold: 0.6,
+      fa: 0.07,
+      fb: 0.8,
+      max_iters: 20,
+      min_duration_off,
+      smoothing_epsilon,
+    }
+  }
+
+  #[test]
+  fn diarize_offline_rejects_nan_min_duration_off() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(
+      &raw,
+      &seg,
+      &count,
+      &plda,
+      chunks_sw,
+      frames_sw,
+      f64::NAN,
+      None,
+    );
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::MinDurationOffOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn diarize_offline_rejects_inf_min_duration_off() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(
+      &raw,
+      &seg,
+      &count,
+      &plda,
+      chunks_sw,
+      frames_sw,
+      f64::INFINITY,
+      None,
+    );
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::MinDurationOffOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn diarize_offline_rejects_negative_min_duration_off() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(&raw, &seg, &count, &plda, chunks_sw, frames_sw, -0.5, None);
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::MinDurationOffOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn diarize_offline_rejects_nan_smoothing_epsilon() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(
+      &raw,
+      &seg,
+      &count,
+      &plda,
+      chunks_sw,
+      frames_sw,
+      0.0,
+      Some(f32::NAN),
+    );
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::SmoothingEpsilonOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn diarize_offline_rejects_inf_smoothing_epsilon() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(
+      &raw,
+      &seg,
+      &count,
+      &plda,
+      chunks_sw,
+      frames_sw,
+      0.0,
+      Some(f32::INFINITY),
+    );
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::SmoothingEpsilonOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn diarize_offline_rejects_negative_smoothing_epsilon() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let input = build_input(
+      &raw,
+      &seg,
+      &count,
+      &plda,
+      chunks_sw,
+      frames_sw,
+      0.0,
+      Some(-0.001),
+    );
+    let r = diarize_offline(&input);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::SmoothingEpsilonOutOfRange { .. }))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// `with_min_duration_off` and `with_smoothing_epsilon` setters
+  /// panic-validate (parity with `OwnedPipelineOptions`).
+  #[test]
+  #[should_panic(expected = "min_duration_off must be finite and >= 0")]
+  fn with_min_duration_off_setter_panics_on_inf() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let _ = OfflineInput::new(&raw, 1, 3, &seg, 4, &count, 4, chunks_sw, frames_sw, &plda)
+      .with_min_duration_off(f64::INFINITY);
+  }
+
+  #[test]
+  #[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+  fn with_smoothing_epsilon_setter_panics_on_nan() {
+    let plda = crate::plda::PldaTransform::new().expect("plda");
+    let raw = vec![0.0_f32; 1 * 3 * EMBEDDING_DIM];
+    let seg = vec![0.0_f64; 1 * 4 * 3];
+    let count = vec![0_u8; 4];
+    let chunks_sw = SlidingWindow::new(0.0, 10.0, 1.0);
+    let frames_sw = SlidingWindow::new(0.0, 0.0619375, 0.016875);
+    let _ = OfflineInput::new(&raw, 1, 3, &seg, 4, &count, 4, chunks_sw, frames_sw, &plda)
+      .with_smoothing_epsilon(Some(f32::NAN));
+  }
 }

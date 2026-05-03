@@ -54,30 +54,12 @@ pub(crate) const fn check_onset(v: f32) -> bool {
   not_nan && v > 0.0 && v <= 1.0
 }
 
-/// `const fn` predicate: `v` is finite and `>= 0` (f64 variant). Used
-/// for `min_duration_off`, which is a non-negative seconds quantity
-/// passed unchanged into RTTM span post-processing.
-#[inline]
-pub(crate) const fn check_min_duration_off(v: f64) -> bool {
-  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
-  let not_nan = !(v != v);
-  not_nan && v >= 0.0 && v != f64::INFINITY
-}
-
-/// `const fn` predicate: `v` is `None` or `Some(finite >= 0)` (f32
-/// variant). Used for the optional `smoothing_epsilon` knob; `None`
-/// disables smoothing (bit-exact pyannote argmax) and is always valid.
-#[inline]
-pub(crate) const fn check_smoothing_epsilon(v: Option<f32>) -> bool {
-  match v {
-    None => true,
-    Some(x) => {
-      #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
-      let not_nan = !(x != x);
-      not_nan && x >= 0.0 && x != f32::INFINITY
-    }
-  }
-}
+// `check_min_duration_off` / `check_smoothing_epsilon` live in
+// `crate::offline::algo` (always-on, not ort-gated) so the pure
+// `diarize_offline` tensor API can reuse the same predicates as the
+// audio entrypoints. We import them here for the
+// `OwnedPipelineOptions` builder-side panics + run() runtime checks.
+use crate::offline::algo::{check_min_duration_off, check_smoothing_epsilon};
 
 /// Configuration for [`OwnedDiarizationPipeline`].
 ///

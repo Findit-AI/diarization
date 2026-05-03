@@ -55,7 +55,13 @@ pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
 pub use owned::{OwnedDiarizationPipeline, OwnedPipelineOptions, SLOTS_PER_CHUNK};
 
 /// Reused by [`crate::streaming::offline_diarizer`] for the same
-/// onset-range / min_duration_off / smoothing_epsilon validation it
-/// performs on its [`OwnedPipelineOptions`]-derived config.
+/// onset / min_duration_off / smoothing_epsilon validation it
+/// performs on its [`OwnedPipelineOptions`]-derived config. The two
+/// reconstruction-knob predicates live in `algo` (always-on, not
+/// ort-gated) because `diarize_offline` itself enforces them on the
+/// pure tensor path; `check_onset` lives in `owned` because the
+/// onset knob only flows through the audio entrypoints.
 #[cfg(feature = "ort")]
-pub(crate) use owned::{check_min_duration_off, check_onset, check_smoothing_epsilon};
+pub(crate) use algo::{check_min_duration_off, check_smoothing_epsilon};
+#[cfg(feature = "ort")]
+pub(crate) use owned::check_onset;
