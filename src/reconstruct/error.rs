@@ -75,6 +75,28 @@ pub enum ShapeError {
   /// [`try_discrete_to_spans`]: crate::reconstruct::try_discrete_to_spans
   #[error("min_duration_off ({value}) must be finite and >= 0")]
   MinDurationOffOutOfRange { value: f64 },
+  /// `frames_sw` (the frame-level [`SlidingWindow`]) has a non-finite
+  /// `start`/`duration`/`step` or non-positive `duration`/`step`. RTTM
+  /// span emission computes `start + s * step + duration/2` per
+  /// active run; non-finite or zero/negative timing produces NaN or
+  /// non-monotonic span boundaries with `Ok(_)`. Direct callers of
+  /// [`try_discrete_to_spans`] would otherwise silently emit invalid
+  /// timestamps; the offline entrypoints construct `frames_sw` from
+  /// validated pyannote constants and never trigger this.
+  ///
+  /// [`SlidingWindow`]: crate::reconstruct::SlidingWindow
+  /// [`try_discrete_to_spans`]: crate::reconstruct::try_discrete_to_spans
+  #[error("frames_sw timing invalid: {0}")]
+  InvalidFramesTiming(&'static str),
+  /// A grid cell is non-finite (`NaN`/`±inf`) or finite but not in
+  /// `{0.0, 1.0}`. The walk treats `cell != 0.0` as "active", so a
+  /// `NaN` (NaN != 0.0 is true), `±inf`, or arbitrary finite value
+  /// silently becomes an active frame and contaminates emitted span
+  /// boundaries. The reconstruction stage that produces grids only
+  /// emits {0, 1}, so any non-binary cell here indicates upstream
+  /// corruption rather than a legitimate input to RTTM emission.
+  #[error("grid contains non-binary value at index {index}: {value}")]
+  GridNonBinaryCell { index: usize, value: f32 },
 }
 
 /// Field that contained a non-finite value.

@@ -112,15 +112,47 @@ pub fn try_discrete_to_spans(
       value: min_duration_off,
     });
   }
+  // Validate the frame-level sliding-window timing. The downstream
+  // span boundary computation `start + s * step + duration/2`
+  // produces NaN or non-monotonic timestamps if any of these are
+  // non-finite or non-positive; we surface a typed error rather
+  // than emit invalid spans. The offline entrypoint constructs
+  // `frames_sw` from validated pyannote constants and never trips
+  // this; direct callers can.
+  let frame_start = frames_sw.start();
+  let frame_step = frames_sw.step();
+  let frame_duration = frames_sw.duration();
+  if !frame_start.is_finite() {
+    return Err(ShapeError::InvalidFramesTiming("start must be finite"));
+  }
+  if !frame_step.is_finite() || frame_step <= 0.0 {
+    return Err(ShapeError::InvalidFramesTiming(
+      "step must be finite and > 0",
+    ));
+  }
+  if !frame_duration.is_finite() || frame_duration <= 0.0 {
+    return Err(ShapeError::InvalidFramesTiming(
+      "duration must be finite and > 0",
+    ));
+  }
   let expected = num_frames
     .checked_mul(num_clusters)
     .ok_or(ShapeError::GridSizeOverflow)?;
   if grid.len() != expected {
     return Err(ShapeError::GridLenMismatch);
   }
-  let center_offset = frames_sw.duration() / 2.0;
-  let frame_start = frames_sw.start();
-  let frame_step = frames_sw.step();
+  // Validate every grid cell is finite AND binary (`0.0` or `1.0`).
+  // The walk uses `cell != 0.0` as the active test, so NaN, ±inf, or
+  // any non-binary finite value (e.g. `0.5` from a soft grid)
+  // silently becomes "active" and corrupts emitted span boundaries.
+  // Documented contract: `grid` is the discrete diarization output of
+  // `reconstruct`, which produces `{0.0, 1.0}` only.
+  for (i, &v) in grid.iter().enumerate() {
+    if !v.is_finite() || (v != 0.0 && v != 1.0) {
+      return Err(ShapeError::GridNonBinaryCell { index: i, value: v });
+    }
+  }
+  let center_offset = frame_duration / 2.0;
   let mut spans: Vec<RttmSpan> = Vec::new();
   for k in 0..num_clusters {
     let mut per_cluster: Vec<(f64, f64)> = Vec::new(); // (start, end)

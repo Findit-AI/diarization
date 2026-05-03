@@ -565,29 +565,52 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     let row_start = t * num_clusters;
     let mut sorted: Vec<usize> = (0..num_clusters).collect();
     if let Some(eps) = smoothing_epsilon {
-      // Speakrs-style tie-breaking: when two activations are within
-      // `eps` of each other, prefer the one that was selected at
-      // t-1. Falls back to descending-activation order otherwise.
+      // Speakrs-style tie-breaking, expressed as an additive key to
+      // guarantee a strict weak order (Rust's `sort_by` requires
+      // transitivity; non-transitive comparators give implementation-
+      // and input-dependent output).
+      //
+      // Per-cluster effective activation:
+      //   eff(c) = aggregated[c] + (prev_selected.contains(&c) ? eps : 0)
+      //
+      // Equivalence to the original "if |a-b| < eps prefer previously-
+      // selected; else strict descending activation" rule:
+      //
+      // Case (A) was_a == was_b: eff differences equal raw differences,
+      //   so descending eff = descending raw. Same as old "raw fallback".
+      //
+      // Case (B) was_a true, was_b false: a wins iff
+      //     eff(a) > eff(b) iff va + eps > vb iff vb - va < eps.
+      //   - vb > va by ≥ eps  → b wins (matches old: |va-vb| ≥ eps → raw vb wins).
+      //   - vb > va by < eps  → a wins (matches old: |va-vb| < eps → bias to a).
+      //   - va ≥ vb           → a wins (matches old: bias OR raw).
+      //
+      // Case (C) symmetric to (B).
+      //
+      // Counterexample fixed: with eps=0.1, activations [0.0, 0.06,
+      // 0.12], no prev_selected → old comparator was non-transitive
+      // (0<1, 2<0, 1==2). New: eff = [0.0, 0.06, 0.12], descending
+      // sort gives [2, 1, 0] (deterministic, activation-respecting).
+      //
+      // `total_cmp` defends against NaN even though we already
+      // validated `aggregated` finiteness (segmentations were
+      // finite-checked at the pipeline boundary, and `aggregated` is
+      // a finite linear combination of those).
       sorted.sort_by(|&a, &b| {
-        let va = aggregated[row_start + a];
-        let vb = aggregated[row_start + b];
-        let diff = (va - vb).abs();
-        if diff < eps {
-          let a_was = prev_selected.contains(&a);
-          let b_was = prev_selected.contains(&b);
-          // Bias toward previously-selected (descending order: was-active first).
-          b_was.cmp(&a_was)
-        } else {
-          vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        let bias_a = if prev_selected.contains(&a) { eps } else { 0.0 };
+        let bias_b = if prev_selected.contains(&b) { eps } else { 0.0 };
+        let va_eff = aggregated[row_start + a] + bias_a;
+        let vb_eff = aggregated[row_start + b] + bias_b;
+        // Descending: larger eff comes first. `total_cmp` is total.
+        // Stable tie-break by cluster index (sort_by is stable).
+        vb_eff.total_cmp(&va_eff)
       });
     } else {
       sorted.sort_by(|&a, &b| {
         let va = aggregated[row_start + a];
         let vb = aggregated[row_start + b];
-        // Descending: vb.partial_cmp(va). Stable tie-break by index
-        // (sort_by is stable since 1.20).
-        vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+        // Descending; stable tie-break by index (sort_by is stable).
+        vb.total_cmp(&va)
       });
     }
     let now_selected: Vec<usize> = sorted.iter().take(c_count).copied().collect();

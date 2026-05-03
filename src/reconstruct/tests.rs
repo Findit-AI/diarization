@@ -553,3 +553,152 @@ fn with_smoothing_epsilon_setter_panics_on_negative() {
   )
   .with_smoothing_epsilon(Some(-0.001));
 }
+
+/// `try_discrete_to_spans` rejects non-finite or non-positive
+/// `frames_sw` timing.
+#[test]
+fn try_discrete_to_spans_rejects_nan_frames_sw_start() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(f64::NAN, 0.062, 0.0169);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::InvalidFramesTiming(_))),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_zero_frames_sw_step() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::InvalidFramesTiming(_))),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_negative_frames_sw_duration() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, -0.062, 0.0169);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::InvalidFramesTiming(_))),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_inf_frames_sw_step() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, f64::INFINITY);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::InvalidFramesTiming(_))),
+    "got {r:?}"
+  );
+}
+
+/// `try_discrete_to_spans` rejects non-binary or non-finite grid
+/// cells. The walk uses `cell != 0.0`, so NaN/inf/0.5/-1.0 would
+/// silently become active frames and corrupt span boundaries.
+#[test]
+fn try_discrete_to_spans_rejects_nan_grid_cell() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let mut grid = vec![0.0_f32; 8];
+  grid[3] = f32::NAN;
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::GridNonBinaryCell { index: 3, .. })),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_inf_grid_cell() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let mut grid = vec![0.0_f32; 8];
+  grid[5] = f32::INFINITY;
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::GridNonBinaryCell { index: 5, .. })),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_non_binary_finite_grid_cell() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let mut grid = vec![0.0_f32; 8];
+  grid[2] = 0.5; // soft probability — must reject
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::GridNonBinaryCell { index: 2, .. })),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_negative_grid_cell() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let mut grid = vec![0.0_f32; 8];
+  grid[7] = -1.0;
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::GridNonBinaryCell { index: 7, .. })),
+    "got {r:?}"
+  );
+}
+
+/// Round-16 [high]: smoothing comparator must be transitive.
+/// Counterexample from the review: `eps = 0.1`, activations
+/// `[0.0, 0.06, 0.12]`, no previously-selected clusters. The old
+/// pairwise comparator was non-transitive (0<1, 2<0, 1==2). The new
+/// additive-bias key gives a strict descending order on activation
+/// when no biases are present, so the result is deterministic and
+/// activation-respecting (cluster 2 first, since it has the largest
+/// activation).
+///
+/// We test by routing through `reconstruct` directly. The third
+/// cluster (index 2, activation 0.12) must be the selected one when
+/// `count = 1`; the old comparator could return any of {0, 1, 2}.
+#[test]
+fn reconstruct_smoothing_is_transitive_on_three_cluster_triangle() {
+  use crate::reconstruct::Error;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, 1.0);
+
+  // 1 chunk, 1 frame, 3 speakers (3 clusters via hard_clusters).
+  let segmentations = vec![0.0_f64, 0.06, 0.12]; // cluster 0,1,2 activations
+  let hard_clusters = vec![[0i32, 1i32, 2i32]]; // 3 clusters distinct
+  let count = vec![1u8]; // expect 1 cluster selected per frame
+  let input = ReconstructInput::new(
+    &segmentations,
+    1,
+    1,
+    3,
+    &hard_clusters,
+    &count,
+    1,
+    chunks_sw,
+    frames_sw,
+  )
+  .with_smoothing_epsilon(Some(0.1));
+  let r: Result<_, Error> = reconstruct(&input);
+  let grid = r.expect("reconstruct succeeds");
+  // num_clusters in output = max hard_cluster id + 1 = 3.
+  assert_eq!(grid.len(), 1 * 3);
+  // Cluster 2 (highest activation 0.12) must be the selected one.
+  assert_eq!(grid[2], 1.0, "cluster 2 must be selected; grid = {grid:?}");
+  assert_eq!(grid[0], 0.0);
+  assert_eq!(grid[1], 0.0);
+}
