@@ -681,6 +681,15 @@ impl EmbedModel {
         mask_len: keep_mask.len(),
       });
     }
+    // Validate the FULL input slice for non-finite values before
+    // gathering. Without this check, a NaN/inf at a masked-out
+    // position is dropped by the `filter_map` and never reaches the
+    // finite guard in `embed_unweighted` — `Ok(_)` would silently
+    // mask upstream buffer corruption that callers using
+    // `Error::NonFiniteInput` as a quarantine signal need to see.
+    if samples.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
     let gathered: Vec<f32> = samples
       .iter()
       .zip(keep_mask.iter())
@@ -708,6 +717,12 @@ impl EmbedModel {
         samples_len: samples.len(),
         mask_len: keep_mask.len(),
       });
+    }
+    // Same full-slice finite check as `embed_masked_raw` — masked-out
+    // NaN/inf would otherwise be filtered before `embed_unweighted`
+    // sees them.
+    if samples.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
     }
     let gathered: Vec<f32> = samples
       .iter()
@@ -1038,5 +1053,57 @@ mod tests {
       matches!(r, Err(Error::NonFiniteInput)),
       "NaN sample: got {r:?}"
     );
+  }
+
+  /// Both masked-embedding entry points (`embed_masked_raw` and
+  /// `embed_masked_with_meta`) must scan the FULL input slice for
+  /// non-finite values, not just the gathered subset. A NaN at a
+  /// masked-out position is dropped by the `filter_map` and would
+  /// silently bypass the finite guard in `embed_unweighted` —
+  /// upstream buffer corruption must surface as
+  /// `Error::NonFiniteInput`, not be masked away.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_masked_rejects_non_finite_in_masked_out_position() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    // Build a clip with NaN at index 5; mark index 5 as masked-OUT
+    // (keep = false). The gathered subset has no NaN, but the input
+    // slice does — the public API contract is "input must be
+    // finite", so this must reject.
+    let mut samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize * 3];
+    samples[5] = f32::NAN;
+    let mut mask = vec![true; samples.len()];
+    mask[5] = false; // NaN is at a masked-out position.
+
+    let r = model.embed_masked_raw(&samples, &mask);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "embed_masked_raw must reject NaN at masked-out position: got {r:?}"
+    );
+
+    let r = model.embed_masked(&samples, &mask);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "embed_masked must reject NaN at masked-out position: got {r:?}"
+    );
+
+    // And inf at a masked-out position.
+    samples[5] = f32::INFINITY;
+    let r = model.embed_masked_raw(&samples, &mask);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "embed_masked_raw must reject +inf at masked-out position: got {r:?}"
+    );
+
+    // Sanity: a clean clip with the SAME mask layout still succeeds
+    // (proves the rejection is the input check, not the mask shape).
+    let clean = vec![0.001f32; samples.len()];
+    let _ok = model
+      .embed_masked_raw(&clean, &mask)
+      .expect("clean clip with same mask must succeed");
   }
 }
