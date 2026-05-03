@@ -39,6 +39,21 @@ use crate::{
 /// trains on 3 simultaneous speakers (the 7 powerset classes).
 pub const SLOTS_PER_CHUNK: usize = 3;
 
+/// `const fn` predicate: `v` is finite and in `(0.0, 1.0]`. Mirrors
+/// the segmentation `check_hysteresis_threshold` pattern: `f32::is_finite`
+/// is not yet `const`, so we phrase the check via `v == v` (NaN check)
+/// and direct `>`/`<=` comparisons that work on infinities.
+///
+/// Exposed `pub(crate)` so `streaming::offline_diarizer` can reuse the
+/// same predicate (its diarization config is a re-export of
+/// [`OwnedPipelineOptions`]).
+#[inline]
+pub(crate) const fn check_onset(v: f32) -> bool {
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && v > 0.0 && v <= 1.0
+}
+
 /// Configuration for [`OwnedDiarizationPipeline`].
 ///
 /// Defaults match pyannote `speaker-diarization-community-1`:
@@ -147,14 +162,33 @@ impl OwnedPipelineOptions {
   // ── Builders ────────────────────────────────────────────────────
 
   /// Builder: sliding-window step in samples.
+  ///
+  /// # Panics
+  /// Panics if `v == 0` or `v > WINDOW_SAMPLES`. Zero step would hang
+  /// the segmenter pump; `step > window` causes silent audio gaps
+  /// between consecutive chunks (samples in `[window..step)` per
+  /// chunk are never segmented).
   #[must_use]
   pub const fn with_step_samples(mut self, v: u32) -> Self {
+    assert!(v > 0, "step_samples must be > 0");
+    assert!(
+      v <= crate::segment::WINDOW_SAMPLES,
+      "step_samples must be <= WINDOW_SAMPLES (160_000)"
+    );
     self.step_samples = v;
     self
   }
   /// Builder: frame-level binarization onset.
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or outside `(0.0, 1.0]`. The hard 0/1
+  /// segmentation comparison `seg >= onset` degenerates outside this
+  /// range: NaN/`> 1.0` makes every frame inactive (empty
+  /// diarization), `<= 0.0` makes every frame active (corrupted
+  /// masks, embeddings, counts).
   #[must_use]
   pub const fn with_onset(mut self, v: f32) -> Self {
+    assert!(check_onset(v), "onset must be finite in (0.0, 1.0]");
     self.onset = v;
     self
   }
@@ -259,6 +293,23 @@ impl OwnedDiarizationPipeline {
     let step = cfg.step_samples() as usize;
     if step == 0 {
       return Err(crate::offline::algo::ShapeError::ZeroStepSamples.into());
+    }
+    // Defense-in-depth: `with_step_samples` panics on > WINDOW_SAMPLES,
+    // but serde-deserialized configs bypass that path. Reject here too.
+    if step > win {
+      return Err(
+        crate::offline::algo::ShapeError::StepSamplesExceedsWindow {
+          step: cfg.step_samples(),
+          window: WINDOW_SAMPLES,
+        }
+        .into(),
+      );
+    }
+    // Same defense-in-depth for `onset`. The `seg >= onset` mask
+    // degenerates with NaN/`> 1.0` (all-inactive → empty diarization)
+    // or `<= 0.0` (all-active → corrupted frame masks).
+    if !check_onset(cfg.onset()) {
+      return Err(crate::offline::algo::ShapeError::OnsetOutOfRange { onset: cfg.onset() }.into());
     }
 
     // ── Stage 1: chunked sliding-window segmentation ───────────────
@@ -449,6 +500,82 @@ impl OwnedDiarizationPipeline {
 impl Default for OwnedDiarizationPipeline {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+#[cfg(test)]
+mod option_validation_tests {
+  use super::*;
+
+  #[test]
+  fn check_onset_predicate() {
+    assert!(check_onset(0.5));
+    assert!(check_onset(1.0));
+    assert!(check_onset(f32::EPSILON));
+    assert!(!check_onset(0.0));
+    assert!(!check_onset(-0.01));
+    assert!(!check_onset(1.01));
+    assert!(!check_onset(f32::NAN));
+    assert!(!check_onset(f32::INFINITY));
+    assert!(!check_onset(f32::NEG_INFINITY));
+  }
+
+  #[test]
+  #[should_panic(expected = "step_samples must be > 0")]
+  fn with_step_samples_zero_panics() {
+    let _ = OwnedPipelineOptions::new().with_step_samples(0);
+  }
+
+  /// `step > WINDOW_SAMPLES` would skip `step - window` samples per
+  /// chunk in the offline planner. Reject at validation.
+  #[test]
+  #[should_panic(expected = "step_samples must be <= WINDOW_SAMPLES")]
+  fn with_step_samples_above_window_panics() {
+    let _ = OwnedPipelineOptions::new().with_step_samples(crate::segment::WINDOW_SAMPLES + 1);
+  }
+
+  /// Boundary: step == WINDOW_SAMPLES is allowed (no-overlap chunks).
+  #[test]
+  fn with_step_samples_equal_to_window_ok() {
+    let o = OwnedPipelineOptions::new().with_step_samples(crate::segment::WINDOW_SAMPLES);
+    assert_eq!(o.step_samples(), crate::segment::WINDOW_SAMPLES);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset must be finite in (0.0, 1.0]")]
+  fn with_onset_zero_panics() {
+    let _ = OwnedPipelineOptions::new().with_onset(0.0);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset must be finite in (0.0, 1.0]")]
+  fn with_onset_negative_panics() {
+    let _ = OwnedPipelineOptions::new().with_onset(-0.01);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset must be finite in (0.0, 1.0]")]
+  fn with_onset_above_one_panics() {
+    let _ = OwnedPipelineOptions::new().with_onset(1.01);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset must be finite in (0.0, 1.0]")]
+  fn with_onset_nan_panics() {
+    let _ = OwnedPipelineOptions::new().with_onset(f32::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "onset must be finite in (0.0, 1.0]")]
+  fn with_onset_inf_panics() {
+    let _ = OwnedPipelineOptions::new().with_onset(f32::INFINITY);
+  }
+
+  /// Boundary: onset == 1.0 is allowed (degenerate but valid).
+  #[test]
+  fn with_onset_one_ok() {
+    let o = OwnedPipelineOptions::new().with_onset(1.0);
+    assert_eq!(o.onset(), 1.0);
   }
 }
 

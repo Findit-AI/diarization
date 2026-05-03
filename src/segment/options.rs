@@ -181,11 +181,17 @@ impl SegmentOptions {
   /// Builder: set the sliding-window step in samples.
   ///
   /// # Panics
-  /// Panics if `v == 0`. Zero step would hang the streaming pump
-  /// (`schedule_ready_windows` would emit windows starting at 0
-  /// forever).
+  /// Panics if `v == 0` or `v > WINDOW_SAMPLES`. Zero step would hang
+  /// the streaming pump (`schedule_ready_windows` would emit windows
+  /// starting at 0 forever); `step > window` causes silent audio gaps
+  /// of `step - window` samples between consecutive chunks where no
+  /// segmentation is ever produced.
   pub const fn with_step_samples(mut self, v: u32) -> Self {
     assert!(v > 0, "step_samples must be > 0");
+    assert!(
+      v <= WINDOW_SAMPLES,
+      "step_samples must be <= WINDOW_SAMPLES (160_000)"
+    );
     self.step_samples = v;
     self
   }
@@ -244,9 +250,14 @@ impl SegmentOptions {
   /// Mutating: set the sliding-window step in samples.
   ///
   /// # Panics
-  /// Panics if `v == 0`. See [`with_step_samples`](Self::with_step_samples).
+  /// Panics if `v == 0` or `v > WINDOW_SAMPLES`.
+  /// See [`with_step_samples`](Self::with_step_samples).
   pub fn set_step_samples(&mut self, v: u32) -> &mut Self {
     assert!(v > 0, "step_samples must be > 0");
+    assert!(
+      v <= WINDOW_SAMPLES,
+      "step_samples must be <= WINDOW_SAMPLES (160_000)"
+    );
     self.step_samples = v;
     self
   }
@@ -315,6 +326,30 @@ mod tests {
   fn set_step_samples_zero_panics() {
     let mut o = SegmentOptions::default();
     o.set_step_samples(0);
+  }
+
+  /// `step > WINDOW_SAMPLES` causes silent gaps of `step - window`
+  /// samples between consecutive chunks (the regular-grid loop skips
+  /// past audio that the tail-anchor step does not re-cover). Reject
+  /// at the option boundary so this cannot reach the planner.
+  #[test]
+  #[should_panic(expected = "step_samples must be <= WINDOW_SAMPLES")]
+  fn with_step_samples_above_window_panics() {
+    let _ = SegmentOptions::default().with_step_samples(WINDOW_SAMPLES + 1);
+  }
+
+  #[test]
+  #[should_panic(expected = "step_samples must be <= WINDOW_SAMPLES")]
+  fn set_step_samples_above_window_panics() {
+    let mut o = SegmentOptions::default();
+    o.set_step_samples(WINDOW_SAMPLES + 1);
+  }
+
+  /// Boundary: step == WINDOW_SAMPLES is a valid no-overlap config.
+  #[test]
+  fn step_equal_to_window_ok() {
+    let o = SegmentOptions::default().with_step_samples(WINDOW_SAMPLES);
+    assert_eq!(o.step_samples(), WINDOW_SAMPLES);
   }
 
   //: hysteresis threshold setters reject invalid

@@ -53,3 +53,9 @@ pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
 pub use owned::{OwnedDiarizationPipeline, OwnedPipelineOptions, SLOTS_PER_CHUNK};
+
+/// Reused by [`crate::streaming::offline_diarizer`] for the same
+/// onset-range validation it performs on its
+/// [`OwnedPipelineOptions`]-derived config.
+#[cfg(feature = "ort")]
+pub(crate) use owned::check_onset;

@@ -90,7 +90,7 @@ pub enum StreamingError {
 }
 
 /// Specific shape-violation reasons for [`StreamingError::Shape`].
-#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq)]
 pub enum StreamingShapeError {
   #[error("voice range samples is empty")]
   EmptyVoiceRange,
@@ -98,6 +98,20 @@ pub enum StreamingShapeError {
   ZeroStepSamples,
   #[error("all accumulated voice ranges are empty")]
   AllRangesEmpty,
+  /// `step_samples` exceeds `WINDOW_SAMPLES`. The chunk planner uses
+  /// `start = c * step` and stops after
+  /// `(samples.len() - win).div_ceil(step) + 1` chunks; with `step >
+  /// win`, samples in `[win .. step)` per chunk are never segmented
+  /// or embedded — silent data loss returning `Ok(_)` with missing
+  /// speech. Same constraint as `OwnedPipelineOptions::with_step_samples`.
+  #[error("step_samples ({step}) must not exceed WINDOW_SAMPLES ({window})")]
+  StepSamplesExceedsWindow { step: u32, window: u32 },
+  /// `onset` is outside the documented `(0.0, 1.0]` range. Same
+  /// constraint as `OwnedPipelineOptions::with_onset`. The hard 0/1
+  /// segmentation mask `seg >= onset` degenerates: NaN/`> 1.0` makes
+  /// every frame inactive, `<= 0.0` makes every frame active.
+  #[error("onset ({onset}) must be finite in (0.0, 1.0]")]
+  OnsetOutOfRange { onset: f32 },
 }
 
 /// Configuration for [`StreamingOfflineDiarizer`].
@@ -250,6 +264,22 @@ impl StreamingOfflineDiarizer {
     let step = cfg.step_samples() as usize;
     if step == 0 {
       return Err(StreamingShapeError::ZeroStepSamples.into());
+    }
+    // Defense-in-depth: `OwnedPipelineOptions::with_step_samples`
+    // panics on > WINDOW_SAMPLES, but serde-deserialized configs
+    // bypass that path. See StreamingShapeError::StepSamplesExceedsWindow.
+    if step > win {
+      return Err(
+        StreamingShapeError::StepSamplesExceedsWindow {
+          step: cfg.step_samples(),
+          window: WINDOW_SAMPLES,
+        }
+        .into(),
+      );
+    }
+    // Same defense-in-depth for onset.
+    if !crate::offline::check_onset(cfg.onset()) {
+      return Err(StreamingShapeError::OnsetOutOfRange { onset: cfg.onset() }.into());
     }
 
     let num_chunks = if samples.len() <= win {

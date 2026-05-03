@@ -4,7 +4,9 @@
 //! `src/hungarian/parity_tests.rs`. This module covers smaller invariants
 //! that should hold for any input.
 
-use crate::cluster::hungarian::{Error, UNMATCHED, constrained_argmax};
+use crate::cluster::hungarian::{
+  Error, MAX_COST_MAGNITUDE, UNMATCHED, constrained_argmax, error::NonFiniteError,
+};
 use nalgebra::DMatrix;
 
 /// Run a single chunk through the batched API. Most unit tests work on
@@ -219,6 +221,65 @@ fn rejects_when_all_entries_non_finite() {
   let cost = DMatrix::<f64>::from_element(2, 2, f64::NAN);
   let result = one(cost);
   assert!(matches!(result, Err(Error::NonFinite(_))), "got {result:?}");
+}
+
+/// Finite-but-huge cost magnitudes overflow the solver's internal
+/// `lx + ly - weight` accumulator after one or two additions. Values
+/// like `f64::MAX` (which numpy's `nan_to_num` substitutes for `±inf`)
+/// reintroduce the exact failure mode the upstream `±inf` guard
+/// prevents. Reject at the boundary with a typed error instead of
+/// letting the solver wedge.
+#[test]
+fn rejects_finite_value_above_max_cost_magnitude() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
+  cost[(0, 1)] = f64::MAX;
+  let result = one(cost);
+  assert!(
+    matches!(
+      result,
+      Err(Error::NonFinite(NonFiniteError::WeightOutOfBounds { .. })),
+    ),
+    "got {result:?}"
+  );
+}
+
+#[test]
+fn rejects_negative_finite_below_neg_max_cost_magnitude() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
+  cost[(1, 0)] = f64::MIN;
+  let result = one(cost);
+  assert!(
+    matches!(
+      result,
+      Err(Error::NonFinite(NonFiniteError::WeightOutOfBounds { .. })),
+    ),
+    "got {result:?}"
+  );
+}
+
+/// At the boundary: |MAX_COST_MAGNITUDE| accepted; just over rejected.
+#[test]
+fn accepts_value_at_max_cost_magnitude() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
+  cost[(0, 0)] = MAX_COST_MAGNITUDE;
+  cost[(1, 1)] = -MAX_COST_MAGNITUDE;
+  let result = one(cost);
+  assert!(result.is_ok(), "got {result:?}");
+}
+
+#[test]
+fn rejects_value_just_above_max_cost_magnitude() {
+  let mut cost = DMatrix::<f64>::from_element(2, 2, 0.5);
+  // Smallest f64 strictly greater than MAX_COST_MAGNITUDE.
+  cost[(0, 1)] = f64::from_bits(MAX_COST_MAGNITUDE.to_bits() + 1);
+  let result = one(cost);
+  assert!(
+    matches!(
+      result,
+      Err(Error::NonFinite(NonFiniteError::WeightOutOfBounds { .. })),
+    ),
+    "got {result:?}"
+  );
 }
 
 // ── Tie-breaking invariants ─

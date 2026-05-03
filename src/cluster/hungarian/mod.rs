@@ -18,6 +18,7 @@ mod tests;
 mod parity_tests;
 
 pub use algo::{
-  ChunkAssignment, ChunkLayout, DefaultLayout, Segmentation3, UNMATCHED, constrained_argmax,
+  ChunkAssignment, ChunkLayout, DefaultLayout, MAX_COST_MAGNITUDE, Segmentation3, UNMATCHED,
+  constrained_argmax,
 };
 pub use error::Error;

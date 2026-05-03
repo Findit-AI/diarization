@@ -556,6 +556,16 @@ impl EmbedModel {
     if !frame_mask.iter().any(|&b| b) {
       return Err(Error::EmptyOrInactiveMask);
     }
+    // Backend-independent finite-input guard. ORT routes through
+    // `compute_full_fbank`, which itself rejects non-finite samples
+    // upfront. The tch path builds a tensor directly from
+    // `chunk_samples` and forwards it into TorchScript, where NaN
+    // either propagates to a corrupted-but-finite embedding (passes
+    // the post-output check) or surfaces as a backend-specific error.
+    // Reject at the boundary so both backends behave identically.
+    if chunk_samples.iter().any(|v| !v.is_finite()) {
+      return Err(Error::NonFiniteInput);
+    }
     let raw = self
       .backend
       .embed_chunk_with_frame_mask(chunk_samples, frame_mask)?;
@@ -923,5 +933,34 @@ mod tests {
     let mask = vec![false; crate::segment::FRAMES_PER_WINDOW];
     let r = model.embed_chunk_with_frame_mask(&samples, &mask);
     assert!(matches!(r, Err(Error::EmptyOrInactiveMask)), "got {r:?}");
+  }
+
+  /// NaN/inf samples must be rejected at the public boundary, before
+  /// backend dispatch. ORT routes through `compute_full_fbank` which
+  /// rejects non-finite samples upfront, but tch builds a tensor
+  /// directly from `chunk_samples` and lets TorchScript decide. The
+  /// boundary guard makes both backends behave identically and
+  /// prevents NaN-driven corruption from reaching the model.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_chunk_with_frame_mask_rejects_non_finite_samples() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let mut samples = vec![0.001f32; crate::segment::WINDOW_SAMPLES as usize];
+    samples[42] = f32::NAN;
+    let mask = vec![true; crate::segment::FRAMES_PER_WINDOW];
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
+
+    samples[42] = f32::INFINITY;
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
+
+    samples[42] = f32::NEG_INFINITY;
+    let r = model.embed_chunk_with_frame_mask(&samples, &mask);
+    assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
   }
 }

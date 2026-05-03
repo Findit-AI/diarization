@@ -44,7 +44,7 @@ pub enum Error {
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].
-#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq)]
 pub enum ShapeError {
   #[error("num_chunks must be at least 1")]
   ZeroNumChunks,
@@ -64,6 +64,22 @@ pub enum ShapeError {
   EmptySamples,
   #[error("step_samples must be > 0")]
   ZeroStepSamples,
+  /// `step_samples` exceeds `WINDOW_SAMPLES`. The owned/streaming
+  /// chunk planners use `start = c * step` and stop after
+  /// `(samples.len() - win).div_ceil(step) + 1` chunks; with `step >
+  /// win`, samples in `[win .. step)` per chunk are never segmented
+  /// or embedded — silent data loss returning `Ok(_)` with missing
+  /// speech. Reject at validation rather than letting it propagate.
+  #[error("step_samples ({step}) must not exceed WINDOW_SAMPLES ({window})")]
+  StepSamplesExceedsWindow { step: u32, window: u32 },
+  /// `onset` is outside the documented `(0.0, 1.0]` range. Hard
+  /// segmentations are 0/1; the per-frame mask `seg >= onset`
+  /// degenerates: with `onset > 1.0` no frame is active (empty
+  /// diarization), with `onset <= 0.0` even zero cells are active
+  /// (corrupted frame masks, embeddings, and counts). NaN turns
+  /// every comparison false and behaves like `onset > 1.0`.
+  #[error("onset ({onset}) must be finite in (0.0, 1.0]")]
+  OnsetOutOfRange { onset: f32 },
 }
 
 /// Inputs to [`diarize_offline`].

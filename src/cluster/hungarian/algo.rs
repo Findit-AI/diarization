@@ -45,6 +45,23 @@ use pathfinding::prelude::{Matrix, kuhn_munkres};
 /// `-2 * np.ones((num_chunks, num_speakers), dtype=np.int8)` initializer.
 pub const UNMATCHED: i32 = -2;
 
+/// Maximum allowed magnitude for any finite entry in a cost matrix
+/// passed to [`constrained_argmax`]. The `kuhn_munkres` solver
+/// (`pathfinding::kuhn_munkres`) accumulates `lx[i] + ly[j] -
+/// weight[i,j]` and adds label updates iteratively; values approaching
+/// `f64::MAX` overflow to `±inf` after one or two additions. Once an
+/// entry overflows, the solver can wedge or return a non-optimal
+/// assignment per the crate's own docs — exactly the failure mode the
+/// upstream `±inf` guard exists to prevent.
+///
+/// `1e15` is a documented safe range with O(150) decimal orders of
+/// headroom from `f64::MAX ≈ 1.8e308`. Production cosine distances are
+/// bounded by 2 and PLDA log-likelihoods by O(100), so any value
+/// beyond `1e15` indicates upstream corruption (decoder NaN-flooding,
+/// memory bit-flips, mis-loaded float32→float64 reinterpretation)
+/// rather than a legitimate cost matrix.
+pub const MAX_COST_MAGNITUDE: f64 = 1e15;
+
 // ── Sealed `ChunkLayout` trait + per-architecture marker types ───────────
 
 mod sealed {
@@ -176,17 +193,36 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
     }
   }
 
-  // Reject ±inf upfront. Numpy's `np.nan_to_num` substitutes them with
-  // `f64::MAX/MIN`, but feeding those values into `kuhn_munkres`'s
-  // accumulating slack arithmetic risks overflow into `±inf`/`NaN` and
-  // can wedge the solver per the crate's own docs. Production cosine
-  // distances are always finite, so `±inf` here indicates upstream
-  // corruption — surface a clear typed error rather than silently
-  // proceed with values that may panic the solver.
+  // Reject ±inf upfront, then bound the magnitude of finite entries so
+  // they cannot drive `kuhn_munkres`'s accumulating slack arithmetic
+  // into overflow.
+  //
+  // Numpy's `np.nan_to_num` substitutes ±inf with `f64::MAX/MIN`, but
+  // feeding those values into the solver's `lx + ly - weight` and
+  // label-update sums overflows to `±inf`/`NaN` after a single
+  // addition and can wedge the solver per the crate's own docs. The
+  // `MAX_COST_MAGNITUDE` bound (1e15) catches `f64::MAX`-class
+  // corruption while leaving O(150) decimal orders of headroom for
+  // any realistic cost matrix.
+  //
+  // Production cosine distances and PLDA log-likelihoods are always
+  // finite and bounded by O(100), so `±inf` or `|v| > 1e15` here
+  // indicates upstream corruption — surface a clear typed error
+  // rather than silently proceed with values that may wedge the
+  // solver.
   for chunk in chunks {
     for &v in chunk.iter() {
       if v.is_infinite() {
         return Err(crate::cluster::hungarian::error::NonFiniteError::InfInSoftClusters.into());
+      }
+      if v.is_finite() && v.abs() > MAX_COST_MAGNITUDE {
+        return Err(
+          crate::cluster::hungarian::error::NonFiniteError::WeightOutOfBounds {
+            value: v,
+            max: MAX_COST_MAGNITUDE,
+          }
+          .into(),
+        );
       }
     }
   }
