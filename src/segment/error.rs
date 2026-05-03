@@ -127,8 +127,44 @@ pub enum Error {
 }
 
 /// Specific reasons for [`Error::InvalidOptions`].
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, Copy, PartialEq)]
 pub enum InvalidOptionsReason {
   #[error("step_samples must be > 0")]
   ZeroStepSamples,
+  /// `step_samples` exceeds [`crate::segment::WINDOW_SAMPLES`]. The
+  /// `plan_starts` window scheduler advances `s += step` between
+  /// regular windows; with `step > window`, samples in
+  /// `[window..step)` per chunk are never scheduled, leaving the
+  /// final tail anchor as the only post-gap window. Reject at
+  /// construction so this cannot reach the planner via a serde-
+  /// deserialized config that bypassed
+  /// [`crate::segment::SegmentOptions::with_step_samples`].
+  #[error("step_samples ({step}) must not exceed WINDOW_SAMPLES ({window})")]
+  StepSamplesExceedsWindow { step: u32, window: u32 },
+  /// A hysteresis threshold (`onset_threshold` or `offset_threshold`)
+  /// is NaN/±inf or outside `[0.0, 1.0]`. The setters already enforce
+  /// this on the builder path; this variant catches serde-bypassed
+  /// configs that read the field directly. Without it,
+  /// `Hysteresis::new(NaN, _)` would build a sticky-silent state
+  /// machine and `Hysteresis::new(_, > 1.0)` would prevent a started
+  /// voice run from ever closing.
+  #[error("{which}_threshold ({value}) must be finite in [0.0, 1.0]")]
+  HysteresisThresholdOutOfRange {
+    /// Which threshold violated the bound: `"onset"` or `"offset"`.
+    which: &'static str,
+    /// The offending value (NaN/±inf is shown verbatim by `Display`).
+    value: f32,
+  },
+  /// `offset_threshold > onset_threshold`. The hysteresis state
+  /// machine requires the falling-edge threshold to be no stricter
+  /// than the rising-edge threshold, otherwise a started voice run
+  /// can never close. The setters enforce this; the variant exists
+  /// so serde-bypassed configs are also rejected at construction.
+  #[error("offset_threshold ({offset}) must be <= onset_threshold ({onset})")]
+  OffsetAboveOnset {
+    /// The configured offset threshold.
+    offset: f32,
+    /// The configured onset threshold.
+    onset: f32,
+  },
 }

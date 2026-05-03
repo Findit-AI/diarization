@@ -123,27 +123,67 @@ impl Segmenter {
   /// Construct a new segmenter. Consumes one process-wide generation token.
   ///
   /// # Panics
-  /// Panics if `opts.step_samples() == 0`. Zero step would hang the
-  /// streaming pump (). Defense-in-depth: the
-  /// option setters [`SegmentOptions::with_step_samples`] /
-  /// [`SegmentOptions::set_step_samples`] already panic on zero, so
-  /// this trip only fires if a future refactor constructs a
-  /// `SegmentOptions` value that bypasses those setters. Use
-  /// [`Self::try_new`] to surface this precondition as an
-  /// [`Error::InvalidOptions`] instead.
+  /// Panics if any [`SegmentOptions`] field violates its documented
+  /// contract: `step_samples == 0` or `> WINDOW_SAMPLES`, or any
+  /// hysteresis threshold outside `[0.0, 1.0]` (including NaN/±inf),
+  /// or `offset_threshold > onset_threshold`. Defense-in-depth: the
+  /// option setters already enforce these invariants on the builder
+  /// path, so this trip only fires when a `SegmentOptions` value was
+  /// constructed without them — most realistically, a serde-
+  /// deserialized config (`#[serde(default)]` fields are never
+  /// validated by the setters). Use [`Self::try_new`] to surface
+  /// these preconditions as [`Error::InvalidOptions`] instead.
   pub fn new(opts: SegmentOptions) -> Self {
     Self::try_new(opts).expect("Segmenter::new: invalid options; use try_new to handle")
   }
 
   /// Fallible variant of [`Self::new`]. Returns
-  /// [`Error::InvalidOptions`] when `opts.step_samples() == 0`;
-  /// otherwise identical output.
+  /// [`Error::InvalidOptions`] for any of the contract violations
+  /// described on [`Self::new`]; otherwise identical output.
   pub fn try_new(opts: SegmentOptions) -> Result<Self, Error> {
+    use crate::segment::error::InvalidOptionsReason;
     if opts.step_samples() == 0 {
-      return Err(crate::segment::error::InvalidOptionsReason::ZeroStepSamples.into());
+      return Err(InvalidOptionsReason::ZeroStepSamples.into());
+    }
+    if opts.step_samples() > WINDOW_SAMPLES {
+      return Err(
+        InvalidOptionsReason::StepSamplesExceedsWindow {
+          step: opts.step_samples(),
+          window: WINDOW_SAMPLES,
+        }
+        .into(),
+      );
     }
     let onset = opts.onset_threshold();
     let offset = opts.offset_threshold();
+    // `Hysteresis::new(NaN, _)` makes every `p >= threshold`
+    // comparison false (sticky-silent state machine);
+    // `Hysteresis::new(_, > 1.0)` makes the falling-edge unreachable
+    // so a started voice run never closes. Mirror the predicate the
+    // setters use so serde-bypassed configs cannot bypass it.
+    if !is_finite_in_unit_interval(onset) {
+      return Err(
+        InvalidOptionsReason::HysteresisThresholdOutOfRange {
+          which: "onset",
+          value: onset,
+        }
+        .into(),
+      );
+    }
+    if !is_finite_in_unit_interval(offset) {
+      return Err(
+        InvalidOptionsReason::HysteresisThresholdOutOfRange {
+          which: "offset",
+          value: offset,
+        }
+        .into(),
+      );
+    }
+    // After NaN rejection above, both values are finite in [0,1] and
+    // `offset > onset` is well-defined.
+    if offset > onset {
+      return Err(InvalidOptionsReason::OffsetAboveOnset { offset, onset }.into());
+    }
     Ok(Self {
       opts,
       generation: GENERATION.fetch_add(1, Ordering::Relaxed),
@@ -693,6 +733,20 @@ impl Segmenter {
 fn duration_to_samples(d: core::time::Duration) -> u64 {
   let nanos = d.as_nanos();
   (nanos * SAMPLE_RATE_HZ as u128 / 1_000_000_000u128) as u64
+}
+
+/// `v` is finite (not NaN/±inf) and within `[0.0, 1.0]`. Mirrors the
+/// `check_hysteresis_threshold` predicate used by the option setters,
+/// hand-coded with `v == v` (NaN check) and direct `>=`/`<=` so it
+/// can be used in `Segmenter::try_new`'s runtime path. The setter
+/// path is `const fn` (which constrains how `is_finite` is phrased);
+/// this fn does not need to be `const`, but stays consistent with
+/// the same idiom for clarity.
+#[inline]
+fn is_finite_in_unit_interval(v: f32) -> bool {
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && (0.0..=1.0).contains(&v)
 }
 
 /// `total_frames = ceil(total_samples * FRAMES_PER_WINDOW / WINDOW_SAMPLES)`
@@ -1306,5 +1360,151 @@ mod tests {
       }
     }
     assert!(saw_scores, "no SpeakerScores emitted");
+  }
+
+  // ── try_new option validation (serde-bypass guards) ──────────────
+  //
+  // SegmentOptions::with_*/set_* enforce the contract on the builder
+  // path, but a #[serde] deserialize bypasses those entry points and
+  // can construct a SegmentOptions with bad values directly. These
+  // tests construct violating options manually and confirm that
+  // try_new rejects them with a typed error.
+
+  /// Build a SegmentOptions with a custom step bypassing the panic-
+  /// validating setter. Round-trips defaults through the public
+  /// API and then mutates the field via serde to avoid the assert.
+  ///
+  /// Without serde we cannot synthesize an out-of-range
+  /// SegmentOptions in stable Rust (the field is private and the
+  /// setters panic). The test gates on the `serde` feature.
+  #[cfg(feature = "serde")]
+  fn opts_from_json(json: &str) -> SegmentOptions {
+    serde_json::from_str(json).expect("deserialize SegmentOptions")
+  }
+
+  /// Helper: assert `try_new(opts)` returned an `Err` matching
+  /// `pat`. Uses `match` rather than `expect_err` because `Segmenter`
+  /// is not `Debug` (it owns large internal state we deliberately
+  /// don't expose for diagnostic dumps).
+  #[cfg(feature = "serde")]
+  fn assert_try_new_err<F>(opts: SegmentOptions, label: &str, check: F)
+  where
+    F: FnOnce(&Error) -> bool,
+  {
+    match Segmenter::try_new(opts) {
+      Ok(_) => panic!("try_new must reject {label}, got Ok"),
+      Err(e) => assert!(check(&e), "try_new returned wrong error for {label}: {e:?}"),
+    }
+  }
+
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_rejects_step_above_window_via_serde() {
+    use crate::segment::error::InvalidOptionsReason;
+    let json = format!(r#"{{"step_samples": {}}}"#, WINDOW_SAMPLES + 1);
+    assert_try_new_err(opts_from_json(&json), "step > WINDOW_SAMPLES", |e| {
+      matches!(
+        e,
+        Error::InvalidOptions(InvalidOptionsReason::StepSamplesExceedsWindow { .. })
+      )
+    });
+  }
+
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_rejects_zero_step_via_serde() {
+    use crate::segment::error::InvalidOptionsReason;
+    assert_try_new_err(opts_from_json(r#"{"step_samples": 0}"#), "step == 0", |e| {
+      matches!(
+        e,
+        Error::InvalidOptions(InvalidOptionsReason::ZeroStepSamples)
+      )
+    });
+  }
+
+  /// `is_finite_in_unit_interval` is the predicate `Segmenter::try_new`
+  /// uses to gate hysteresis thresholds against NaN/±inf and out-of-
+  /// `[0,1]` values. JSON cannot carry `NaN`, so we cannot exercise
+  /// that path via serde — covering the predicate directly is the
+  /// canonical alternative. Boundary cases (`< 0`, `> 1.0`) are
+  /// covered by the `serde`-driven tests that follow.
+  #[test]
+  fn is_finite_in_unit_interval_predicate() {
+    assert!(is_finite_in_unit_interval(0.0));
+    assert!(is_finite_in_unit_interval(0.5));
+    assert!(is_finite_in_unit_interval(1.0));
+    assert!(!is_finite_in_unit_interval(-0.001));
+    assert!(!is_finite_in_unit_interval(1.001));
+    assert!(!is_finite_in_unit_interval(f32::NAN));
+    assert!(!is_finite_in_unit_interval(f32::INFINITY));
+    assert!(!is_finite_in_unit_interval(f32::NEG_INFINITY));
+  }
+
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_rejects_above_one_onset_via_serde() {
+    use crate::segment::error::InvalidOptionsReason;
+    assert_try_new_err(
+      opts_from_json(r#"{"onset_threshold": 1.5}"#),
+      "onset > 1.0",
+      |e| {
+        matches!(
+          e,
+          Error::InvalidOptions(InvalidOptionsReason::HysteresisThresholdOutOfRange {
+            which: "onset",
+            ..
+          })
+        )
+      },
+    );
+  }
+
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_rejects_negative_offset_via_serde() {
+    use crate::segment::error::InvalidOptionsReason;
+    assert_try_new_err(
+      opts_from_json(r#"{"offset_threshold": -0.1}"#),
+      "offset < 0.0",
+      |e| {
+        matches!(
+          e,
+          Error::InvalidOptions(InvalidOptionsReason::HysteresisThresholdOutOfRange {
+            which: "offset",
+            ..
+          })
+        )
+      },
+    );
+  }
+
+  /// `offset > onset` makes the falling-edge unreachable so a started
+  /// voice run never closes. Bypass the setter check via serde and
+  /// confirm try_new rejects the inverted ordering.
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_rejects_offset_above_onset_via_serde() {
+    use crate::segment::error::InvalidOptionsReason;
+    assert_try_new_err(
+      opts_from_json(r#"{"onset_threshold": 0.3, "offset_threshold": 0.6}"#),
+      "offset > onset",
+      |e| {
+        matches!(
+          e,
+          Error::InvalidOptions(InvalidOptionsReason::OffsetAboveOnset { .. })
+        )
+      },
+    );
+  }
+
+  /// At the boundary: step == WINDOW_SAMPLES is accepted.
+  #[cfg(feature = "serde")]
+  #[test]
+  fn try_new_accepts_step_at_window_boundary() {
+    let json = format!(r#"{{"step_samples": {WINDOW_SAMPLES}}}"#);
+    let opts = opts_from_json(&json);
+    let _ = Segmenter::try_new(opts).map_err(|e| {
+      panic!("step == WINDOW_SAMPLES must be accepted, got {e:?}");
+    });
   }
 }
