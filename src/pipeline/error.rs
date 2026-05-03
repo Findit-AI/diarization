@@ -80,6 +80,29 @@ pub enum ShapeError {
     /// 0-based row index that overflowed.
     row: usize,
   },
+  /// VBx EM `fa` is non-finite or non-positive. Mirrors
+  /// `crate::cluster::vbx::error::ShapeError::InvalidFa` but reported
+  /// from `assign_embeddings` so the pipeline rejects bad config
+  /// before the `num_train < 2` fast path skips VBx entirely. Without
+  /// this check, an invalid config can return `Ok` on sparse / silent
+  /// inputs and only fail once enough speech accumulates — making
+  /// option-validation data-dependent.
+  #[error("VBx fa must be a positive finite scalar")]
+  InvalidFa,
+  /// VBx EM `fb` is non-finite or non-positive. See `InvalidFa` for
+  /// the rationale (validate before the fast path).
+  #[error("VBx fb must be a positive finite scalar")]
+  InvalidFb,
+  /// `max_iters` exceeds the documented cap. Mirrors
+  /// `crate::cluster::vbx::error::ShapeError::MaxItersExceedsCap`,
+  /// pulled forward to the pipeline boundary.
+  #[error("VBx max_iters ({got}) exceeds cap ({cap})")]
+  MaxItersExceedsCap {
+    /// Configured max_iters.
+    got: usize,
+    /// Cap (`MAX_ITERS_CAP = 1_000`).
+    cap: usize,
+  },
 }
 
 /// Field that contained a non-finite value.

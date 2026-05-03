@@ -141,6 +141,36 @@ pub fn try_discrete_to_spans(
   if grid.len() != expected {
     return Err(ShapeError::GridLenMismatch);
   }
+  // Even with finite + positive raw fields, the per-frame timestamp
+  // computation `start + s * step + duration/2` can overflow to
+  // `±inf` for adversarial-but-finite inputs (e.g. `start = f64::MAX`,
+  // `duration = f64::MAX`). Validate the derived first/last centers
+  // and the duration midpoint are all finite before walking the
+  // grid. Linearity guarantees that all intermediate centers are
+  // finite if the endpoints are.
+  let center_offset = frame_duration / 2.0;
+  if !center_offset.is_finite() {
+    return Err(ShapeError::InvalidFramesTiming(
+      "duration/2 overflowed to non-finite",
+    ));
+  }
+  let first_center = frame_start + center_offset;
+  if !first_center.is_finite() {
+    return Err(ShapeError::InvalidFramesTiming(
+      "start + duration/2 overflowed to non-finite",
+    ));
+  }
+  if num_frames > 0 {
+    // `(num_frames - 1) as f64 * frame_step` is the largest stride
+    // we ever add; if `last_center` is finite, every intermediate
+    // center is finite by linearity.
+    let last_center = first_center + (num_frames - 1) as f64 * frame_step;
+    if !last_center.is_finite() {
+      return Err(ShapeError::InvalidFramesTiming(
+        "start + (num_frames-1)*step + duration/2 overflowed to non-finite",
+      ));
+    }
+  }
   // Validate every grid cell is finite AND binary (`0.0` or `1.0`).
   // The walk uses `cell != 0.0` as the active test, so NaN, ±inf, or
   // any non-binary finite value (e.g. `0.5` from a soft grid)
@@ -152,7 +182,6 @@ pub fn try_discrete_to_spans(
       return Err(ShapeError::GridNonBinaryCell { index: i, value: v });
     }
   }
-  let center_offset = frame_duration / 2.0;
   let mut spans: Vec<RttmSpan> = Vec::new();
   for k in 0..num_clusters {
     let mut per_cluster: Vec<(f64, f64)> = Vec::new(); // (start, end)

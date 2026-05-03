@@ -326,3 +326,152 @@ fn rejects_nan_in_segmentations() {
     "expected NonFinite(Segmentations), got {result:?}"
   );
 }
+
+/// Round-17 [medium]: hyperparameter validation must run BEFORE the
+/// `num_train < 2` fast path. Otherwise an invalid `threshold` /
+/// `fa` / `fb` / `max_iters` returns `Ok(_)` on sparse / silent
+/// input and only fails once enough speech accumulates — making
+/// option validation data-dependent.
+mod hyperparameter_validation_before_fast_path {
+  use super::*;
+  use crate::pipeline::error::ShapeError;
+
+  fn input_with_zero_train<'a>(
+    embeddings: &'a DMatrix<f64>,
+    segmentations: &'a [f64],
+    post_plda: &'a DMatrix<f64>,
+    phi: &'a DVector<f64>,
+  ) -> AssignEmbeddingsInput<'a> {
+    // Zero-length train indices => num_train == 0 => fast path active.
+    AssignEmbeddingsInput::new(
+      embeddings,
+      4, // num_chunks
+      3, // num_speakers
+      segmentations,
+      8, // num_frames
+      post_plda,
+      phi,
+      &[],
+      &[],
+    )
+  }
+
+  #[test]
+  fn rejects_inf_threshold_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi)
+      .with_threshold(f64::INFINITY);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::Shape(ShapeError::InvalidThreshold))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_zero_threshold_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input =
+      input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_threshold(0.0);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::Shape(ShapeError::InvalidThreshold))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_nan_fa_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input =
+      input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_fa(f64::NAN);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(r, Err(crate::pipeline::Error::Shape(ShapeError::InvalidFa))),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_negative_fb_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_fb(-0.5);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(r, Err(crate::pipeline::Error::Shape(ShapeError::InvalidFb))),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_zero_max_iters_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input =
+      input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_max_iters(0);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::Shape(ShapeError::ZeroMaxIters))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_max_iters_above_cap_even_on_fast_path() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi)
+      .with_max_iters(crate::cluster::vbx::MAX_ITERS_CAP + 1);
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::Shape(
+          ShapeError::MaxItersExceedsCap { .. }
+        ))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// Sanity: with valid hyperparameters, the `num_train < 2` fast
+  /// path still returns `Ok` (cluster 0 for every (chunk, speaker)).
+  #[test]
+  fn fast_path_succeeds_with_valid_options() {
+    let embeddings = DMatrix::<f64>::from_element(4 * 3, 4, 0.5);
+    let segmentations = vec![0.5; 4 * 8 * 3];
+    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let phi = DVector::<f64>::from_element(4, 1.0);
+    let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi);
+    let r = assign_embeddings(&input).expect("fast path with defaults must succeed");
+    assert_eq!(r.len(), 4);
+    for row in r.iter() {
+      assert_eq!(*row, [0_i32; 3]);
+    }
+  }
+}

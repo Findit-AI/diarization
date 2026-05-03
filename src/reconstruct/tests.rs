@@ -659,6 +659,70 @@ fn try_discrete_to_spans_rejects_negative_grid_cell() {
   );
 }
 
+/// Round-17 [medium]: smoothing must use lexicographic
+/// `(eff desc, raw desc, index asc)` so the exact-eps boundary still
+/// follows the documented "raw fallback when gap >= eps" rule. With
+/// prev cluster 0 at activation 0.0, cluster 1 at 1.0, and `eps =
+/// 1.0`, both effective scores equal 1.0 (cluster 0 gets the +eps
+/// boost). Without the secondary `raw desc` tie-break, stable index
+/// order keeps cluster 0 selected even though its raw activation is
+/// strictly lower. The lexicographic key picks cluster 1.
+#[test]
+fn reconstruct_smoothing_resolves_exact_eps_boundary_to_higher_raw() {
+  use crate::reconstruct::Error;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, 1.0);
+  // Frame 0: activations [1.0, 0.0] → cluster 0 wins, prev_selected = {0}.
+  // Frame 1: activations [0.0, 1.0] → eps-boundary case. Lexicographic
+  //          key: eff(0)=0+1=1, eff(1)=1; tie → raw(1)=1 > raw(0)=0;
+  //          cluster 1 wins.
+  let segmentations = vec![1.0_f64, 0.0, 0.0, 1.0];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
+  let count = vec![1u8, 1u8];
+  let input = ReconstructInput::new(
+    &segmentations,
+    1,
+    2,
+    2,
+    &hard_clusters,
+    &count,
+    2,
+    chunks_sw,
+    frames_sw,
+  )
+  .with_smoothing_epsilon(Some(1.0));
+  let r: Result<_, Error> = reconstruct(&input);
+  let grid = r.expect("reconstruct succeeds");
+  // num_clusters = 2 (max hard_cluster id + 1).
+  assert_eq!(grid.len(), 2 * 2);
+  // Frame 0: cluster 0 selected.
+  assert_eq!(grid[0], 1.0, "frame 0 cluster 0 must be selected");
+  assert_eq!(grid[1], 0.0);
+  // Frame 1: cluster 1 selected (higher raw activation at exact eps).
+  assert_eq!(
+    grid[2], 0.0,
+    "frame 1: raw fallback at eps boundary, cluster 0 must NOT be selected"
+  );
+  assert_eq!(grid[3], 1.0, "frame 1 cluster 1 must be selected");
+}
+
+/// Round-17 [medium]: derived timestamps must be finite. Adversarial
+/// timing like `start = f64::MAX, duration = f64::MAX` passes the
+/// raw-field finite + positive checks but overflows
+/// `start + duration/2` to `±inf`. The post-validation check on
+/// derived first/last centers catches it.
+#[test]
+fn try_discrete_to_spans_rejects_timing_overflow_in_derived_centers() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(f64::MAX, f64::MAX, 1.0);
+  let grid = vec![1.0_f32, 0.0];
+  let r = try_discrete_to_spans(&grid, 2, 1, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::InvalidFramesTiming(_))),
+    "got {r:?}"
+  );
+}
+
 /// Round-16 [high]: smoothing comparator must be transitive.
 /// Counterexample from the review: `eps = 0.1`, activations
 /// `[0.0, 0.06, 0.12]`, no previously-selected clusters. The old

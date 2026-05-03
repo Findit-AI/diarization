@@ -597,13 +597,25 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
       // finite-checked at the pipeline boundary, and `aggregated` is
       // a finite linear combination of those).
       sorted.sort_by(|&a, &b| {
+        let va_raw = aggregated[row_start + a];
+        let vb_raw = aggregated[row_start + b];
         let bias_a = if prev_selected.contains(&a) { eps } else { 0.0 };
         let bias_b = if prev_selected.contains(&b) { eps } else { 0.0 };
-        let va_eff = aggregated[row_start + a] + bias_a;
-        let vb_eff = aggregated[row_start + b] + bias_b;
-        // Descending: larger eff comes first. `total_cmp` is total.
-        // Stable tie-break by cluster index (sort_by is stable).
-        vb_eff.total_cmp(&va_eff)
+        let va_eff = va_raw + bias_a;
+        let vb_eff = vb_raw + bias_b;
+        // Lexicographic key: (eff desc, raw desc, index asc).
+        // Secondary `raw desc` resolves the exact-eps boundary (e.g.
+        // prev cluster 0 = 0.0, cluster 1 = 1.0, eps = 1.0): both
+        // effs equal 1.0, so eff alone falls back to stable index
+        // order and the previously-selected cluster wins — but the
+        // documented strict rule says gaps `>= eps` use raw
+        // activation, where cluster 1 (higher raw) should win. The
+        // secondary `raw desc` enforces that. Stable sort + index
+        // tie-break only fires when raw activations are also tied.
+        match vb_eff.total_cmp(&va_eff) {
+          std::cmp::Ordering::Equal => vb_raw.total_cmp(&va_raw),
+          other => other,
+        }
       });
     } else {
       sorted.sort_by(|&a, &b| {

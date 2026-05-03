@@ -320,6 +320,34 @@ pub fn assign_embeddings(
       return Err(NonFiniteField::Segmentations.into());
     }
   }
+  // Validate ALL clustering hyperparameters BEFORE the
+  // `num_train < 2` fast path. The fast path skips AHC + VBx
+  // entirely, so any validation deferred to those modules is
+  // data-dependent: an invalid `threshold`/`fa`/`fb`/`max_iters`
+  // returns `Ok(_)` on sparse / silent input and fails only once
+  // enough speech accumulates. Pulling the checks forward makes
+  // option-validation deterministic regardless of input data.
+  if !threshold.is_finite() || threshold <= 0.0 {
+    return Err(ShapeError::InvalidThreshold.into());
+  }
+  if !fa.is_finite() || fa <= 0.0 {
+    return Err(ShapeError::InvalidFa.into());
+  }
+  if !fb.is_finite() || fb <= 0.0 {
+    return Err(ShapeError::InvalidFb.into());
+  }
+  if max_iters == 0 {
+    return Err(ShapeError::ZeroMaxIters.into());
+  }
+  if max_iters > crate::cluster::vbx::MAX_ITERS_CAP {
+    return Err(
+      ShapeError::MaxItersExceedsCap {
+        got: max_iters,
+        cap: crate::cluster::vbx::MAX_ITERS_CAP,
+      }
+      .into(),
+    );
+  }
   // Pyannote one-cluster fast path (`clustering.py:588-594`): when
   // fewer than 2 active embeddings survive `filter_embeddings`,
   // pyannote skips AHC/VBx entirely and returns
@@ -335,12 +363,6 @@ pub fn assign_embeddings(
         .map(|_| [0_i32; MAX_SPEAKER_SLOTS as usize])
         .collect(),
     );
-  }
-  if !(0.0..=f64::MAX).contains(&threshold) || !threshold.is_finite() || threshold <= 0.0 {
-    return Err(ShapeError::InvalidThreshold.into());
-  }
-  if max_iters == 0 {
-    return Err(ShapeError::ZeroMaxIters.into());
   }
 
   // ── Stage 2: AHC on active embeddings ──────────────────────────
