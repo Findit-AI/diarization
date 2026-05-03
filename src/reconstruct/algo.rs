@@ -366,29 +366,49 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // `±inf` or out of `i64` range, after which `as i64` is
   // unspecified behavior (saturates on most archs but unspecified
   // by the Rust Reference) and `start_frame + f as i64` overflows
-  // i64 in debug. Validate the worst-case (largest `c`) here so the
-  // hot loop can run without per-iteration overflow checks.
+  // i64 in debug. Both endpoints (first and last chunk) need
+  // validation: with positive `chunks_sw.step` the largest `c`
+  // dominates the upper bound, but the FIRST chunk (`c = 0`) also
+  // pulls in `chunks_sw.start` directly. A finite very-negative
+  // `chunks_sw.start` paired with a large `step` makes the first
+  // normalized coord far below `i64::MIN/2` while the last is
+  // comfortably in range — so a single-endpoint check would miss
+  // the leading chunks and silently clip them to garbage indices.
+  // Bound the normalized frame index well within `i64` so adding
+  // `num_frames_per_chunk - 1` cannot overflow. Generous safety
+  // margin: `[i64::MIN/2, i64::MAX/2]`. Production timings produce
+  // values O(num_chunks) — never close to this bound.
   if num_chunks > 0 {
+    let frames_center_offset = 0.5 * frames_sw.duration;
+    let safe_lo = -(i64::MAX / 2) as f64;
+    let safe_hi = (i64::MAX / 2) as f64;
+    let normalize =
+      |t: f64| -> f64 { (t - frames_sw.start - frames_sw.duration / 2.0) / frames_sw.step };
+
+    // First chunk (c = 0). chunks_sw.start was already finite-checked
+    // by the per-window guard above, so first_t is safe to add.
+    let first_t = chunks_sw.start + frames_center_offset;
+    if !first_t.is_finite() {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+    let normalized_first = normalize(first_t);
+    if !normalized_first.is_finite() || !(safe_lo..=safe_hi).contains(&normalized_first) {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+
+    // Last chunk (c = num_chunks - 1). The `(num_chunks - 1) * step`
+    // multiply can itself overflow before the add.
     let last_chunk_offset = (num_chunks as f64 - 1.0) * chunks_sw.step;
     let last_chunk_start = chunks_sw.start + last_chunk_offset;
     if !last_chunk_start.is_finite() {
       return Err(TimingError::NonFiniteParameter.into());
     }
-    let frames_center_offset = 0.5 * frames_sw.duration;
     let last_t = last_chunk_start + frames_center_offset;
     if !last_t.is_finite() {
       return Err(TimingError::NonFiniteParameter.into());
     }
-    let normalized_last = (last_t - frames_sw.start - frames_sw.duration / 2.0) / frames_sw.step;
-    if !normalized_last.is_finite() {
-      return Err(TimingError::NonFiniteParameter.into());
-    }
-    // Bound the rounded frame index well within `i64` so adding
-    // `num_frames_per_chunk - 1` (an `i64` derived from a `usize`)
-    // cannot overflow. Use a generous safety margin: reject any
-    // value outside `[i64::MIN/2, i64::MAX/2]`. Production timings
-    // produce values O(num_chunks) — never close to this bound.
-    if !(-(i64::MAX / 2) as f64..=(i64::MAX / 2) as f64).contains(&normalized_last) {
+    let normalized_last = normalize(last_t);
+    if !normalized_last.is_finite() || !(safe_lo..=safe_hi).contains(&normalized_last) {
       return Err(TimingError::NonFiniteParameter.into());
     }
   }

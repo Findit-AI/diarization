@@ -754,6 +754,38 @@ fn reconstruct_rejects_chunks_sw_start_at_f64_max() {
   assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
 }
 
+/// Round-19 [high]: derived-timing guard must validate the FIRST
+/// chunk too, not only the last. With a very negative
+/// `chunks_sw.start = -1e200` and a large positive `chunks_sw.step
+/// = 1e198`, the LAST chunk normalized coordinate is comfortably
+/// in i64-safe range (≈ -1e201 / 0.0169 / 100 chunks), but the
+/// FIRST chunk's normalized coord is -1e200 / 0.0169 ≈ -6e201,
+/// well below `i64::MIN/2`. A single-endpoint guard would let this
+/// reach `closest_frame` and trigger UB on the `as i64` cast.
+#[test]
+fn reconstruct_rejects_negative_first_chunk_normalized_coord_in_range() {
+  use crate::reconstruct::Error;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  // chunks_sw: very negative start, large positive step.
+  let chunks_sw = SlidingWindow::new(-1e200, 5.0, 1e198);
+  let segmentations = vec![0.5_f64; 2 * 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]; 2];
+  let count = vec![1u8; 4];
+  let input = ReconstructInput::new(
+    &segmentations,
+    2,
+    4,
+    2,
+    &hard_clusters,
+    &count,
+    4,
+    chunks_sw,
+    frames_sw,
+  );
+  let r: Result<_, Error> = reconstruct(&input);
+  assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
+}
+
 /// Same threat shape: `chunks_sw.step = f64::MAX` overflows on the
 /// last chunk's start time. With `num_chunks = 2`, the second
 /// chunk's start = `chunks_sw.start + 1.0 * f64::MAX = +inf`.
