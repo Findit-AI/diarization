@@ -55,7 +55,7 @@ pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
 pub use owned::{OwnedDiarizationPipeline, OwnedPipelineOptions, SLOTS_PER_CHUNK};
 
 /// Reused by [`crate::streaming::offline_diarizer`] for the same
-/// onset-range validation it performs on its
-/// [`OwnedPipelineOptions`]-derived config.
+/// onset-range / min_duration_off / smoothing_epsilon validation it
+/// performs on its [`OwnedPipelineOptions`]-derived config.
 #[cfg(feature = "ort")]
-pub(crate) use owned::check_onset;
+pub(crate) use owned::{check_min_duration_off, check_onset, check_smoothing_epsilon};

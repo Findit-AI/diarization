@@ -54,6 +54,31 @@ pub(crate) const fn check_onset(v: f32) -> bool {
   not_nan && v > 0.0 && v <= 1.0
 }
 
+/// `const fn` predicate: `v` is finite and `>= 0` (f64 variant). Used
+/// for `min_duration_off`, which is a non-negative seconds quantity
+/// passed unchanged into RTTM span post-processing.
+#[inline]
+pub(crate) const fn check_min_duration_off(v: f64) -> bool {
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && v >= 0.0 && v != f64::INFINITY
+}
+
+/// `const fn` predicate: `v` is `None` or `Some(finite >= 0)` (f32
+/// variant). Used for the optional `smoothing_epsilon` knob; `None`
+/// disables smoothing (bit-exact pyannote argmax) and is always valid.
+#[inline]
+pub(crate) const fn check_smoothing_epsilon(v: Option<f32>) -> bool {
+  match v {
+    None => true,
+    Some(x) => {
+      #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+      let not_nan = !(x != x);
+      not_nan && x >= 0.0 && x != f32::INFINITY
+    }
+  }
+}
+
 /// Configuration for [`OwnedDiarizationPipeline`].
 ///
 /// Defaults match pyannote `speaker-diarization-community-1`:
@@ -217,16 +242,38 @@ impl OwnedPipelineOptions {
     self
   }
   /// Builder: span post-processing `min_duration_off` (seconds).
+  ///
+  /// # Panics
+  /// Panics if `v` is NaN/±inf or negative. RTTM span-merge consumes
+  /// this as a non-negative seconds quantity; `+inf` would merge every
+  /// same-cluster gap and `NaN` would silently disable the merge
+  /// (every comparison becomes false), both producing corrupted
+  /// spans without surfacing the misconfiguration.
   #[must_use]
   pub const fn with_min_duration_off(mut self, v: f64) -> Self {
+    assert!(
+      check_min_duration_off(v),
+      "min_duration_off must be finite and >= 0"
+    );
     self.min_duration_off = v;
     self
   }
   /// Builder: temporal smoothing epsilon. Pass `None` for bit-exact
   /// pyannote argmax behavior, `Some(0.1)` for `community-1` smoothed
   /// reconstruction.
+  ///
+  /// # Panics
+  /// Panics if `v` is `Some(NaN/±inf)` or `Some(< 0)`. The smoothing
+  /// step compares activation differences against this epsilon;
+  /// `Some(+inf)` collapses top-k selection onto stable index order,
+  /// `Some(NaN)` makes every comparison false, both silently breaking
+  /// reconstruction.
   #[must_use]
   pub const fn with_smoothing_epsilon(mut self, v: Option<f32>) -> Self {
+    assert!(
+      check_smoothing_epsilon(v),
+      "smoothing_epsilon must be None or Some(finite >= 0)"
+    );
     self.smoothing_epsilon = v;
     self
   }
@@ -310,6 +357,28 @@ impl OwnedDiarizationPipeline {
     // or `<= 0.0` (all-active → corrupted frame masks).
     if !check_onset(cfg.onset()) {
       return Err(crate::offline::algo::ShapeError::OnsetOutOfRange { onset: cfg.onset() }.into());
+    }
+    // Same defense-in-depth for `min_duration_off` and
+    // `smoothing_epsilon`. Both flow into reconstruction/RTTM
+    // generation; non-finite or out-of-range values silently corrupt
+    // span boundaries and top-k smoothing. See the predicates'
+    // doc-comments and the typed error variants for the failure
+    // modes each catches.
+    if !check_min_duration_off(cfg.min_duration_off()) {
+      return Err(
+        crate::offline::algo::ShapeError::MinDurationOffOutOfRange {
+          value: cfg.min_duration_off(),
+        }
+        .into(),
+      );
+    }
+    if !check_smoothing_epsilon(cfg.smoothing_epsilon()) {
+      return Err(
+        crate::offline::algo::ShapeError::SmoothingEpsilonOutOfRange {
+          value: cfg.smoothing_epsilon(),
+        }
+        .into(),
+      );
     }
 
     // ── Stage 1: chunked sliding-window segmentation ───────────────
@@ -576,6 +645,80 @@ mod option_validation_tests {
   fn with_onset_one_ok() {
     let o = OwnedPipelineOptions::new().with_onset(1.0);
     assert_eq!(o.onset(), 1.0);
+  }
+
+  // ── min_duration_off / smoothing_epsilon validation ──────────────
+
+  #[test]
+  fn check_min_duration_off_predicate() {
+    assert!(check_min_duration_off(0.0));
+    assert!(check_min_duration_off(0.5));
+    assert!(check_min_duration_off(1e10));
+    assert!(!check_min_duration_off(-0.0001));
+    assert!(!check_min_duration_off(f64::NAN));
+    assert!(!check_min_duration_off(f64::INFINITY));
+    assert!(!check_min_duration_off(f64::NEG_INFINITY));
+  }
+
+  #[test]
+  fn check_smoothing_epsilon_predicate() {
+    assert!(check_smoothing_epsilon(None));
+    assert!(check_smoothing_epsilon(Some(0.0)));
+    assert!(check_smoothing_epsilon(Some(0.1)));
+    assert!(check_smoothing_epsilon(Some(1e6)));
+    assert!(!check_smoothing_epsilon(Some(-0.001)));
+    assert!(!check_smoothing_epsilon(Some(f32::NAN)));
+    assert!(!check_smoothing_epsilon(Some(f32::INFINITY)));
+    assert!(!check_smoothing_epsilon(Some(f32::NEG_INFINITY)));
+  }
+
+  #[test]
+  #[should_panic(expected = "min_duration_off must be finite and >= 0")]
+  fn with_min_duration_off_nan_panics() {
+    let _ = OwnedPipelineOptions::new().with_min_duration_off(f64::NAN);
+  }
+
+  #[test]
+  #[should_panic(expected = "min_duration_off must be finite and >= 0")]
+  fn with_min_duration_off_inf_panics() {
+    let _ = OwnedPipelineOptions::new().with_min_duration_off(f64::INFINITY);
+  }
+
+  #[test]
+  #[should_panic(expected = "min_duration_off must be finite and >= 0")]
+  fn with_min_duration_off_negative_panics() {
+    let _ = OwnedPipelineOptions::new().with_min_duration_off(-0.5);
+  }
+
+  #[test]
+  #[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+  fn with_smoothing_epsilon_nan_panics() {
+    let _ = OwnedPipelineOptions::new().with_smoothing_epsilon(Some(f32::NAN));
+  }
+
+  #[test]
+  #[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+  fn with_smoothing_epsilon_inf_panics() {
+    let _ = OwnedPipelineOptions::new().with_smoothing_epsilon(Some(f32::INFINITY));
+  }
+
+  #[test]
+  #[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+  fn with_smoothing_epsilon_negative_panics() {
+    let _ = OwnedPipelineOptions::new().with_smoothing_epsilon(Some(-0.001));
+  }
+
+  /// Boundary: zero is allowed for both knobs.
+  #[test]
+  fn with_min_duration_off_zero_ok() {
+    let o = OwnedPipelineOptions::new().with_min_duration_off(0.0);
+    assert_eq!(o.min_duration_off(), 0.0);
+  }
+
+  #[test]
+  fn with_smoothing_epsilon_none_ok() {
+    let o = OwnedPipelineOptions::new().with_smoothing_epsilon(None);
+    assert_eq!(o.smoothing_epsilon(), None);
   }
 }
 

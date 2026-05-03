@@ -112,6 +112,15 @@ pub enum StreamingShapeError {
   /// every frame inactive, `<= 0.0` makes every frame active.
   #[error("onset ({onset}) must be finite in (0.0, 1.0]")]
   OnsetOutOfRange { onset: f32 },
+  /// `min_duration_off` is NaN/±inf or negative. Same constraint as
+  /// `OwnedPipelineOptions::with_min_duration_off`. Catches serde-
+  /// bypassed configs whose value reaches the run path unchecked.
+  #[error("min_duration_off ({value}) must be finite and >= 0")]
+  MinDurationOffOutOfRange { value: f64 },
+  /// `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`. Same
+  /// constraint as `OwnedPipelineOptions::with_smoothing_epsilon`.
+  #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
+  SmoothingEpsilonOutOfRange { value: Option<f32> },
 }
 
 /// Configuration for [`StreamingOfflineDiarizer`].
@@ -280,6 +289,22 @@ impl StreamingOfflineDiarizer {
     // Same defense-in-depth for onset.
     if !crate::offline::check_onset(cfg.onset()) {
       return Err(StreamingShapeError::OnsetOutOfRange { onset: cfg.onset() }.into());
+    }
+    if !crate::offline::check_min_duration_off(cfg.min_duration_off()) {
+      return Err(
+        StreamingShapeError::MinDurationOffOutOfRange {
+          value: cfg.min_duration_off(),
+        }
+        .into(),
+      );
+    }
+    if !crate::offline::check_smoothing_epsilon(cfg.smoothing_epsilon()) {
+      return Err(
+        StreamingShapeError::SmoothingEpsilonOutOfRange {
+          value: cfg.smoothing_epsilon(),
+        }
+        .into(),
+      );
     }
 
     let num_chunks = if samples.len() <= win {

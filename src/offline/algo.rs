@@ -80,6 +80,20 @@ pub enum ShapeError {
   /// every comparison false and behaves like `onset > 1.0`.
   #[error("onset ({onset}) must be finite in (0.0, 1.0]")]
   OnsetOutOfRange { onset: f32 },
+  /// `min_duration_off` is NaN/±inf or negative. RTTM span-merge
+  /// reads this as a non-negative seconds quantity; `+inf` merges
+  /// every same-cluster gap, `NaN` silently disables the merge
+  /// (every comparison becomes false), and negative values are
+  /// nonsensical. Catches serde-bypassed configs.
+  #[error("min_duration_off ({value}) must be finite and >= 0")]
+  MinDurationOffOutOfRange { value: f64 },
+  /// `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`. The
+  /// smoothing step compares activation differences against this
+  /// epsilon; `Some(+inf)` collapses top-k onto stable index order,
+  /// `Some(NaN)` makes every comparison false. `None` is the
+  /// pyannote-argmax bit-exact path and is always valid.
+  #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
+  SmoothingEpsilonOutOfRange { value: Option<f32> },
 }
 
 /// Inputs to [`diarize_offline`].

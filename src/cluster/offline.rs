@@ -71,6 +71,18 @@ pub fn cluster_offline(
   opts: &OfflineClusterOptions,
 ) -> Result<Vec<u64>, Error> {
   let n = validate_offline_input(embeddings, opts.target_speakers())?;
+  // Defense-in-depth: `OfflineClusterOptions::with_similarity_threshold`
+  // / `set_similarity_threshold` panic on out-of-range values, but a
+  // `#[serde(default)]` deserialize bypasses those entry points and
+  // can construct an `OfflineClusterOptions` whose `similarity_threshold`
+  // reads NaN/±inf or > 1.0 / < -1.0 directly from JSON. Both the N==2
+  // fast path (`sim >= threshold`) and agglomerative's stop distance
+  // (`1 - threshold`) silently produce wrong clusterings under such
+  // values — surface a typed error here before the algorithm runs.
+  let t = opts.similarity_threshold();
+  if !t.is_finite() || !(-1.0..=1.0).contains(&t) {
+    return Err(Error::InvalidSimilarityThreshold(t));
+  }
 
   // Fast paths (spec §5.5 step 0.1 / §5.6 step 0.1).
   if n == 1 {
@@ -332,5 +344,42 @@ mod tests {
        for this method (see OfflineMethod docs). If this assertion fails, \
        the threshold has been wired into spectral and the docs need updating."
     );
+  }
+
+  /// `OfflineClusterOptions::with_similarity_threshold` /
+  /// `set_similarity_threshold` panic on out-of-range values, but a
+  /// serde-deserialized `OfflineClusterOptions` can carry a NaN/inf or
+  /// outside-`[-1,1]` threshold directly. `cluster_offline` must
+  /// reject this at the boundary, before the N==2 fast path or
+  /// agglomerative stop-distance arithmetic silently produce wrong
+  /// clusterings.
+  #[cfg(feature = "serde")]
+  #[test]
+  fn cluster_offline_rejects_serde_bypassed_out_of_range_threshold() {
+    let opts: OfflineClusterOptions =
+      serde_json::from_str(r#"{"similarity_threshold": 2.0}"#).expect("deserialize");
+    let r = cluster_offline(&[unit(0), unit(1)], &opts);
+    assert!(
+      matches!(r, Err(Error::InvalidSimilarityThreshold(t)) if t == 2.0),
+      "got {r:?}"
+    );
+
+    let opts: OfflineClusterOptions =
+      serde_json::from_str(r#"{"similarity_threshold": -1.5}"#).expect("deserialize");
+    let r = cluster_offline(&[unit(0), unit(1)], &opts);
+    assert!(
+      matches!(r, Err(Error::InvalidSimilarityThreshold(t)) if t == -1.5),
+      "got {r:?}"
+    );
+  }
+
+  /// At the boundaries: `similarity_threshold == -1.0` and `== 1.0`
+  /// are accepted (degenerate but well-defined).
+  #[test]
+  fn cluster_offline_accepts_boundary_thresholds() {
+    let opts = OfflineClusterOptions::default().with_similarity_threshold(-1.0);
+    let _ = cluster_offline(&[unit(0), unit(1)], &opts).expect("threshold = -1.0 ok");
+    let opts = OfflineClusterOptions::default().with_similarity_threshold(1.0);
+    let _ = cluster_offline(&[unit(0), unit(1)], &opts).expect("threshold = 1.0 ok");
   }
 }

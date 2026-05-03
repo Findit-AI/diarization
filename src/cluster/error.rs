@@ -40,6 +40,17 @@ pub enum Error {
   #[error("eigendecomposition failed")]
   EigendecompositionFailed,
 
+  /// `OfflineClusterOptions::similarity_threshold` is NaN/±inf or
+  /// outside `[-1.0, 1.0]`. The setters enforce this on the builder
+  /// path; this variant catches serde-bypassed configs that read
+  /// directly into the field. The N==2 fast path uses the threshold
+  /// as `sim >= threshold`, and agglomerative uses it as `1 -
+  /// threshold` for the merge stop distance — out-of-range values
+  /// flip both decisions silently and produce plausible-but-wrong
+  /// clusterings.
+  #[error("similarity_threshold ({0}) must be finite in [-1.0, 1.0]")]
+  InvalidSimilarityThreshold(f32),
+
   /// Offline clustering input exceeds the dense-method size cap.
   ///
   /// Spectral and full-pairwise agglomerative clustering allocate dense
