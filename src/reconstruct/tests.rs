@@ -723,6 +723,63 @@ fn try_discrete_to_spans_rejects_timing_overflow_in_derived_centers() {
   );
 }
 
+/// Round-18 [high]: `reconstruct` must reject finite-but-adversarial
+/// `chunks_sw` / `frames_sw` timing whose DERIVED values overflow.
+/// `chunks_sw.start = f64::MAX` + non-zero `chunks_sw.step` makes
+/// `chunk_start_time` (which the chunk-to-frame loop computes) blow
+/// up to `+inf`, after which `closest_frame` rounds a non-finite
+/// f64 and casts to `i64` — UB by the Rust Reference even if it
+/// saturates on most archs. Validate the worst-case derived chunk
+/// time + normalized frame coordinate up-front.
+#[test]
+fn reconstruct_rejects_chunks_sw_start_at_f64_max() {
+  use crate::reconstruct::Error;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let chunks_sw = SlidingWindow::new(f64::MAX, 5.0, 1.0);
+  let segmentations = vec![0.5_f64; 2 * 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]; 2];
+  let count = vec![1u8; 4];
+  let input = ReconstructInput::new(
+    &segmentations,
+    2,
+    4,
+    2,
+    &hard_clusters,
+    &count,
+    4,
+    chunks_sw,
+    frames_sw,
+  );
+  let r: Result<_, Error> = reconstruct(&input);
+  assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
+}
+
+/// Same threat shape: `chunks_sw.step = f64::MAX` overflows on the
+/// last chunk's start time. With `num_chunks = 2`, the second
+/// chunk's start = `chunks_sw.start + 1.0 * f64::MAX = +inf`.
+#[test]
+fn reconstruct_rejects_chunks_sw_step_at_f64_max() {
+  use crate::reconstruct::Error;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, f64::MAX);
+  let segmentations = vec![0.5_f64; 2 * 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]; 2];
+  let count = vec![1u8; 4];
+  let input = ReconstructInput::new(
+    &segmentations,
+    2,
+    4,
+    2,
+    &hard_clusters,
+    &count,
+    4,
+    chunks_sw,
+    frames_sw,
+  );
+  let r: Result<_, Error> = reconstruct(&input);
+  assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
+}
+
 /// Round-16 [high]: smoothing comparator must be transitive.
 /// Counterexample from the review: `eps = 0.1`, activations
 /// `[0.0, 0.06, 0.12]`, no previously-selected clusters. The old

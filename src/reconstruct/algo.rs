@@ -354,6 +354,44 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
       return Err(TimingError::NonPositiveDurationOrStep.into());
     }
   }
+  // Validate the DERIVED timing values produced by the inner loop:
+  //   chunk_start_time = chunks_sw.start + (c as f64) * chunks_sw.step
+  //   center_offset    = 0.5 * frames_sw.duration
+  //   t                = chunk_start_time + center_offset
+  //   normalized       = (t - frames_sw.start - frames_sw.duration/2) / frames_sw.step
+  //   start_frame      = normalized.round() as i64
+  //   out_f            = start_frame + f (f in 0..num_frames_per_chunk)
+  //
+  // Adversarial-but-finite raw fields can drive any of these to
+  // `±inf` or out of `i64` range, after which `as i64` is
+  // unspecified behavior (saturates on most archs but unspecified
+  // by the Rust Reference) and `start_frame + f as i64` overflows
+  // i64 in debug. Validate the worst-case (largest `c`) here so the
+  // hot loop can run without per-iteration overflow checks.
+  if num_chunks > 0 {
+    let last_chunk_offset = (num_chunks as f64 - 1.0) * chunks_sw.step;
+    let last_chunk_start = chunks_sw.start + last_chunk_offset;
+    if !last_chunk_start.is_finite() {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+    let frames_center_offset = 0.5 * frames_sw.duration;
+    let last_t = last_chunk_start + frames_center_offset;
+    if !last_t.is_finite() {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+    let normalized_last = (last_t - frames_sw.start - frames_sw.duration / 2.0) / frames_sw.step;
+    if !normalized_last.is_finite() {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+    // Bound the rounded frame index well within `i64` so adding
+    // `num_frames_per_chunk - 1` (an `i64` derived from a `usize`)
+    // cannot overflow. Use a generous safety margin: reject any
+    // value outside `[i64::MIN/2, i64::MAX/2]`. Production timings
+    // produce values O(num_chunks) — never close to this bound.
+    if !(-(i64::MAX / 2) as f64..=(i64::MAX / 2) as f64).contains(&normalized_last) {
+      return Err(TimingError::NonFiniteParameter.into());
+    }
+  }
   // Reject all non-finite segmentation values (NaN and ±inf). Pyannote's
   // `Inference.aggregate` does `np.nan_to_num(score, nan=0.0)` and tracks
   // missingness via a parallel mask, but the realistic source of NaN is

@@ -7,7 +7,7 @@ use crate::{
   embed::EMBEDDING_DIM,
   pipeline::{AssignEmbeddingsInput, ChunkAssignment, assign_embeddings},
   plda::{PldaTransform, RawEmbedding},
-  reconstruct::{ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans, reconstruct},
+  reconstruct::{ReconstructInput, RttmSpan, SlidingWindow, reconstruct, try_discrete_to_spans},
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -632,18 +632,25 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   let discrete_diarization = reconstruct(&recon_input)?;
 
   // ── Stage 6: discrete diarization → RTTM spans ─────────────────
-  let spans = discrete_to_spans(
+  // Use the FALLIBLE variant: round-15/16/17 added typed validation
+  // (`MinDurationOffOutOfRange`, `InvalidFramesTiming`,
+  // `GridNonBinaryCell`) to `try_discrete_to_spans`. The infallible
+  // `discrete_to_spans` panics on those preconditions, but
+  // `diarize_offline` is a `Result`-returning public API — we must
+  // surface the same conditions as `Error::Reconstruct`, not unwind.
+  let spans = try_discrete_to_spans(
     &discrete_diarization,
     num_output_frames,
     num_clusters,
     frames_sw,
     min_duration_off,
-  );
+  )
+  .map_err(crate::reconstruct::Error::from)?;
 
-  // `discrete_to_spans` builds via `Vec::push` because span count is
-  // unknown a-priori; convert to `Arc<[RttmSpan]>` once at the
-  // boundary. This is a one-time O(num_spans) copy (typically <1000
-  // elements) — small price for the fan-out savings on every
+  // `try_discrete_to_spans` builds via `Vec::push` because span
+  // count is unknown a-priori; convert to `Arc<[RttmSpan]>` once at
+  // the boundary. This is a one-time O(num_spans) copy (typically
+  // <1000 elements) — small price for the fan-out savings on every
   // downstream `Arc::clone`.
   let spans: Arc<[RttmSpan]> = Arc::from(spans);
   Ok(OfflineOutput::new(
