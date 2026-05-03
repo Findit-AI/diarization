@@ -63,6 +63,15 @@ pub(crate) fn embed_unweighted(
       min: MIN_CLIP_SAMPLES as usize,
     });
   }
+  // Backend-independent finite-input guard. ORT routes through
+  // `compute_full_fbank` which rejects non-finite samples upfront,
+  // but the tch backend feeds `samples` directly into a TorchScript
+  // `Tensor::from_slice` and may return a corrupted-but-finite
+  // embedding that passes the post-output check. Mirrors the guard
+  // already in `EmbedModel::embed_chunk_with_frame_mask`.
+  if samples.iter().any(|v| !v.is_finite()) {
+    return Err(Error::NonFiniteInput);
+  }
   let mut sum = [0.0f32; EMBEDDING_DIM];
 
   if samples.len() <= EMBED_WINDOW_SAMPLES as usize {
@@ -121,6 +130,25 @@ pub(crate) fn embed_weighted_inner(
       len: samples.len(),
       min: MIN_CLIP_SAMPLES as usize,
     });
+  }
+  // Backend-independent finite-input guard on samples (mirrors
+  // `embed_unweighted`). tch backend forwards samples directly to
+  // TorchScript without an upstream finite check.
+  if samples.iter().any(|v| !v.is_finite()) {
+    return Err(Error::NonFiniteInput);
+  }
+  // Voice-probability weights must be finite AND in [0, 1]. NaN
+  // weights bypass the `total_weight < NORM_EPSILON` check (every
+  // comparison with NaN is false) and propagate into the per-window
+  // mul_add, poisoning the aggregated sum. Out-of-range finite
+  // weights (negative, > 1) produce a signed mixture that no longer
+  // represents a probability-weighted mean — the caller's contract
+  // is "voice probabilities", not arbitrary weights.
+  if voice_probs
+    .iter()
+    .any(|w| !w.is_finite() || *w < 0.0 || *w > 1.0)
+  {
+    return Err(Error::InvalidVoiceProbs);
   }
 
   let mut sum = [0.0f32; EMBEDDING_DIM];

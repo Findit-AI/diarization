@@ -228,6 +228,53 @@ fn rejects_nan_in_non_train_embedding_row() {
   );
 }
 
+/// A row of finite-but-very-large values can overflow the squared-norm
+/// accumulator (Σ v² → +∞) without any individual entry being non-
+/// finite. Stage 6 reads every row for cosine scoring; an overflowing
+/// non-train row would turn `dot(embedding, centroid)` into ±inf or
+/// NaN, after which Hungarian's nan_to_num substitution silently
+/// rewrites NaN to global nanmin and returns a plausible but wrong
+/// assignment. Reject with a typed `RowNormOverflow` error.
+#[test]
+fn rejects_finite_row_with_overflowing_norm() {
+  let num_chunks = 4;
+  let num_speakers = 3;
+  let embed_dim = 4;
+  let plda_dim = 4;
+  let num_frames = 8;
+  // |v|² > f64::MAX/4 → sum of 4 such values overflows to +inf.
+  let huge = 1e154_f64;
+  let mut embeddings = DMatrix::<f64>::from_element(num_chunks * num_speakers, embed_dim, 0.5);
+  // Corrupt a non-train row (train subset is first 2 rows).
+  for c in 0..embed_dim {
+    embeddings[(8, c)] = huge;
+  }
+  let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
+  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let phi = DVector::<f64>::from_element(plda_dim, 1.0);
+  let input = AssignEmbeddingsInput::new(
+    &embeddings,
+    num_chunks,
+    num_speakers,
+    &segmentations,
+    num_frames,
+    &post_plda,
+    &phi,
+    &[0usize, 1],
+    &[0usize, 1],
+  );
+  let result = assign_embeddings(&input);
+  assert!(
+    matches!(
+      result,
+      Err(crate::pipeline::Error::Shape(
+        crate::pipeline::error::ShapeError::RowNormOverflow { row: 8 }
+      ))
+    ),
+    "expected Shape(RowNormOverflow {{ row: 8 }}), got {result:?}"
+  );
+}
+
 // Removed in round 8: `assign_embeddings_with_simd` is gone. The
 // `use_simd` plumbing was deleted because:
 // - AHC pdist is scalar in production (`ahc_init` calls

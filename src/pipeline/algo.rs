@@ -290,9 +290,29 @@ pub fn assign_embeddings(
   // a non-train row would silently become a soft cost that
   // `constrained_argmax` rewrites to the global `nanmin` — yielding
   // a plausible-looking but wrong assignment with no surfaced error.
-  for v in embeddings.iter() {
-    if !v.is_finite() {
-      return Err(NonFiniteField::Embeddings.into());
+  //
+  // We also accumulate the per-row squared L2 norm and reject if it
+  // overflows to `+inf`. A row of finite-but-very-large values
+  // (`|v| > ~1e154` for `D=256`) silently produces `Σ v² = +inf`,
+  // and the per-element `is_finite()` check above will not catch it.
+  // Stage 6 then computes `dot(embedding, centroid)` per row via
+  // `ops::scalar::dot`; an overflowing row poisons cosine scoring with
+  // `inf` (rejected by Hungarian's `±inf` guard) or `NaN`
+  // (silently rewritten by `nan_to_num` to global `nanmin`, returning
+  // a plausible but wrong assignment). Mirrors `cluster::ahc`'s
+  // `RowNormOverflow` defense for the train subset, extended to the
+  // full matrix.
+  for r in 0..embeddings.nrows() {
+    let mut sq = 0.0f64;
+    for c in 0..embeddings.ncols() {
+      let v = embeddings[(r, c)];
+      if !v.is_finite() {
+        return Err(NonFiniteField::Embeddings.into());
+      }
+      sq += v * v;
+    }
+    if !sq.is_finite() {
+      return Err(ShapeError::RowNormOverflow { row: r }.into());
     }
   }
   for v in segmentations.iter() {

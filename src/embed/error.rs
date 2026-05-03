@@ -21,6 +21,16 @@ pub enum Error {
     weights_len: usize,
   },
 
+  /// `voice_probs` contains a NaN, ±inf, negative value, or value
+  /// `> 1.0`. Voice probabilities by contract live in `[0.0, 1.0]`
+  /// and must be finite. NaN entries bypass the `total_weight <
+  /// NORM_EPSILON` "all-silent" guard (every comparison with NaN is
+  /// false) and contaminate the per-window mul_add. Out-of-range
+  /// finite weights produce a signed-mixture aggregate that no longer
+  /// represents a probability-weighted mean.
+  #[error("voice_probs contains NaN/±inf/<0/>1; voice probabilities must be finite in [0.0, 1.0]")]
+  InvalidVoiceProbs,
+
   /// Rev-8: `keep_mask.len() != samples.len()` for `embed_masked`.
   #[error("keep_mask.len() = {mask_len} must equal samples.len() = {samples_len}")]
   MaskShapeMismatch { samples_len: usize, mask_len: usize },

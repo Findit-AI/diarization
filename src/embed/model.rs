@@ -963,4 +963,80 @@ mod tests {
     let r = model.embed_chunk_with_frame_mask(&samples, &mask);
     assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
   }
+
+  /// `embed`/`embed_with_meta` (high-level entry points routed through
+  /// `embed_unweighted`) must reject non-finite samples at the public
+  /// boundary, before backend dispatch. Same threat shape as
+  /// `embed_chunk_with_frame_mask`: ORT routes through fbank
+  /// (rejects), tch builds a tensor directly (corrupted-but-finite
+  /// embedding can pass post-output check).
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_rejects_non_finite_samples() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let mut samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+    samples[100] = f32::NAN;
+    let r = model.embed(&samples);
+    assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
+
+    samples[100] = f32::INFINITY;
+    let r = model.embed(&samples);
+    assert!(matches!(r, Err(Error::NonFiniteInput)), "got {r:?}");
+  }
+
+  /// `embed_weighted` must reject non-finite samples and voice_probs
+  /// outside `[0.0, 1.0]` (including NaN/inf weights). NaN weights
+  /// would bypass the `total_weight < NORM_EPSILON` "all-silent"
+  /// guard since every comparison with NaN is false.
+  #[test]
+  #[ignore = "requires WeSpeaker ResNet34-LM ONNX model"]
+  fn embed_weighted_rejects_invalid_inputs() {
+    let path = model_path();
+    if !path.exists() {
+      return;
+    }
+    let mut model = EmbedModel::from_file(&path).expect("load model");
+    let samples = vec![0.001f32; EMBED_WINDOW_SAMPLES as usize];
+
+    // NaN weight.
+    let mut probs = vec![0.5f32; samples.len()];
+    probs[200] = f32::NAN;
+    let r = model.embed_weighted(&samples, &probs);
+    assert!(matches!(r, Err(Error::InvalidVoiceProbs)), "NaN: got {r:?}");
+
+    // Negative weight.
+    probs[200] = -0.1;
+    let r = model.embed_weighted(&samples, &probs);
+    assert!(matches!(r, Err(Error::InvalidVoiceProbs)), "neg: got {r:?}");
+
+    // > 1 weight.
+    probs[200] = 1.5;
+    let r = model.embed_weighted(&samples, &probs);
+    assert!(
+      matches!(r, Err(Error::InvalidVoiceProbs)),
+      "above 1: got {r:?}"
+    );
+
+    // +inf weight.
+    probs[200] = f32::INFINITY;
+    let r = model.embed_weighted(&samples, &probs);
+    assert!(
+      matches!(r, Err(Error::InvalidVoiceProbs)),
+      "+inf: got {r:?}"
+    );
+
+    // Non-finite samples.
+    let probs = vec![0.5f32; samples.len()];
+    let mut bad_samples = samples.clone();
+    bad_samples[100] = f32::NAN;
+    let r = model.embed_weighted(&bad_samples, &probs);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "NaN sample: got {r:?}"
+    );
+  }
 }

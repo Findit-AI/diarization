@@ -65,6 +65,21 @@ pub enum ShapeError {
   InvalidThreshold,
   #[error("max_iters must be at least 1")]
   ZeroMaxIters,
+  /// Per-row squared-L2-norm of `embeddings` overflowed to `+inf`. The
+  /// per-element finite check rejects NaN/`±inf` entries, but a row of
+  /// finite-but-very-large values (`|v| > ~1e154` for `D=256`) still
+  /// produces `Σ v² = +inf`. Stage 6 reads every row for cosine
+  /// scoring; an overflowing non-train row turns
+  /// `dot(embedding, centroid)` into `inf`, which `constrained_argmax`
+  /// then either rejects (`±inf` guard) or rewrites silently
+  /// (`NaN → nanmin`) — the latter would yield a plausible but wrong
+  /// assignment. Reject upfront, mirroring `cluster::ahc`'s
+  /// `RowNormOverflow` defense for the train subset.
+  #[error("embeddings row {row} squared-norm overflow (sum of v*v exceeded f64::MAX)")]
+  RowNormOverflow {
+    /// 0-based row index that overflowed.
+    row: usize,
+  },
 }
 
 /// Field that contained a non-finite value.
