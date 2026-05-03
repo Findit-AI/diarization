@@ -13,7 +13,7 @@ pub enum Error {
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, Copy, PartialEq)]
 pub enum ShapeError {
   #[error("num_chunks must be at least 1")]
   ZeroNumChunks,
@@ -52,6 +52,29 @@ pub enum ShapeError {
   GridLenMismatch,
   #[error("num_frames * num_clusters overflows usize")]
   GridSizeOverflow,
+  /// `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`. The
+  /// per-frame top-k pass compares activation differences against
+  /// this epsilon; `Some(+inf)` collapses every comparison
+  /// (every pair is "within epsilon"), making selection fall back
+  /// to stable cluster index order rather than activation order.
+  /// `Some(NaN)` makes every comparison false. `None` is the bit-
+  /// exact pyannote argmax path and is always valid.
+  ///
+  /// Mirrors the same predicate the offline / streaming entrypoints
+  /// enforce, but checked at the lower-level `reconstruct` boundary
+  /// so direct callers cannot bypass it.
+  #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
+  SmoothingEpsilonOutOfRange { value: Option<f32> },
+  /// `min_duration_off` is NaN/±inf or negative. RTTM span-merge
+  /// reads this as a non-negative seconds quantity; `+inf` merges
+  /// every same-cluster gap, `NaN` silently disables merging
+  /// (every comparison becomes false), and negative values are
+  /// nonsensical. Catches direct callers of [`try_discrete_to_spans`]
+  /// that bypass the offline-entrypoint validation.
+  ///
+  /// [`try_discrete_to_spans`]: crate::reconstruct::try_discrete_to_spans
+  #[error("min_duration_off ({value}) must be finite and >= 0")]
+  MinDurationOffOutOfRange { value: f64 },
 }
 
 /// Field that contained a non-finite value.

@@ -100,6 +100,18 @@ pub fn try_discrete_to_spans(
   frames_sw: SlidingWindow,
   min_duration_off: f64,
 ) -> Result<Vec<RttmSpan>, ShapeError> {
+  // Boundary guard on `min_duration_off`. The merge step below skips
+  // when `min_duration_off <= 0.0`, so `NaN` and negative finite
+  // values silently disable the merge (every comparison with NaN is
+  // false). `+inf` satisfies `> 0.0` and merges every same-cluster
+  // gap. Direct callers of this public API would otherwise get
+  // corrupted span boundaries; the offline / streaming entrypoints
+  // already validate, this closes the lower-level public path.
+  if !crate::reconstruct::algo::check_min_duration_off(min_duration_off) {
+    return Err(ShapeError::MinDurationOffOutOfRange {
+      value: min_duration_off,
+    });
+  }
   let expected = num_frames
     .checked_mul(num_clusters)
     .ok_or(ShapeError::GridSizeOverflow)?;

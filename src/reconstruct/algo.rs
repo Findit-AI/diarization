@@ -89,6 +89,38 @@ impl SlidingWindow {
   }
 }
 
+/// `const fn` predicate: `v` is `None` or `Some(finite >= 0)` (f32).
+/// Mirrors `crate::offline::algo::check_smoothing_epsilon` — duplicated
+/// rather than imported because `reconstruct` does not depend on
+/// `offline` (it is the lower-level layer the offline orchestrator
+/// calls into). Hand-coded with `v == v` (NaN check) and explicit
+/// `!= INFINITY` so it remains `const` (`f32::is_finite` is not yet
+/// `const`).
+#[inline]
+const fn check_smoothing_epsilon(v: Option<f32>) -> bool {
+  match v {
+    None => true,
+    Some(x) => {
+      #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+      let not_nan = !(x != x);
+      not_nan && x >= 0.0 && x != f32::INFINITY
+    }
+  }
+}
+
+/// `const fn` predicate: `v` is finite and `>= 0` (f64). Mirrors
+/// `crate::offline::algo::check_min_duration_off`. See above for why
+/// it is duplicated rather than imported.
+///
+/// Exposed `pub(crate)` so [`crate::reconstruct::rttm::try_discrete_to_spans`]
+/// can apply the same check at its public boundary.
+#[inline]
+pub(crate) const fn check_min_duration_off(v: f64) -> bool {
+  #[allow(clippy::eq_op)] // intentional NaN check: NaN != NaN by IEEE 754.
+  let not_nan = !(v != v);
+  not_nan && v >= 0.0 && v != f64::INFINITY
+}
+
 /// Inputs to [`reconstruct`].
 #[derive(Debug, Clone)]
 pub struct ReconstructInput<'a> {
@@ -152,8 +184,19 @@ impl<'a> ReconstructInput<'a> {
   /// `None` = strict descending-activation argmax. `Some(eps)` =
   /// prefer the previous frame's selection when two clusters are
   /// within `eps` activation.
+  ///
+  /// # Panics
+  /// Panics if `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`.
+  /// `Some(+inf)` makes every activation pair "within epsilon" and
+  /// collapses top-k onto stable cluster index order; `Some(NaN)`
+  /// makes every comparison false. Mirrors the offline-entrypoint
+  /// contract checked by `crate::offline::diarize_offline`.
   #[must_use]
   pub const fn with_smoothing_epsilon(mut self, smoothing_epsilon: Option<f32>) -> Self {
+    assert!(
+      check_smoothing_epsilon(smoothing_epsilon),
+      "smoothing_epsilon must be None or Some(finite >= 0)"
+    );
     self.smoothing_epsilon = smoothing_epsilon;
     self
   }
@@ -234,6 +277,20 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
 
   use crate::reconstruct::error::{NonFiniteField, ShapeError, TimingError};
   // ── Boundary checks ────────────────────────────────────────────
+  // Defense-in-depth: `with_smoothing_epsilon` panics on out-of-range
+  // values, but a `ReconstructInput` constructed via direct field
+  // assignment (or any future serde wrapper) bypasses the setter.
+  // `+inf` collapses every "within epsilon" comparison and forces
+  // top-k onto stable cluster index order; `NaN` makes every
+  // comparison false. Surface a typed error before the sort.
+  if !check_smoothing_epsilon(smoothing_epsilon) {
+    return Err(
+      ShapeError::SmoothingEpsilonOutOfRange {
+        value: smoothing_epsilon,
+      }
+      .into(),
+    );
+  }
   if num_chunks == 0 {
     return Err(ShapeError::ZeroNumChunks.into());
   }

@@ -448,3 +448,108 @@ fn try_discrete_to_spans_rejects_dimension_overflow() {
   let r = try_discrete_to_spans(&grid, usize::MAX / 2 + 1, 4, frames_sw, 0.0);
   assert!(matches!(r, Err(ShapeError::GridSizeOverflow)), "got {r:?}");
 }
+
+/// `try_discrete_to_spans` must reject `min_duration_off = +inf`
+/// (would merge every same-cluster gap), `NaN` (silently disables
+/// merge), and negative finite values. Closes the public bypass for
+/// the offline-entry validation.
+#[test]
+fn try_discrete_to_spans_rejects_inf_min_duration_off() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, f64::INFINITY);
+  assert!(
+    matches!(r, Err(ShapeError::MinDurationOffOutOfRange { .. })),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_nan_min_duration_off() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, f64::NAN);
+  assert!(
+    matches!(r, Err(ShapeError::MinDurationOffOutOfRange { .. })),
+    "got {r:?}"
+  );
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_negative_min_duration_off() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let grid = vec![0.0_f32; 8];
+  let r = try_discrete_to_spans(&grid, 4, 2, frames_sw, -1.0);
+  assert!(
+    matches!(r, Err(ShapeError::MinDurationOffOutOfRange { .. })),
+    "got {r:?}"
+  );
+}
+
+/// `with_smoothing_epsilon` setter panics on out-of-range values
+/// (parity with `OwnedPipelineOptions`/`OfflineInput`).
+#[test]
+#[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+fn with_smoothing_epsilon_setter_panics_on_inf() {
+  let (_chunks_sw, frames_sw) = default_swins();
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, 1.0);
+  let segmentations = vec![0.5_f64; 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
+  let _ = ReconstructInput::new(
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+  )
+  .with_smoothing_epsilon(Some(f32::INFINITY));
+}
+
+#[test]
+#[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+fn with_smoothing_epsilon_setter_panics_on_nan() {
+  let (_chunks_sw, frames_sw) = default_swins();
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, 1.0);
+  let segmentations = vec![0.5_f64; 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
+  let _ = ReconstructInput::new(
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+  )
+  .with_smoothing_epsilon(Some(f32::NAN));
+}
+
+#[test]
+#[should_panic(expected = "smoothing_epsilon must be None or Some(finite >= 0)")]
+fn with_smoothing_epsilon_setter_panics_on_negative() {
+  let (_chunks_sw, frames_sw) = default_swins();
+  let chunks_sw = SlidingWindow::new(0.0, 5.0, 1.0);
+  let segmentations = vec![0.5_f64; 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]];
+  let _ = ReconstructInput::new(
+    &segmentations,
+    1,
+    4,
+    2,
+    &hard_clusters,
+    &[1u8; 4],
+    4,
+    chunks_sw,
+    frames_sw,
+  )
+  .with_smoothing_epsilon(Some(-0.001));
+}
