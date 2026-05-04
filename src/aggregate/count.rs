@@ -38,6 +38,21 @@ use std::sync::Arc;
 
 use crate::reconstruct::SlidingWindow;
 
+/// Hard cap on `num_output_frames` accepted by the fallible aggregate
+/// APIs. Without this, a caller can pass a tiny `per_chunk_value`
+/// tensor with a huge `num_output_frames` and hit the
+/// `vec![0.0_f64; num_output_frames]` allocation, which panics on
+/// capacity overflow (`n * 8 > isize::MAX`) or aborts on OOM —
+/// neither acceptable from a `Result`-returning API.
+///
+/// `1e8` frames at the pyannote community-1 frame_step of `0.016875 s`
+/// is ~`19.5 days` of audio. Real production diarization workloads
+/// are bounded by minutes-to-hours; this cap leaves multi-orders-of-
+/// magnitude headroom while preventing pathological `vec!` panics.
+/// `1e8 × 8 B = 800 MB` — bounded, recoverable, and well below the
+/// `isize::MAX` byte-size cliff.
+pub const MAX_OUTPUT_FRAMES: usize = 100_000_000;
+
 /// Errors returned by the fallible (`try_*`) variants of this module.
 ///
 /// The non-fallible counterparts ([`count_pyannote`] /
@@ -109,6 +124,21 @@ pub enum ShapeError {
      finite-but-extreme chunk_step / frame_step would saturate the cast"
   )]
   HammingDerivedTimingOutOfRange,
+  /// `num_output_frames` exceeds [`MAX_OUTPUT_FRAMES`]. The fallible
+  /// aggregate APIs allocate `vec![0.0_f64; num_output_frames]` (or
+  /// equivalent); a tiny `per_chunk_value` tensor combined with a
+  /// huge `num_output_frames` would panic the `vec!` on capacity
+  /// overflow or abort on OOM. Reject upfront and surface a typed
+  /// error from the `Result`-returning API.
+  ///
+  /// [`MAX_OUTPUT_FRAMES`]: crate::aggregate::MAX_OUTPUT_FRAMES
+  #[error("num_output_frames ({got}) exceeds MAX_OUTPUT_FRAMES ({max})")]
+  OutputFrameCountAboveMax {
+    /// The requested `num_output_frames`.
+    got: usize,
+    /// The hard cap (`MAX_OUTPUT_FRAMES`).
+    max: usize,
+  },
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -230,6 +260,19 @@ pub fn try_hamming_aggregate(
   }
   if !frame_step.is_finite() || frame_step <= 0.0 {
     return Err(ShapeError::InvalidHammingFrameStep.into());
+  }
+  // Cap output frame count to prevent allocation panics. Pyannote
+  // community-1 produces ~59 frames/sec, so `MAX_OUTPUT_FRAMES`
+  // covers ~19 days of audio — well above any realistic production
+  // workload, well below the `vec!` capacity-overflow cliff.
+  if num_output_frames > MAX_OUTPUT_FRAMES {
+    return Err(
+      ShapeError::OutputFrameCountAboveMax {
+        got: num_output_frames,
+        max: MAX_OUTPUT_FRAMES,
+      }
+      .into(),
+    );
   }
   let expected = num_chunks
     .checked_mul(num_frames_per_chunk)
@@ -362,9 +405,22 @@ pub fn try_num_output_frames_pyannote(
   if !frames_f.is_finite() || frames_f < 0.0 || frames_f >= usize::MAX as f64 {
     return Err(ShapeError::OutputFrameCountOverflow);
   }
-  (frames_f as usize)
+  let n = (frames_f as usize)
     .checked_add(1)
-    .ok_or(ShapeError::OutputFrameCountOverflow)
+    .ok_or(ShapeError::OutputFrameCountOverflow)?;
+  // Apply the same `MAX_OUTPUT_FRAMES` cap that `try_hamming_aggregate`
+  // enforces. `try_count_pyannote` allocates two `vec![0.0_f64; n]`
+  // scratch buffers from this value; without the cap, an extreme
+  // `chunk_duration / frame_step` would saturate the count to a
+  // multi-billion-element allocation that panics on capacity overflow
+  // or aborts on OOM.
+  if n > MAX_OUTPUT_FRAMES {
+    return Err(ShapeError::OutputFrameCountAboveMax {
+      got: n,
+      max: MAX_OUTPUT_FRAMES,
+    });
+  }
+  Ok(n)
 }
 
 /// Bit-exact pyannote `speaker_count`. Returns the per-output-frame
@@ -885,6 +941,43 @@ mod try_variant_tests {
       matches!(
         r,
         Err(Error::Shape(ShapeError::HammingDerivedTimingOutOfRange))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// Round-21 [high]: tiny `per_chunk_value` paired with a huge
+  /// `num_output_frames` would otherwise hit `vec![0.0_f64;
+  /// num_output_frames]` and panic on capacity overflow. The new
+  /// cap surfaces this as `OutputFrameCountAboveMax`.
+  #[test]
+  fn try_hamming_aggregate_rejects_num_output_frames_above_max() {
+    let per_chunk = vec![1.0_f64; 2]; // 1 chunk, 2 frames/chunk.
+    let r = try_hamming_aggregate(&per_chunk, 1, 2, 1.0, 0.0169, MAX_OUTPUT_FRAMES + 1);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::OutputFrameCountAboveMax { got, max }))
+          if got == MAX_OUTPUT_FRAMES + 1 && max == MAX_OUTPUT_FRAMES
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// `try_num_output_frames_pyannote` (used by `try_count_pyannote`)
+  /// also caps at `MAX_OUTPUT_FRAMES`. Without this, a tiny
+  /// segmentation tensor + extreme `chunk_duration / frame_step`
+  /// drives `count_pyannote`'s scratch allocation past safe bounds.
+  #[test]
+  fn try_num_output_frames_pyannote_rejects_above_max() {
+    // chunk_duration = 1e7 s, frame_step = 0.01 s → ~1e9 frames.
+    // Above MAX_OUTPUT_FRAMES (1e8), well below usize::MAX.
+    let r = try_num_output_frames_pyannote(1, 1e7, 1.0, 0.01);
+    assert!(
+      matches!(
+        r,
+        Err(ShapeError::OutputFrameCountAboveMax { got, max })
+          if got > MAX_OUTPUT_FRAMES && max == MAX_OUTPUT_FRAMES
       ),
       "got {r:?}"
     );

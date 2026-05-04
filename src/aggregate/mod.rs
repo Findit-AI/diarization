@@ -51,6 +51,7 @@ mod count;
 mod parity_tests;
 
 pub use count::{
-  CountTensor, Error, count_pyannote, hamming_aggregate, num_output_frames_pyannote,
-  try_count_pyannote, try_hamming_aggregate, try_num_output_frames_pyannote,
+  CountTensor, Error, MAX_OUTPUT_FRAMES, count_pyannote, hamming_aggregate,
+  num_output_frames_pyannote, try_count_pyannote, try_hamming_aggregate,
+  try_num_output_frames_pyannote,
 };
