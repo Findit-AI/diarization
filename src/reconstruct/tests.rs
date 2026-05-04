@@ -754,6 +754,40 @@ fn reconstruct_rejects_chunks_sw_start_at_f64_max() {
   assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
 }
 
+/// Round-22 [medium]: `try_discrete_to_spans` must reject empty
+/// grids and huge `num_clusters`. Without these, `num_frames *
+/// num_clusters == 0` makes any `num_clusters` pass the length
+/// check, and the per-cluster loop burns CPU producing no spans.
+#[test]
+fn try_discrete_to_spans_rejects_zero_num_frames() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let r = try_discrete_to_spans(&[], 0, 5, frames_sw, 0.0);
+  assert!(matches!(r, Err(ShapeError::ZeroNumFrames)), "got {r:?}");
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_zero_num_clusters() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let r = try_discrete_to_spans(&[], 4, 0, frames_sw, 0.0);
+  assert!(matches!(r, Err(ShapeError::ZeroNumClusters)), "got {r:?}");
+}
+
+#[test]
+fn try_discrete_to_spans_rejects_num_clusters_above_cap() {
+  use crate::reconstruct::error::ShapeError;
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let huge = (MAX_CLUSTER_ID as usize) + 100;
+  // Grid length = 4 * huge would be infeasible to allocate; the cap
+  // fires before the length check.
+  let r = try_discrete_to_spans(&[], 4, huge, frames_sw, 0.0);
+  assert!(
+    matches!(r, Err(ShapeError::TooManyClusters { got, max }) if got == huge && max == (MAX_CLUSTER_ID as usize) + 1),
+    "got {r:?}"
+  );
+}
+
 /// Round-19 [high]: derived-timing guard must validate the FIRST
 /// chunk too, not only the last. With a very negative
 /// `chunks_sw.start = -1e200` and a large positive `chunks_sw.step

@@ -243,6 +243,16 @@ pub fn try_hamming_aggregate(
   frame_step: f64,
   num_output_frames: usize,
 ) -> Result<Vec<f64>, Error> {
+  // `num_chunks == 0` makes `num_chunks * num_frames_per_chunk == 0`,
+  // so the length check below passes for `per_chunk_value == &[]`
+  // regardless of `num_frames_per_chunk`. Without this guard, a
+  // caller can pass `num_chunks = 0` + huge `num_frames_per_chunk`
+  // and reach the unconditional `vec![0.0; num_frames_per_chunk]`
+  // hamming-window allocation, panicking on capacity overflow or
+  // OOM-aborting the process from a `Result`-returning API.
+  if num_chunks == 0 {
+    return Err(ShapeError::ZeroNumChunks.into());
+  }
   // `num_frames_per_chunk == 0` underflows `(... - 1) as f64` below.
   // `num_frames_per_chunk == 1` makes `n_minus_1 == 0.0`, the hamming
   // formula divides by zero and emits a NaN window, then the
@@ -254,6 +264,19 @@ pub fn try_hamming_aggregate(
   // non-finite start_frame that saturates to `i64::MAX` after the cast.
   if num_frames_per_chunk < 2 {
     return Err(ShapeError::HammingNumFramesPerChunkBelowTwo.into());
+  }
+  // Cap `num_frames_per_chunk` at `MAX_OUTPUT_FRAMES` so the
+  // unconditional hamming-window allocation can't OOM either —
+  // pyannote's own per-chunk frame counts are `O(589)` for the
+  // community-1 model; the cap is well above any realistic value.
+  if num_frames_per_chunk > MAX_OUTPUT_FRAMES {
+    return Err(
+      ShapeError::OutputFrameCountAboveMax {
+        got: num_frames_per_chunk,
+        max: MAX_OUTPUT_FRAMES,
+      }
+      .into(),
+    );
   }
   if !chunk_step.is_finite() || chunk_step <= 0.0 {
     return Err(ShapeError::InvalidHammingChunkStep.into());
@@ -978,6 +1001,53 @@ mod try_variant_tests {
         r,
         Err(ShapeError::OutputFrameCountAboveMax { got, max })
           if got > MAX_OUTPUT_FRAMES && max == MAX_OUTPUT_FRAMES
+      ),
+      "got {r:?}"
+    );
+  }
+
+  /// Round-22 [high]: `num_chunks == 0` makes the length-product
+  /// shape check vacuously pass for any `num_frames_per_chunk`,
+  /// after which the unconditional hamming-window `vec!` allocation
+  /// blows up. Reject zero chunks before any allocation.
+  #[test]
+  fn try_hamming_aggregate_rejects_zero_num_chunks() {
+    let r = try_hamming_aggregate(&[], 0, 4, 1.0, 0.0169, 16);
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::ZeroNumChunks))),
+      "got {r:?}"
+    );
+  }
+
+  /// `num_frames_per_chunk` larger than `MAX_OUTPUT_FRAMES` would
+  /// blow up the hamming-window allocation even when num_chunks > 0
+  /// (the per_chunk_value length product makes it possible if the
+  /// caller passes a matching huge slice — defense-in-depth).
+  #[test]
+  fn try_hamming_aggregate_rejects_huge_num_frames_per_chunk() {
+    // We can't actually allocate `MAX_OUTPUT_FRAMES + 1` f64s in
+    // a per_chunk_value buffer for the test, so just check the
+    // boundary: `num_chunks=1` with `num_frames_per_chunk > MAX`.
+    // The length check matches if per_chunk_value is also huge,
+    // but our cap fires first.
+    let huge = MAX_OUTPUT_FRAMES + 1;
+    // 1-element slice, num_chunks=1, num_frames_per_chunk=huge: the
+    // length product is `huge` which won't match a 1-elem slice,
+    // so HammingPerChunkValueLenMismatch would fire — but our new
+    // cap fires before length check. Adjust: pass a per_chunk_value
+    // sized `1 * huge` is infeasible. Instead, pass num_chunks=1
+    // and a per_chunk_value length of `huge`... also infeasible.
+    // The realistic test is num_chunks=0 (covered above). For
+    // direct coverage of the cap, use a tiny num_chunks * huge
+    // num_frames_per_chunk that wouldn't allocate but where the
+    // length check would fail second:
+    let per_chunk = vec![0.0_f64; 4];
+    let r = try_hamming_aggregate(&per_chunk, 1, huge, 1.0, 0.0169, 16);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::OutputFrameCountAboveMax { got, max }))
+          if got == huge && max == MAX_OUTPUT_FRAMES
       ),
       "got {r:?}"
     );

@@ -97,6 +97,30 @@ pub enum ShapeError {
   /// corruption rather than a legitimate input to RTTM emission.
   #[error("grid contains non-binary value at index {index}: {value}")]
   GridNonBinaryCell { index: usize, value: f32 },
+  /// `try_discrete_to_spans` was called with `num_frames == 0`. The
+  /// `num_frames * num_clusters` product is zero in that case, so
+  /// the empty-grid length check passes for any `num_clusters` —
+  /// the per-cluster loop would then burn CPU running over a huge
+  /// `num_clusters` while producing no spans. Reject upfront.
+  ///
+  /// The full-pipeline `reconstruct` boundary already enforces
+  /// `num_output_frames > 0`; this variant is the lower-level
+  /// fallible RTTM API's equivalent.
+  #[error("num_frames must be at least 1 for try_discrete_to_spans")]
+  ZeroNumFrames,
+  /// `try_discrete_to_spans` was called with `num_clusters == 0`.
+  /// Equivalent precondition to `ZeroNumFrames`. Strict cluster-id
+  /// indexing in the per-cluster loop relies on `num_clusters >= 1`.
+  #[error("num_clusters must be at least 1 for try_discrete_to_spans")]
+  ZeroNumClusters,
+  /// `num_clusters` exceeds the documented cap of `MAX_CLUSTER_ID + 1
+  /// = 1024`. Pyannote's diarization pipeline emits ids bounded by
+  /// the alive cluster count after VBx (typically 1–4). Any value
+  /// past the cap is upstream corruption rather than a legitimate
+  /// input — and lets a caller of the public RTTM API drive an
+  /// unbounded per-cluster loop.
+  #[error("num_clusters ({got}) exceeds cap ({max} = MAX_CLUSTER_ID + 1)")]
+  TooManyClusters { got: usize, max: usize },
 }
 
 /// Field that contained a non-finite value.

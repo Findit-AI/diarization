@@ -112,6 +112,28 @@ pub fn try_discrete_to_spans(
       value: min_duration_off,
     });
   }
+  // Reject zero-frame grids and clamp `num_clusters` to the
+  // documented cap. Without these:
+  //   - `num_frames == 0` makes `num_frames * num_clusters == 0`
+  //     for any `num_clusters`, so an empty grid passes the length
+  //     check; the per-cluster loop then burns CPU for an unbounded
+  //     number of iterations producing no spans.
+  //   - `num_clusters > MAX_CLUSTER_ID + 1` is impossible to obtain
+  //     from a legitimate `reconstruct` output (which clamps cluster
+  //     ids), so any value past the cap is upstream corruption.
+  if num_frames == 0 {
+    return Err(ShapeError::ZeroNumFrames);
+  }
+  if num_clusters == 0 {
+    return Err(ShapeError::ZeroNumClusters);
+  }
+  let max_clusters = (crate::reconstruct::algo::MAX_CLUSTER_ID as usize) + 1;
+  if num_clusters > max_clusters {
+    return Err(ShapeError::TooManyClusters {
+      got: num_clusters,
+      max: max_clusters,
+    });
+  }
   // Validate the frame-level sliding-window timing. The downstream
   // span boundary computation `start + s * step + duration/2`
   // produces NaN or non-monotonic timestamps if any of these are
