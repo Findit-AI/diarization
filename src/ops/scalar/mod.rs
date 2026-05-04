@@ -35,4 +35,4 @@ mod pdist_euclidean;
 pub use axpy::{axpy, axpy_f32};
 pub use dot::dot;
 pub use lse::logsumexp_row;
-pub use pdist_euclidean::pdist_euclidean;
+pub use pdist_euclidean::{pair_count, pdist_euclidean, pdist_euclidean_into};

@@ -27,6 +27,7 @@ Cargo.lock
 !/models/wespeaker_resnet34_lm.onnx
 !/models/wespeaker_resnet34_lm.onnx.data
 **.claude/
+docs/
 
 # Spike-specific (kaldi-native-fbank parity)
 spikes/kaldi_fbank/python/.venv/

@@ -142,18 +142,33 @@ pub enum StreamingShapeError {
 }
 
 /// Configuration for [`StreamingOfflineDiarizer`].
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Not `Copy`: [`OwnedPipelineOptions`] now holds a `SpillOptions`
+/// value (heap-owned `Option<PathBuf>`).
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StreamingOfflineOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   diarization: OwnedPipelineOptions,
+  /// Spill backend configuration. Defaults to
+  /// [`crate::ops::spill::SpillOptions::default`]. Installed on the
+  /// process-global at the top of [`StreamingOfflineDiarizer::push_voice_range`]
+  /// and [`StreamingOfflineDiarizer::finalize`] so every transitive
+  /// [`crate::ops::spill::SpillVec::zeros`] call honors it.
+  ///
+  /// Not serialized: spill paths are deployment-specific and
+  /// `SpillOptions` itself does not implement `Serialize`/`Deserialize`.
+  #[cfg_attr(feature = "serde", serde(skip))]
+  spill_options: crate::ops::spill::SpillOptions,
 }
 
 impl StreamingOfflineOptions {
-  /// Construct with `community-1` diarization defaults.
+  /// Construct with `community-1` diarization defaults and the
+  /// default spill configuration.
   pub const fn new() -> Self {
     Self {
       diarization: OwnedPipelineOptions::new(),
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 
@@ -162,10 +177,31 @@ impl StreamingOfflineOptions {
     &self.diarization
   }
 
+  /// Borrow the spill backend configuration.
+  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+    &self.spill_options
+  }
+
   /// Builder: replace the diarization parameters.
+  ///
+  /// Not `const fn`: [`OwnedPipelineOptions`] now has a non-const
+  /// destructor through [`crate::ops::spill::SpillOptions`]'s `PathBuf`.
   #[must_use]
-  pub const fn with_diarization(mut self, diarization: OwnedPipelineOptions) -> Self {
+  pub fn with_diarization(mut self, diarization: OwnedPipelineOptions) -> Self {
     self.diarization = diarization;
+    self
+  }
+
+  /// Builder: replace the spill backend configuration.
+  #[must_use]
+  pub fn with_spill_options(mut self, opts: crate::ops::spill::SpillOptions) -> Self {
+    self.spill_options = opts;
+    self
+  }
+
+  /// Mutating: replace the spill backend configuration.
+  pub fn set_spill_options(&mut self, opts: crate::ops::spill::SpillOptions) -> &mut Self {
+    self.spill_options = opts;
     self
   }
 }
@@ -283,6 +319,10 @@ impl StreamingOfflineDiarizer {
     abs_start_sample: u64,
     samples: &[f32],
   ) -> Result<(), StreamingError> {
+    // Install the spill configuration on the process-global before
+    // any allocation. See `OwnedDiarizationPipeline::run` for the
+    // sticky-write tradeoff and multi-thread caveats.
+    crate::ops::spill::set_spill_options(self.options.spill_options.clone());
     let cfg = &self.options.diarization;
     if samples.is_empty() {
       return Err(StreamingShapeError::EmptyVoiceRange.into());
@@ -516,6 +556,10 @@ impl StreamingOfflineDiarizer {
   /// - All other errors propagate from `diarize_offline` /
   ///   `reconstruct`.
   pub fn finalize(&self, plda: &PldaTransform) -> Result<Arc<[DiarizedSpan]>, StreamingError> {
+    // Install the spill configuration on the process-global before
+    // any allocation in the global clustering / per-range
+    // reconstruct stages.
+    crate::ops::spill::set_spill_options(self.options.spill_options.clone());
     if self.ranges.is_empty() {
       return Ok(Arc::from([] as [DiarizedSpan; 0]));
     }

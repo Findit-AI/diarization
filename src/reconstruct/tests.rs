@@ -789,9 +789,9 @@ fn reconstruct_rejects_grid_size_above_max() {
   // Use MAX_CLUSTER_ID = 1023 to drive num_clusters_from_hard = 1024.
   use crate::reconstruct::MAX_CLUSTER_ID;
   let hard_clusters = vec![[0i32, MAX_CLUSTER_ID, UNMATCHED]; num_chunks];
-  // num_output_frames * 1024 > MAX_RECONSTRUCT_GRID_CELLS (1e8) →
-  // num_output_frames > ~98_000. Use 200_000 to be comfortably above.
-  let num_output_frames = 200_000;
+  // num_output_frames * 1024 > MAX_RECONSTRUCT_GRID_CELLS (4e8) →
+  // num_output_frames > ~390_000. Use 500_000 to be comfortably above.
+  let num_output_frames = 500_000;
   let count = vec![0u8; num_output_frames];
   let input = ReconstructInput::new(
     &segmentations,

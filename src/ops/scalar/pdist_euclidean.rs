@@ -27,18 +27,38 @@
 ///   the `n * d` shape check; matters on 32-bit and any time `n` is
 ///   large relative to pointer width.
 pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
+  let pair_count = pair_count(n);
+  let mut out = vec![0.0_f64; pair_count];
+  pdist_euclidean_into(rows, n, d, &mut out);
+  out
+}
+
+/// Same kernel as [`pdist_euclidean`], but writes into a caller-
+/// provided slice instead of allocating a `Vec`. Required by the
+/// AHC spill-buffer path: `crate::ops::spill::SpillVec<f64>` owns
+/// a `&mut [f64]` view that can route to either heap or
+/// file-backed mmap depending on `pair_count` and the configured
+/// [`SpillOptions`](crate::ops::spill::SpillOptions).
+///
+/// `out.len()` must equal `n * (n - 1) / 2`, matching the
+/// pdist-condensed contract used by `kodama::linkage`.
+///
+/// # Panics
+/// - `d < 1`.
+/// - `out.len() != n * (n - 1) / 2`.
+/// - `n * (n - 1)` overflows `usize`.
+pub fn pdist_euclidean_into(rows: &[f64], n: usize, d: usize, out: &mut [f64]) {
   assert!(d >= 1, "scalar::pdist_euclidean: d ({d}) must be >= 1");
   debug_assert_eq!(rows.len(), n * d, "pdist_euclidean: shape mismatch");
-  // `n * (n-1)` overflow check, independent of `n * d`. Result is the
-  // condensed output capacity; `/ 2` is safe (product is always even).
-  let pair_count = if n >= 2 {
-    n.checked_mul(n - 1)
-      .expect("scalar::pdist_euclidean: n * (n - 1) overflows usize")
-      / 2
-  } else {
-    0
-  };
-  let mut out = Vec::with_capacity(pair_count);
+  let pair_count = pair_count(n);
+  assert_eq!(
+    out.len(),
+    pair_count,
+    "scalar::pdist_euclidean_into: out.len() {} must equal pair_count {}",
+    out.len(),
+    pair_count,
+  );
+  let mut idx = 0usize;
   for i in 0..n {
     let row_i = &rows[i * d..(i + 1) * d];
     for j in (i + 1)..n {
@@ -72,8 +92,21 @@ pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
         sq = f64::mul_add(diff, diff, sq);
         k += 1;
       }
-      out.push(sq.sqrt());
+      out[idx] = sq.sqrt();
+      idx += 1;
     }
   }
-  out
+}
+
+/// Pair count for an `n`-row condensed pdist: `n * (n - 1) / 2`.
+/// Panics if `n * (n - 1)` overflows `usize`.
+#[inline]
+pub fn pair_count(n: usize) -> usize {
+  if n >= 2 {
+    n.checked_mul(n - 1)
+      .expect("scalar::pdist_euclidean: n * (n - 1) overflows usize")
+      / 2
+  } else {
+    0
+  }
 }

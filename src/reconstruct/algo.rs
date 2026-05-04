@@ -28,18 +28,19 @@ pub const MAX_CLUSTER_ID: i32 = 1023;
 pub const MAX_COUNT_PER_FRAME: u8 = 64;
 
 /// Hard upper bound on `num_output_frames * num_clusters` accepted by
-/// [`reconstruct`]. The function allocates `aggregated` and
-/// `agg_mask` (each `output_grid_size` cells of `f32` and `bool`),
-/// plus per-frame downstream buffers. Without this cap, a caller can
-/// pass `num_output_frames` in the millions and `num_clusters` near
-/// `MAX_CLUSTER_ID + 1 = 1024`, producing multi-GB allocations from a
-/// `Result`-returning API and aborting the process on OOM.
+/// [`reconstruct`]. The function allocates `aggregated`,
+/// `agg_mask`, `clustered`, and `clustered_mask` scratch buffers,
+/// each up to `output_grid_size` cells.
 ///
-/// `1e8` cells is `400 MB` of `f32` plus `100 MB` of `bool`, well
-/// above the realistic production envelope (`num_output_frames`
-/// bounded by the audio duration, `num_clusters` typically 1–4) but
-/// safely below the `vec!` capacity-overflow / OOM cliff.
-pub const MAX_RECONSTRUCT_GRID_CELLS: usize = 100_000_000;
+/// `4e8` cells is `1.6 GB` of `f32`/`f64` plus `400 MB` of `u8`
+/// mask, well above the realistic production envelope
+/// (`num_output_frames` bounded by audio duration, `num_clusters`
+/// typically 1–4). The big-allocation safety budget is delivered
+/// by `crate::ops::spill::SpillVec` — buffers above
+/// `SpillOptions::threshold_bytes` (default 256 MiB) are
+/// file-backed via mmap rather than heap, so the cap represents a
+/// soft upper bound on disk space rather than an OOM cliff.
+pub const MAX_RECONSTRUCT_GRID_CELLS: usize = 400_000_000;
 
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +158,11 @@ pub struct ReconstructInput<'a> {
   chunks_sw: SlidingWindow,
   frames_sw: SlidingWindow,
   smoothing_epsilon: Option<f32>,
+  /// Spill backend configuration. Installed on the process-global at
+  /// the top of [`reconstruct`] so the per-cluster grid + mask
+  /// [`crate::ops::spill::SpillVec::zeros`] calls honor it. Defaults
+  /// to [`crate::ops::spill::SpillOptions::default`].
+  spill_options: crate::ops::spill::SpillOptions,
 }
 
 impl<'a> ReconstructInput<'a> {
@@ -200,6 +206,7 @@ impl<'a> ReconstructInput<'a> {
       chunks_sw,
       frames_sw,
       smoothing_epsilon: None,
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 
@@ -221,6 +228,16 @@ impl<'a> ReconstructInput<'a> {
       "smoothing_epsilon must be None or Some(finite >= 0)"
     );
     self.smoothing_epsilon = smoothing_epsilon;
+    self
+  }
+
+  /// Set the spill backend configuration (builder).
+  ///
+  /// Not `const fn`: `SpillOptions` has a non-const destructor
+  /// (`Option<PathBuf>`).
+  #[must_use]
+  pub fn with_spill_options(mut self, spill_options: crate::ops::spill::SpillOptions) -> Self {
+    self.spill_options = spill_options;
     self
   }
 
@@ -264,6 +281,11 @@ impl<'a> ReconstructInput<'a> {
   pub const fn smoothing_epsilon(&self) -> Option<f32> {
     self.smoothing_epsilon
   }
+  /// Spill backend configuration. Installed on the process-global by
+  /// [`reconstruct`] before any allocation.
+  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+    &self.spill_options
+  }
 }
 
 /// Run pyannote's reconstruction.
@@ -285,6 +307,10 @@ impl<'a> ReconstructInput<'a> {
 /// - [`Error::Timing`] for non-finite or non-positive sliding-window
 ///   parameters.
 pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
+  // Install the spill configuration on the process-global before any
+  // allocation. Read separately because `spill_options` is non-Copy
+  // and would break the by-value scalar/reference destructure.
+  crate::ops::spill::set_spill_options(input.spill_options.clone());
   let &ReconstructInput {
     segmentations,
     num_chunks,
@@ -296,6 +322,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     chunks_sw,
     frames_sw,
     smoothing_epsilon,
+    ..
   } = input;
 
   use crate::reconstruct::error::{NonFiniteField, ShapeError, TimingError};
@@ -551,8 +578,33 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     .checked_mul(num_frames_per_chunk)
     .and_then(|n| n.checked_mul(num_clusters))
     .ok_or(ShapeError::ClusteredSizeOverflow)?;
-  let mut clustered = vec![0.0f64; cs_size];
-  let mut clustered_mask = vec![false; cs_size]; // true = valid (not NaN)
+  // Cap the clustered allocation against the same budget as the
+  // output grid. `clustered` is `f64` (8 B/cell) and `clustered_mask`
+  // is `bool` (1 B), so `cs_size > MAX_RECONSTRUCT_GRID_CELLS` would
+  // allocate >800 MB + 100 MB before the post-aggregation
+  // `output_grid_size` cap fires. Reject upfront to prevent the
+  // OOM-abort path Codex flagged.
+  if cs_size > MAX_RECONSTRUCT_GRID_CELLS {
+    return Err(
+      ShapeError::OutputGridTooLarge {
+        got: cs_size,
+        max: MAX_RECONSTRUCT_GRID_CELLS,
+      }
+      .into(),
+    );
+  }
+  // Spill-aware: `cs_size` reaches `MAX_RECONSTRUCT_GRID_CELLS = 1e8`
+  // (~800 MB f64 + 100 MB u8 mask) at the cap. Routing through
+  // `SpillVec` lets the allocation fall back to file-backed mmap
+  // above `SpillOptions::threshold_bytes` (default 256 MiB) instead
+  // of OOM-aborting. The mask migrates from `Vec<bool>` to
+  // `SpillVec<u8>` because `bool` is not `bytemuck::Pod`; we use
+  // `0u8` / `1u8` as the active flag (treated identically by the
+  // downstream `mask[idx] == 1` check).
+  let mut clustered = crate::ops::spill::SpillVec::<f64>::zeros(cs_size)?;
+  let mut clustered_mask = crate::ops::spill::SpillVec::<u8>::zeros(cs_size)?;
+  let clustered = clustered.as_mut_slice();
+  let clustered_mask = clustered_mask.as_mut_slice();
 
   for c in 0..num_chunks {
     for k_iter in 0..num_clusters_from_hard {
@@ -581,7 +633,7 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
         }
         let cs_idx = (c * num_frames_per_chunk + f) * num_clusters + k_iter;
         clustered[cs_idx] = max_act;
-        clustered_mask[cs_idx] = true;
+        clustered_mask[cs_idx] = 1;
       }
     }
   }
@@ -617,8 +669,14 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
       .into(),
     );
   }
-  let mut aggregated = vec![0.0f32; output_grid_size];
-  let mut agg_mask = vec![false; output_grid_size];
+  // Same spill rationale as `clustered`/`clustered_mask` above:
+  // `output_grid_size` reaches `MAX_RECONSTRUCT_GRID_CELLS` at the
+  // cap. `agg_mask` migrates from `Vec<bool>` to `SpillVec<u8>`
+  // (0/1 sentinel; `bytemuck::Pod` requirement).
+  let mut aggregated = crate::ops::spill::SpillVec::<f32>::zeros(output_grid_size)?;
+  let mut agg_mask = crate::ops::spill::SpillVec::<u8>::zeros(output_grid_size)?;
+  let aggregated = aggregated.as_mut_slice();
+  let agg_mask = agg_mask.as_mut_slice();
 
   for c in 0..num_chunks {
     let chunk_start_time = chunks_sw.start + (c as f64) * chunks_sw.step;
@@ -638,20 +696,20 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
       let out_f = out_f as usize;
       for k in 0..num_clusters_from_hard {
         let cs_idx = (c * num_frames_per_chunk + f) * num_clusters + k;
-        if !clustered_mask[cs_idx] {
+        if clustered_mask[cs_idx] == 0 {
           continue;
         }
         let v = clustered[cs_idx] as f32;
         let agg_idx = out_f * num_clusters + k;
         aggregated[agg_idx] += v;
-        agg_mask[agg_idx] = true;
+        agg_mask[agg_idx] = 1;
       }
     }
   }
   // Cells that never received a contribution → leave as 0.0
   // (pyannote uses `missing=0.0` for to_diarization).
   for (i, &m) in agg_mask.iter().enumerate() {
-    if !m {
+    if m == 0 {
       aggregated[i] = 0.0;
     }
   }

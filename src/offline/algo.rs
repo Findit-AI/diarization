@@ -145,6 +145,11 @@ pub struct OfflineInput<'a> {
   max_iters: usize,
   min_duration_off: f64,
   smoothing_epsilon: Option<f32>,
+  /// Spill backend configuration. Installed on the process-global at
+  /// the top of [`diarize_offline`] so every transitive
+  /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
+  /// to [`crate::ops::spill::SpillOptions::default`].
+  spill_options: crate::ops::spill::SpillOptions,
 }
 
 impl<'a> OfflineInput<'a> {
@@ -193,6 +198,7 @@ impl<'a> OfflineInput<'a> {
       max_iters: 20,
       min_duration_off: 0.0,
       smoothing_epsilon: None,
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 
@@ -259,6 +265,16 @@ impl<'a> OfflineInput<'a> {
     self
   }
 
+  /// Set the spill backend configuration (builder).
+  ///
+  /// Not `const fn`: `SpillOptions` has a non-const destructor
+  /// (`Option<PathBuf>`).
+  #[must_use]
+  pub fn with_spill_options(mut self, spill_options: crate::ops::spill::SpillOptions) -> Self {
+    self.spill_options = spill_options;
+    self
+  }
+
   /// Pre-PLDA WeSpeaker raw embeddings.
   pub const fn raw_embeddings(&self) -> &'a [f32] {
     self.raw_embeddings
@@ -322,6 +338,11 @@ impl<'a> OfflineInput<'a> {
   /// Optional smoothing epsilon for reconstruct.
   pub const fn smoothing_epsilon(&self) -> Option<f32> {
     self.smoothing_epsilon
+  }
+  /// Spill backend configuration. Installed on the process-global by
+  /// [`diarize_offline`] before any allocation.
+  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+    &self.spill_options
   }
 }
 
@@ -414,6 +435,11 @@ impl OfflineOutput {
 /// - [`Error::Reconstruct`] for non-finite segmentations or invalid
 ///   sliding-window timing.
 pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error> {
+  // Install the spill configuration on the process-global before any
+  // allocation. Done before the destructure so we can read the
+  // non-Copy `spill_options` field directly; `..` in the pattern
+  // ignores it for the by-value scalar/reference bindings below.
+  crate::ops::spill::set_spill_options(input.spill_options.clone());
   let &OfflineInput {
     raw_embeddings,
     num_chunks,
@@ -431,6 +457,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     max_iters,
     min_duration_off,
     smoothing_epsilon,
+    ..
   } = input;
 
   // ── Boundary checks ────────────────────────────────────────────
@@ -707,6 +734,7 @@ mod reconstruction_knob_validation_tests {
       max_iters: 20,
       min_duration_off,
       smoothing_epsilon,
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 

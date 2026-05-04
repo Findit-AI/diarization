@@ -66,7 +66,10 @@ use crate::offline::algo::{check_min_duration_off, check_smoothing_epsilon};
 /// Defaults match pyannote `speaker-diarization-community-1`:
 /// 1-second chunk step, 0.5 onset/offset binarization, threshold/Fa/Fb
 /// from the community-1 config.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: [`Self::spill_options`] is `Option<SpillOptions>` whose
+/// inner `Option<PathBuf>` heap-owns its directory string.
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OwnedPipelineOptions {
   #[cfg_attr(feature = "serde", serde(default = "default_step_samples"))]
@@ -85,6 +88,20 @@ pub struct OwnedPipelineOptions {
   min_duration_off: f64,
   #[cfg_attr(feature = "serde", serde(default = "default_smoothing_epsilon"))]
   smoothing_epsilon: Option<f32>,
+  /// Spill backend configuration. Defaults to
+  /// [`crate::ops::spill::SpillOptions::default`] (256 MiB heap
+  /// threshold, [`std::env::temp_dir`] spill directory).
+  /// [`OwnedDiarizationPipeline::run`] installs this on the
+  /// process-global via [`crate::ops::spill::set_spill_options`] at
+  /// entry, so every transitive [`crate::ops::spill::SpillVec::zeros`]
+  /// call honors it.
+  ///
+  /// Not serialized: spill paths are deployment-specific and the
+  /// `SpillOptions` type itself does not implement `Serialize` /
+  /// `Deserialize` (would require gating its `PathBuf` field
+  /// per-feature).
+  #[cfg_attr(feature = "serde", serde(skip))]
+  spill_options: crate::ops::spill::SpillOptions,
 }
 
 #[cfg(feature = "serde")]
@@ -117,7 +134,9 @@ const fn default_smoothing_epsilon() -> Option<f32> {
 }
 
 impl OwnedPipelineOptions {
-  /// Construct with `community-1` defaults.
+  /// Construct with `community-1` defaults. `spill_options` defaults
+  /// to [`crate::ops::spill::SpillOptions::new`] (256 MiB threshold,
+  /// [`std::env::temp_dir`] spill directory).
   pub const fn new() -> Self {
     Self {
       step_samples: 16_000, // 1 s — community-1 config
@@ -128,6 +147,7 @@ impl OwnedPipelineOptions {
       max_iters: 20,
       min_duration_off: 0.0,
       smoothing_epsilon: Some(0.1),
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 
@@ -164,6 +184,11 @@ impl OwnedPipelineOptions {
   /// Temporal smoothing epsilon for top-k reconstruction.
   pub const fn smoothing_epsilon(&self) -> Option<f32> {
     self.smoothing_epsilon
+  }
+  /// Spill backend configuration. Installed on the process-global at
+  /// the start of [`OwnedDiarizationPipeline::run`].
+  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+    &self.spill_options
   }
 
   // ── Builders ────────────────────────────────────────────────────
@@ -259,6 +284,21 @@ impl OwnedPipelineOptions {
     self.smoothing_epsilon = v;
     self
   }
+  /// Builder: replace the spill backend configuration.
+  ///
+  /// Not `const fn` because dropping the previous `SpillOptions`
+  /// runs `<PathBuf as Drop>::drop`, which is not const.
+  #[must_use]
+  pub fn with_spill_options(mut self, opts: crate::ops::spill::SpillOptions) -> Self {
+    self.spill_options = opts;
+    self
+  }
+  /// Mutating: replace the spill backend configuration. Same semantics
+  /// as [`Self::with_spill_options`].
+  pub fn set_spill_options(&mut self, opts: crate::ops::spill::SpillOptions) -> &mut Self {
+    self.spill_options = opts;
+    self
+  }
 }
 
 impl Default for OwnedPipelineOptions {
@@ -314,6 +354,18 @@ impl OwnedDiarizationPipeline {
     plda: &PldaTransform,
     samples: &[f32],
   ) -> Result<OfflineOutput, Error> {
+    // Install the spill configuration on the process-global before
+    // any allocation. Every transitive `SpillVec::zeros` call (AHC
+    // pdist, reconstruct grids, count buffers) reads
+    // `spill_options()` and picks heap vs. mmap accordingly.
+    //
+    // This write is sticky across calls: callers that customize
+    // `spill_options` for one run see the same value applied to
+    // subsequent runs unless they re-set it. Multi-threaded callers
+    // with differing `spill_options` race on the global; either set
+    // a stable global at startup and leave the field default, or
+    // externally synchronize.
+    crate::ops::spill::set_spill_options(self.options.spill_options().clone());
     let cfg = &self.options;
     if samples.is_empty() {
       return Err(crate::offline::algo::ShapeError::EmptySamples.into());

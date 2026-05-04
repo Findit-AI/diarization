@@ -10,6 +10,14 @@ pub enum Error {
   /// A NaN/`±inf` entry was found in the embeddings.
   #[error("ahc: non-finite value in {0}")]
   NonFinite(#[from] NonFiniteField),
+  /// Failed to allocate the condensed pdist buffer. On large
+  /// `num_train`, the buffer can exceed
+  /// `SpillOptions::threshold_bytes` and route through the file-
+  /// backed mmap path; surface tempfile / mmap failures here.
+  ///
+  /// [`SpillOptions::threshold_bytes`]: crate::ops::spill::SpillOptions::threshold_bytes
+  #[error("ahc: failed to allocate condensed pdist buffer: {0}")]
+  Spill(#[from] crate::ops::spill::SpillError),
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].

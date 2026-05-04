@@ -113,8 +113,18 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
   // forcing scalar here actually delivers cross-arch bit-equal AHC
   // partitions, with a one-shot cost on the order of a few ms on
   // the largest captured fixture (T=1004) — not user-perceptible.
-  let mut cond = crate::ops::scalar::pdist_euclidean(&normed_row_major, n, d);
-  let dend = linkage(&mut cond, n, Method::Centroid);
+  //
+  // The condensed buffer can hit ~1 GB at the documented production
+  // scale (`MAX_AHC_TRAIN = 16_000` → 128M f64 cells). Route through
+  // `SpillVec` so the allocation falls back to file-backed mmap
+  // above `SpillOptions::threshold_bytes` (default 256 MiB) instead
+  // of OOM-aborting from the heap path. `kodama::linkage` consumes
+  // the buffer as `&mut [f64]`, which `SpillVec::as_mut_slice`
+  // hands out for both backends without copying.
+  let pair_count = crate::ops::scalar::pair_count(n);
+  let mut cond = crate::ops::spill::SpillVec::<f64>::zeros(pair_count)?;
+  crate::ops::scalar::pdist_euclidean_into(&normed_row_major, n, d, cond.as_mut_slice());
+  let dend = linkage(cond.as_mut_slice(), n, Method::Centroid);
 
   Ok(fcluster_distance_remap(dend.steps(), n, threshold))
 }

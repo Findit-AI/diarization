@@ -116,6 +116,16 @@ kodama = "0.3"
 # buffer — allocation-free.
 itoa = "1"
 
+# Spill backend (round-28 of adversarial review): the AHC pdist /
+# reconstruct grid / aggregate frame buffers cross 256 MB on
+# pathological inputs. `SpillVec<T>` falls back to file-backed mmap
+# above the configurable threshold so the same inputs succeed at
+# the cost of disk I/O instead of OOM-aborting the
+# `Result`-returning pipeline. See `src/ops/spill.rs`.
+memmapix = "0.9"
+bytemuck = "1"
+tempfile = "3"
+
 # Phase 5e: silero VAD for streaming voice-range detection. Sister
 # project at `findit-studio/silero` (path dep until both publish to
 # the same registry). Optional + feature-gated so clean checkouts
@@ -135,7 +145,6 @@ humantime-serde = { version = "1", optional = true }
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
-tempfile = "3"
 # `diarization::plda` parity tests load Phase-0 captured `.npz` artifacts.
 # Production code embeds the PLDA weights via `include_bytes!` and
 # does not depend on npyz.

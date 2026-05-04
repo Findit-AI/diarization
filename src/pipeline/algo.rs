@@ -36,21 +36,28 @@ const QINIT_SMOOTHING: f64 = 7.0;
 pub const MAX_QINIT_CELLS: usize = 5_000_000;
 
 /// Hard upper bound on `num_train` — the pre-AHC active-pair count.
-/// AHC's hot path is `pdist_euclidean` which is `O(num_train²)`
-/// memory and `O(num_train² · embed_dim)` time. With pyannote's
-/// `embed_dim = 256` and the documented intended scale of ~10_000
-/// active pairs for a 1-hour stream, that's ~50M f64 pair distances
-/// (~400 MB) — already heavy but tractable.
+/// AHC's hot path is `pdist_euclidean`, which builds a condensed
+/// distance vector of `num_train * (num_train - 1) / 2` f64 cells
+/// (`O(N²)` memory) and runs `O(N² · embed_dim)` distance work.
 ///
-/// The pre-AHC cap rejects pathologically large inputs that would
-/// burn unbounded distance work before any clustering decision is
-/// made. `MAX_AHC_TRAIN = 32_000` covers ~3 hours at 1-second chunks
-/// (~3× the documented 1-hour intended scale), but rejects inputs
-/// past the point where AHC's `O(N²)` allocation crosses 1 GB. The
-/// realistic post-AHC `num_init` after VBx convergence is small
-/// (typically `≤ 15`), so the post-AHC `num_init * num_train` check
-/// against `MAX_QINIT_CELLS` is the precise allocation guard;
-/// `MAX_AHC_TRAIN` is the broader pre-AHC work guard.
+/// At pyannote community-1's documented scale (~10_000 active pairs
+/// for a 1-hour stream), that's ~50M pair distances (~400 MB) —
+/// well under typical production memory budgets.
+///
+/// `MAX_AHC_TRAIN = 32_000` (~512M pair cells = ~4 GB) caps the
+/// pdist allocation at the bound where AHC's `O(N² · embed_dim)`
+/// distance work itself becomes user-perceptible (multi-second on
+/// modern CPUs at `embed_dim = 256`). The 4 GB allocation is safe
+/// because the pdist condensed buffer routes through
+/// `crate::ops::spill::SpillVec`, which falls back to file-backed
+/// mmap above `SpillOptions::threshold_bytes` (default 256 MiB).
+/// The kernel pages cold rows out via the mmap'd tempfile rather
+/// than RAM+swap.
+///
+/// The realistic post-AHC `num_init` after VBx convergence is
+/// small (typically `≤ 15`), so the post-AHC `num_init * num_train`
+/// check against `MAX_QINIT_CELLS` is the precise allocation guard
+/// for VBx; `MAX_AHC_TRAIN` is the broader AHC pdist guard.
 ///
 /// Surfaces as
 /// [`crate::pipeline::error::ShapeError::AhcTrainSizeAboveMax`].
@@ -73,6 +80,11 @@ pub struct AssignEmbeddingsInput<'a> {
   fa: f64,
   fb: f64,
   max_iters: usize,
+  /// Spill backend configuration. Installed on the process-global at
+  /// the top of [`assign_embeddings`] so the AHC pdist
+  /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
+  /// to [`crate::ops::spill::SpillOptions::default`].
+  spill_options: crate::ops::spill::SpillOptions,
 }
 
 impl<'a> AssignEmbeddingsInput<'a> {
@@ -117,6 +129,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
       fa: 0.07,
       fb: 0.8,
       max_iters: 20,
+      spill_options: crate::ops::spill::SpillOptions::new(),
     }
   }
 
@@ -145,6 +158,16 @@ impl<'a> AssignEmbeddingsInput<'a> {
   #[must_use]
   pub const fn with_max_iters(mut self, max_iters: usize) -> Self {
     self.max_iters = max_iters;
+    self
+  }
+
+  /// Set the spill backend configuration (builder).
+  ///
+  /// Not `const fn`: `SpillOptions` has a non-const destructor
+  /// (`Option<PathBuf>`).
+  #[must_use]
+  pub fn with_spill_options(mut self, spill_options: crate::ops::spill::SpillOptions) -> Self {
+    self.spill_options = spill_options;
     self
   }
 
@@ -200,6 +223,11 @@ impl<'a> AssignEmbeddingsInput<'a> {
   pub const fn max_iters(&self) -> usize {
     self.max_iters
   }
+  /// Spill backend configuration. Installed on the process-global by
+  /// [`assign_embeddings`] before any allocation.
+  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+    &self.spill_options
+  }
 }
 
 /// Run pyannote's `cluster_vbx` flow (stages 2–7).
@@ -238,6 +266,10 @@ impl<'a> AssignEmbeddingsInput<'a> {
 pub fn assign_embeddings(
   input: &AssignEmbeddingsInput<'_>,
 ) -> Result<Arc<[ChunkAssignment]>, Error> {
+  // Install the spill configuration on the process-global before any
+  // allocation. Read separately because `spill_options` is non-Copy
+  // and would break the by-value scalar/reference destructure.
+  crate::ops::spill::set_spill_options(input.spill_options.clone());
   let &AssignEmbeddingsInput {
     embeddings,
     num_chunks,
@@ -252,6 +284,7 @@ pub fn assign_embeddings(
     fa,
     fb,
     max_iters,
+    ..
   } = input;
 
   use crate::pipeline::error::{NonFiniteField, ShapeError};

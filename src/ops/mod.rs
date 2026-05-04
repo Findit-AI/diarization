@@ -59,6 +59,7 @@
 pub(crate) mod arch;
 mod dispatch;
 pub mod scalar;
+pub mod spill;
 
 #[cfg(any(feature = "ort", feature = "tch"))]
 pub use dispatch::axpy_f32;

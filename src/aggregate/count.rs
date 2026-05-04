@@ -39,19 +39,20 @@ use std::sync::Arc;
 use crate::reconstruct::SlidingWindow;
 
 /// Hard cap on `num_output_frames` accepted by the fallible aggregate
-/// APIs. Without this, a caller can pass a tiny `per_chunk_value`
-/// tensor with a huge `num_output_frames` and hit the
-/// `vec![0.0_f64; num_output_frames]` allocation, which panics on
-/// capacity overflow (`n * 8 > isize::MAX`) or aborts on OOM —
-/// neither acceptable from a `Result`-returning API.
+/// APIs. The internal `aggregated` / `overlapping_count` buffers
+/// route through `crate::ops::spill::SpillVec`, so this cap is a
+/// soft upper bound rather than an OOM cliff: above
+/// `SpillOptions::threshold_bytes` (default 256 MiB) the buffers
+/// are file-backed via mmap.
 ///
-/// `1e8` frames at the pyannote community-1 frame_step of `0.016875 s`
-/// is ~`19.5 days` of audio. Real production diarization workloads
-/// are bounded by minutes-to-hours; this cap leaves multi-orders-of-
-/// magnitude headroom while preventing pathological `vec!` panics.
-/// `1e8 × 8 B = 800 MB` — bounded, recoverable, and well below the
-/// `isize::MAX` byte-size cliff.
-pub const MAX_OUTPUT_FRAMES: usize = 100_000_000;
+/// `4e8` frames at the pyannote community-1 frame_step of `0.016875 s`
+/// is ~`78 days` of audio. Real production workloads are bounded
+/// by minutes-to-hours; this cap leaves multi-orders-of-magnitude
+/// headroom while still rejecting pathological dimension wraps.
+/// `4e8 × 8 B = 3.2 GB` per buffer at the cap (twice that for
+/// count_pyannote with two parallel buffers) — bounded, file-
+/// backed, and well below `usize::MAX` saturation.
+pub const MAX_OUTPUT_FRAMES: usize = 400_000_000;
 
 /// Errors returned by the fallible (`try_*`) variants of this module.
 ///
@@ -65,6 +66,13 @@ pub enum Error {
   /// shape product, or geometry is invalid (zero / non-finite values).
   #[error("aggregate: shape: {0}")]
   Shape(#[from] ShapeError),
+  /// Failed to allocate a spill-backed scratch buffer (`aggregated`,
+  /// `overlapping_count`). At the cap, each buffer reaches
+  /// `MAX_OUTPUT_FRAMES = 1e8` f64 cells (~800 MB) and routes
+  /// through `crate::ops::spill::SpillVec`, so tempfile / mmap
+  /// failures surface here.
+  #[error("aggregate: failed to allocate scratch buffer: {0}")]
+  Spill(#[from] crate::ops::spill::SpillError),
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].
@@ -372,9 +380,16 @@ pub fn try_hamming_aggregate(
     // `ofr >= num_output_frames` skip in the inner loop, returning
     // `Ok(_)` with a truncated aggregate instead of surfacing the
     // upstream frame-count drift.
+    // Use `usize::try_from` rather than `as usize`: on 32-bit
+    // targets, a positive `i64` past `u32::MAX` wraps via `as`,
+    // so the cast could produce a small valid usize and pass the
+    // following `<` check, then write into a low-numbered output
+    // frame in the inner loop. Mirror the reconstruct-side fix.
     let last_start_frame = last_normalized.round_ties_even() as i64;
     if last_start_frame >= 0 {
-      let last_required = (last_start_frame as usize).saturating_add(num_frames_per_chunk);
+      let last_start_usize = usize::try_from(last_start_frame)
+        .map_err(|_| ShapeError::HammingDerivedTimingOutOfRange)?;
+      let last_required = last_start_usize.saturating_add(num_frames_per_chunk);
       if num_output_frames < last_required {
         return Err(
           ShapeError::HammingOutputFrameCountTooSmall {
@@ -386,7 +401,11 @@ pub fn try_hamming_aggregate(
       }
     }
   }
-  let mut out = vec![0.0_f64; num_output_frames];
+  // Spill-backed scratch buffer for the aggregation (~800 MB at the
+  // cap). The hamming weights buffer is small (`num_frames_per_chunk
+  // ≤ ~1000` for realistic inputs) and stays on the heap.
+  let mut out_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
+  let out = out_buf.as_mut_slice();
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
   let hamming: Vec<f64> = (0..num_frames_per_chunk)
     .map(|n| 0.54 - 0.46 * (std::f64::consts::TAU * n as f64 / n_minus_1).cos())
@@ -396,13 +415,32 @@ pub fn try_hamming_aggregate(
     let start_frame = (chunk_start_t / frame_step).round_ties_even() as i64;
     for cf in 0..num_frames_per_chunk {
       let ofr = start_frame + cf as i64;
-      if ofr < 0 || (ofr as usize) >= num_output_frames {
+      if ofr < 0 {
         continue;
       }
-      out[ofr as usize] += per_chunk_value[c * num_frames_per_chunk + cf] * hamming[cf];
+      // `usize::try_from` rather than `as usize` for the same
+      // 32-bit-target safety: a positive i64 past `u32::MAX` would
+      // wrap via `as` to a small usize that passes the `<` check
+      // and writes into the wrong low-numbered cell. Out-of-range
+      // values are skipped (matching the existing semantics for
+      // negative `ofr`); the upstream derived-timing guard already
+      // bounds the worst case so this is a defense-in-depth check.
+      let Ok(ofr) = usize::try_from(ofr) else {
+        continue;
+      };
+      if ofr >= num_output_frames {
+        continue;
+      }
+      out[ofr] += per_chunk_value[c * num_frames_per_chunk + cf] * hamming[cf];
     }
   }
-  Ok(out)
+  // Copy the spilled scratch buffer into the documented public
+  // return type (`Vec<f64>`). The aggregate work is the heavy
+  // bit (kernel pages 800 MB through the pdist + hamming loop);
+  // the final materialization to `Vec` allocates the same N cells
+  // on the heap. Future API: return `SpillVec<f64>` directly to
+  // eliminate this copy, but that's a public-signature change.
+  Ok(out.to_vec())
 }
 
 /// Compute pyannote's exact `num_output_frames` for the given
@@ -677,8 +715,16 @@ pub fn try_count_pyannote(
     try_num_output_frames_pyannote(num_chunks, chunk_duration, chunk_step, frame_step)?;
 
   // ── 4. Aggregate (uniform weights, divide by overlapping count) ─
-  let mut aggregated = vec![0.0_f64; num_output_frames];
-  let mut overlapping_count = vec![0.0_f64; num_output_frames];
+  // Both buffers can reach `MAX_OUTPUT_FRAMES = 1e8` cells (~800 MB
+  // f64 each = 1.6 GB total) at the cap. Spill to file-backed mmap
+  // above the configured threshold so the `Result`-returning API
+  // doesn't OOM-abort. Internal buffers — never escape the
+  // function (the final `Arc<[u8]>` count tensor is built from
+  // these via the trusted-len iterator collect below).
+  let mut aggregated_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
+  let mut overlapping_count_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
+  let aggregated = aggregated_buf.as_mut_slice();
+  let overlapping_count = overlapping_count_buf.as_mut_slice();
   for c in 0..num_chunks {
     let chunk_start_t = c as f64 * chunk_step;
     let start_frame = (chunk_start_t / frame_step).round_ties_even() as i64;
