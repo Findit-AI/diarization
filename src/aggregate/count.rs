@@ -248,6 +248,7 @@ pub fn hamming_aggregate(
   chunk_step: f64,
   frame_step: f64,
   num_output_frames: usize,
+  spill_options: &crate::ops::spill::SpillOptions,
 ) -> Vec<f64> {
   try_hamming_aggregate(
     per_chunk_value,
@@ -256,6 +257,7 @@ pub fn hamming_aggregate(
     chunk_step,
     frame_step,
     num_output_frames,
+    spill_options,
   )
   .expect("hamming_aggregate: shape precondition violated; use try_hamming_aggregate to handle")
 }
@@ -270,6 +272,7 @@ pub fn try_hamming_aggregate(
   chunk_step: f64,
   frame_step: f64,
   num_output_frames: usize,
+  spill_options: &crate::ops::spill::SpillOptions,
 ) -> Result<Vec<f64>, Error> {
   // `num_chunks == 0` makes `num_chunks * num_frames_per_chunk == 0`,
   // so the length check below passes for `per_chunk_value == &[]`
@@ -404,7 +407,7 @@ pub fn try_hamming_aggregate(
   // Spill-backed scratch buffer for the aggregation (~800 MB at the
   // cap). The hamming weights buffer is small (`num_frames_per_chunk
   // ≤ ~1000` for realistic inputs) and stays on the heap.
-  let mut out_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
+  let mut out_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
   let out = out_buf.as_mut_slice();
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
   let hamming: Vec<f64> = (0..num_frames_per_chunk)
@@ -569,6 +572,7 @@ pub fn count_pyannote(
   onset: f64,
   chunks_sw: SlidingWindow,
   frames_sw_template: SlidingWindow,
+  spill_options: &crate::ops::spill::SpillOptions,
 ) -> CountTensor {
   try_count_pyannote(
     segmentations,
@@ -578,6 +582,7 @@ pub fn count_pyannote(
     onset,
     chunks_sw,
     frames_sw_template,
+    spill_options,
   )
   .expect("count_pyannote: shape precondition violated; use try_count_pyannote to handle")
 }
@@ -594,6 +599,7 @@ pub fn try_count_pyannote(
   onset: f64,
   chunks_sw: SlidingWindow,
   frames_sw_template: SlidingWindow,
+  spill_options: &crate::ops::spill::SpillOptions,
 ) -> Result<CountTensor, Error> {
   // Reject empty / non-positive geometry up front. `num_chunks == 0`
   // would underflow `(num_chunks - 1) as f64` in
@@ -721,8 +727,10 @@ pub fn try_count_pyannote(
   // doesn't OOM-abort. Internal buffers — never escape the
   // function (the final `Arc<[u8]>` count tensor is built from
   // these via the trusted-len iterator collect below).
-  let mut aggregated_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
-  let mut overlapping_count_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames)?;
+  let mut aggregated_buf =
+    crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
+  let mut overlapping_count_buf =
+    crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
   let aggregated = aggregated_buf.as_mut_slice();
   let overlapping_count = overlapping_count_buf.as_mut_slice();
   for c in 0..num_chunks {
@@ -784,7 +792,16 @@ mod try_variant_tests {
   fn try_count_pyannote_rejects_short_segmentations() {
     // Declared shape is 3 chunks * 4 frames * 2 speakers = 24 elements.
     let segs: Vec<f64> = vec![0.0; 23];
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
@@ -800,6 +817,7 @@ mod try_variant_tests {
       0.5,
       sw(10.0, 1.0),
       sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
     );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
@@ -809,19 +827,46 @@ mod try_variant_tests {
   /// allocation to `usize::MAX` in release builds.
   #[test]
   fn try_count_pyannote_rejects_zero_num_chunks() {
-    let r = try_count_pyannote(&[], 0, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &[],
+      0,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
   #[test]
   fn try_count_pyannote_rejects_zero_num_frames_per_chunk() {
-    let r = try_count_pyannote(&[], 3, 0, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &[],
+      3,
+      0,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
   #[test]
   fn try_count_pyannote_rejects_zero_num_speakers() {
-    let r = try_count_pyannote(&[], 3, 4, 0, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &[],
+      3,
+      4,
+      0,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
@@ -829,21 +874,48 @@ mod try_variant_tests {
   #[test]
   fn try_count_pyannote_rejects_zero_frame_step() {
     let segs: Vec<f64> = vec![0.0; 24];
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
   #[test]
   fn try_count_pyannote_rejects_negative_frame_step() {
     let segs: Vec<f64> = vec![0.0; 24];
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, -0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, -0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
   #[test]
   fn try_count_pyannote_rejects_non_finite_onset() {
     let segs: Vec<f64> = vec![0.0; 24];
-    let r = try_count_pyannote(&segs, 3, 4, 2, f64::NAN, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      f64::NAN,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
@@ -858,6 +930,7 @@ mod try_variant_tests {
       0.5,
       sw(f64::INFINITY, 1.0),
       sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
     );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
@@ -882,7 +955,16 @@ mod try_variant_tests {
     // 1 chunk, 4 frames, 2 speakers → segs len 8. `chunk_duration =
     // 1e15`, `frame_step = 1e-15` makes num_output_frames overflow.
     let segs: Vec<f64> = vec![0.0; 8];
-    let r = try_count_pyannote(&segs, 1, 4, 2, 0.5, sw(1.0e15, 1.0), sw(0.062, 1.0e-15));
+    let r = try_count_pyannote(
+      &segs,
+      1,
+      4,
+      2,
+      0.5,
+      sw(1.0e15, 1.0),
+      sw(0.062, 1.0e-15),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::OutputFrameCountOverflow))),
       "got {r:?}"
@@ -906,7 +988,15 @@ mod try_variant_tests {
 
   #[test]
   fn try_hamming_aggregate_rejects_zero_num_frames_per_chunk() {
-    let r = try_hamming_aggregate(&[], 3, 0, 1.0, 0.0169, 8);
+    let r = try_hamming_aggregate(
+      &[],
+      3,
+      0,
+      1.0,
+      0.0169,
+      8,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -921,7 +1011,15 @@ mod try_variant_tests {
   /// from a fallible API. Now rejected at the boundary.
   #[test]
   fn try_hamming_aggregate_rejects_single_frame_chunk() {
-    let r = try_hamming_aggregate(&[0.5; 3], 3, 1, 1.0, 0.0169, 8);
+    let r = try_hamming_aggregate(
+      &[0.5; 3],
+      3,
+      1,
+      1.0,
+      0.0169,
+      8,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -941,7 +1039,15 @@ mod try_variant_tests {
 
   #[test]
   fn try_hamming_aggregate_rejects_zero_frame_step() {
-    let r = try_hamming_aggregate(&[0.0; 12], 3, 4, 1.0, 0.0, 8);
+    let r = try_hamming_aggregate(
+      &[0.0; 12],
+      3,
+      4,
+      1.0,
+      0.0,
+      8,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
@@ -954,7 +1060,16 @@ mod try_variant_tests {
   fn try_count_pyannote_rejects_nan_segmentation() {
     let mut segs: Vec<f64> = vec![0.5; 24];
     segs[7] = f64::NAN;
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
       "got {r:?}"
@@ -965,7 +1080,16 @@ mod try_variant_tests {
   fn try_count_pyannote_rejects_pos_inf_segmentation() {
     let mut segs: Vec<f64> = vec![0.5; 24];
     segs[0] = f64::INFINITY;
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
       "got {r:?}"
@@ -976,7 +1100,16 @@ mod try_variant_tests {
   fn try_count_pyannote_rejects_neg_inf_segmentation() {
     let mut segs: Vec<f64> = vec![0.5; 24];
     segs[15] = f64::NEG_INFINITY;
-    let r = try_count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let r = try_count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::NonFiniteSegmentations))),
       "got {r:?}"
@@ -990,7 +1123,15 @@ mod try_variant_tests {
   fn try_hamming_aggregate_rejects_nan_per_chunk_value() {
     let mut vals: Vec<f64> = vec![0.5; 12];
     vals[5] = f64::NAN;
-    let r = try_hamming_aggregate(&vals, 3, 4, 1.0, 0.0169, 8);
+    let r = try_hamming_aggregate(
+      &vals,
+      3,
+      4,
+      1.0,
+      0.0169,
+      8,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::NonFinitePerChunkValue))),
       "got {r:?}"
@@ -1001,7 +1142,15 @@ mod try_variant_tests {
   fn try_hamming_aggregate_rejects_inf_per_chunk_value() {
     let mut vals: Vec<f64> = vec![0.5; 12];
     vals[0] = f64::INFINITY;
-    let r = try_hamming_aggregate(&vals, 3, 4, 1.0, 0.0169, 8);
+    let r = try_hamming_aggregate(
+      &vals,
+      3,
+      4,
+      1.0,
+      0.0169,
+      8,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::NonFinitePerChunkValue))),
       "got {r:?}"
@@ -1012,19 +1161,44 @@ mod try_variant_tests {
   #[should_panic(expected = "shape precondition violated")]
   fn count_pyannote_panics_on_short_input() {
     let segs: Vec<f64> = vec![0.0; 23];
-    let _ = count_pyannote(&segs, 3, 4, 2, 0.5, sw(10.0, 1.0), sw(0.062, 0.0169));
+    let _ = count_pyannote(
+      &segs,
+      3,
+      4,
+      2,
+      0.5,
+      sw(10.0, 1.0),
+      sw(0.062, 0.0169),
+      &crate::ops::spill::SpillOptions::default(),
+    );
   }
 
   #[test]
   fn try_hamming_aggregate_rejects_short_input() {
-    let r = try_hamming_aggregate(&[0.0; 7], 3, 4, 1.0, 0.0169, 100);
+    let r = try_hamming_aggregate(
+      &[0.0; 7],
+      3,
+      4,
+      1.0,
+      0.0169,
+      100,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(matches!(r, Err(Error::Shape(_))), "got {r:?}");
   }
 
   #[test]
   #[should_panic(expected = "shape precondition violated")]
   fn hamming_aggregate_panics_on_short_input() {
-    let _ = hamming_aggregate(&[0.0; 7], 3, 4, 1.0, 0.0169, 100);
+    let _ = hamming_aggregate(
+      &[0.0; 7],
+      3,
+      4,
+      1.0,
+      0.0169,
+      100,
+      &crate::ops::spill::SpillOptions::default(),
+    );
   }
 
   /// Round-20 [medium]: derived chunk-start frame index must be
@@ -1038,7 +1212,15 @@ mod try_variant_tests {
     // chunk_step = f64::MAX, frame_step = 1.0 → last chunk normalized
     // = (num_chunks - 1) * f64::MAX → +inf or way past i64::MAX/2.
     let per_chunk = vec![1.0_f64; 2 * 4]; // 2 chunks, 4 frames/chunk.
-    let r = try_hamming_aggregate(&per_chunk, 2, 4, f64::MAX, 1.0, 16);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      2,
+      4,
+      f64::MAX,
+      1.0,
+      16,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -1053,7 +1235,15 @@ mod try_variant_tests {
     // chunk_step = 1e150, frame_step = 1e-150. Their ratio = 1e300,
     // multiplied by (num_chunks-1) overflows i64 safety bound.
     let per_chunk = vec![1.0_f64; 2 * 4];
-    let r = try_hamming_aggregate(&per_chunk, 2, 4, 1e150, 1e-150, 16);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      2,
+      4,
+      1e150,
+      1e-150,
+      16,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -1070,7 +1260,15 @@ mod try_variant_tests {
   #[test]
   fn try_hamming_aggregate_rejects_num_output_frames_above_max() {
     let per_chunk = vec![1.0_f64; 2]; // 1 chunk, 2 frames/chunk.
-    let r = try_hamming_aggregate(&per_chunk, 1, 2, 1.0, 0.0169, MAX_OUTPUT_FRAMES + 1);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      1,
+      2,
+      1.0,
+      0.0169,
+      MAX_OUTPUT_FRAMES + 1,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -1087,7 +1285,15 @@ mod try_variant_tests {
   #[test]
   fn try_hamming_aggregate_rejects_zero_num_output_frames() {
     let per_chunk = vec![0.0_f64; 1 * 2]; // 1 chunk, 2 frames/chunk.
-    let r = try_hamming_aggregate(&per_chunk, 1, 2, 1.0, 0.0169, 0);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      1,
+      2,
+      1.0,
+      0.0169,
+      0,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::ZeroNumOutputFrames))),
       "got {r:?}"
@@ -1104,7 +1310,15 @@ mod try_variant_tests {
     // Last chunk start = 1 * 1.0 / 0.5 = 2 (round_ties_even).
     // Required minimum = 2 + 4 = 6 frames.
     let per_chunk = vec![1.0_f64; 2 * 4];
-    let r = try_hamming_aggregate(&per_chunk, 2, 4, 1.0, 0.5, 5);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      2,
+      4,
+      1.0,
+      0.5,
+      5,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,
@@ -1142,7 +1356,15 @@ mod try_variant_tests {
   /// blows up. Reject zero chunks before any allocation.
   #[test]
   fn try_hamming_aggregate_rejects_zero_num_chunks() {
-    let r = try_hamming_aggregate(&[], 0, 4, 1.0, 0.0169, 16);
+    let r = try_hamming_aggregate(
+      &[],
+      0,
+      4,
+      1.0,
+      0.0169,
+      16,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::ZeroNumChunks))),
       "got {r:?}"
@@ -1172,7 +1394,15 @@ mod try_variant_tests {
     // num_frames_per_chunk that wouldn't allocate but where the
     // length check would fail second:
     let per_chunk = vec![0.0_f64; 4];
-    let r = try_hamming_aggregate(&per_chunk, 1, huge, 1.0, 0.0169, 16);
+    let r = try_hamming_aggregate(
+      &per_chunk,
+      1,
+      huge,
+      1.0,
+      0.0169,
+      16,
+      &crate::ops::spill::SpillOptions::default(),
+    );
     assert!(
       matches!(
         r,

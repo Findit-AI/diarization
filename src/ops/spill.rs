@@ -43,39 +43,24 @@
 //!
 //! ## Configuration
 //!
-//! A single process-global [`SpillOptions`] held in
-//! [`spill_options`] / [`set_spill_options`]. Every [`SpillVec::zeros`]
-//! call reads the current value and picks heap vs. mmap accordingly.
-//!
-//! Each top-level Options struct in `dia`
+//! [`SpillVec::zeros`] takes the [`SpillOptions`] explicitly as a
+//! `&SpillOptions` argument — no process-global, no thread-local, no
+//! action-at-distance. Each top-level Options struct in `dia`
 //! (`OwnedPipelineOptions`, `OfflineInput`, `AssignEmbeddingsInput`,
 //! `ReconstructInput`, `StreamingOfflineOptions`) carries a
-//! [`SpillOptions`] field defaulting to [`SpillOptions::default`]. The
-//! corresponding entry function calls [`set_spill_options`] at the
-//! top of its body so the field's value takes effect for every
-//! transitive `SpillVec::zeros` call. Concurrent multi-threaded
-//! invocations with differing `spill_options` will race on this
-//! global; multi-threaded callers should either set a stable global
-//! once at startup and leave the field at its default, or
-//! externally synchronize calls that customize spill behavior.
-//!
-//! ```no_run
-//! use diarization::ops::spill::{SpillOptions, set_spill_options};
-//!
-//! // Process-global, e.g. set once at startup:
-//! set_spill_options(
-//!     SpillOptions::new()
-//!         .with_threshold_bytes(128 * 1024 * 1024)
-//!         .with_spill_dir(Some("/var/tmp/dia".into())),
-//! );
-//! ```
+//! [`SpillOptions`] field defaulting to [`SpillOptions::default`];
+//! the corresponding entry function passes a borrow of that field
+//! down to every transitive `SpillVec::zeros` call site. Concurrent
+//! multi-threaded calls cannot interfere because there is no shared
+//! mutable state.
 //!
 //! ```no_run
 //! use diarization::offline::OwnedPipelineOptions;
 //! use diarization::ops::spill::SpillOptions;
 //!
 //! // Per-call setting via the entry-point Options struct: the entry
-//! // function installs this on the global at the top of its body.
+//! // function threads `&self.options.spill_options` into every
+//! // `SpillVec::zeros` along its allocation paths.
 //! let opts = OwnedPipelineOptions::new().with_spill_options(
 //!     SpillOptions::new().with_threshold_bytes(64 * 1024 * 1024),
 //! );
@@ -111,10 +96,7 @@
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
-use std::{
-  path::{Path, PathBuf},
-  sync::{OnceLock, RwLock},
-};
+use std::path::{Path, PathBuf};
 
 use bytemuck::Pod;
 #[cfg(target_os = "linux")]
@@ -242,8 +224,11 @@ impl SpillOptions {
   }
 
   /// Mutating: set the spill threshold.
+  ///
+  /// `const fn` because `usize` has no destructor; the
+  /// `with_threshold_bytes` builder is `const` and forwards here.
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub fn set_threshold_bytes(&mut self, threshold_bytes: usize) -> &mut Self {
+  pub const fn set_threshold_bytes(&mut self, threshold_bytes: usize) -> &mut Self {
     self.threshold_bytes = threshold_bytes;
     self
   }
@@ -263,48 +248,8 @@ impl Default for SpillOptions {
   }
 }
 
-// ── Config: single process-global ─────────────────────────────────
-
-/// `OnceLock<RwLock<SpillOptions>>` because:
-/// - `OnceLock` defers default construction until first access (the
-///   `Default::default()` call needs heap allocation for `PathBuf`,
-///   which can't run at static-init time).
-/// - `RwLock` (rather than `Mutex`) because reads vastly outnumber
-///   writes — every spill allocation reads the config.
-static SPILL_OPTIONS: OnceLock<RwLock<SpillOptions>> = OnceLock::new();
-
-fn options_lock() -> &'static RwLock<SpillOptions> {
-  SPILL_OPTIONS.get_or_init(|| RwLock::new(SpillOptions::new()))
-}
-
-/// Returns a clone of the current process-global [`SpillOptions`].
-///
-/// Cloning is cheap (a `usize` plus an `Option<PathBuf>` — at most a
-/// few words). Returning a reference would require a guard type
-/// that holds the read lock for the caller's lifetime, complicating
-/// the API for no measurable win.
-pub fn spill_options() -> SpillOptions {
-  options_lock()
-    .read()
-    .expect("spill options lock poisoned")
-    .clone()
-}
-
-/// Replace the process-global [`SpillOptions`]. Subsequent
-/// [`SpillVec`] allocations use the new values; in-flight `SpillVec`
-/// instances are NOT affected — once constructed, a buffer is
-/// committed to its backend.
-///
-/// Multi-threaded callers must externally synchronize concurrent
-/// writes that pick different values; the writes themselves are
-/// race-free under the lock, but a `SpillVec::zeros` call observes
-/// whichever value is current at its read.
-pub fn set_spill_options(opts: SpillOptions) {
-  *options_lock().write().expect("spill options lock poisoned") = opts;
-}
-
 /// A fixed-size flat buffer that picks heap-or-mmap at construction
-/// time based on the process-global [`SpillOptions`].
+/// time based on the [`SpillOptions`] passed to [`SpillVec::zeros`].
 ///
 /// Behaves like `Vec<T>` for read/write access via `as_slice` /
 /// `as_mut_slice`. Length is set once at construction; the buffer
@@ -332,13 +277,19 @@ enum SpillInner {
 }
 
 impl<T> SpillVec<T> {
-  /// Allocate `n` zero-initialized cells of `T`.
+  /// Allocate `n` zero-initialized cells of `T` using the supplied
+  /// [`SpillOptions`].
   ///
-  /// Picks heap if `n * size_of::<T>() ≤ threshold_bytes`, else
-  /// file-backed mmap in [`SpillOptions::spill_dir`]. Both backends
-  /// return zero-initialized cells (`Vec<u8>::resize(_, 0)` for
-  /// heap, `set_len` plus `mmap` for the file backend).
-  pub fn zeros(n: usize) -> Result<Self, SpillError> {
+  /// Picks heap if `n * size_of::<T>() ≤ opts.threshold_bytes()`,
+  /// else file-backed mmap in [`SpillOptions::spill_dir`]. Both
+  /// backends return zero-initialized cells (`Vec<u8>::resize(_, 0)`
+  /// for heap, `set_len` plus `mmap` for the file backend).
+  ///
+  /// `opts` is borrowed for the duration of the call; subsequent
+  /// `SpillVec` allocations may use a different `SpillOptions`. The
+  /// resulting buffer is committed to its backend and unaffected by
+  /// later changes to the caller's `SpillOptions`.
+  pub fn zeros(n: usize, opts: &SpillOptions) -> Result<Self, SpillError> {
     let element_size = core::mem::size_of::<T>();
     let bytes = n
       .checked_mul(element_size)
@@ -354,7 +305,6 @@ impl<T> SpillVec<T> {
       });
     }
 
-    let opts = spill_options();
     if bytes <= opts.threshold_bytes() {
       // Heap path. Zeroed via `vec![0u8; bytes]`.
       Ok(Self {
@@ -483,22 +433,6 @@ unsafe impl<T: Pod + Send> Send for SpillVec<T> {}
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Mutex;
-
-  /// Tests in this module mutate the process-global `SPILL_OPTIONS`.
-  /// `cargo test` runs tests in parallel by default, so without a
-  /// shared mutex two tests writing different values would race —
-  /// e.g. `small_allocation_uses_heap` would observe the
-  /// `threshold = 0` write from `read_write_roundtrip_both_backends`
-  /// and see a mmap-backed buffer where it expects heap.
-  ///
-  /// Each test that touches the global acquires this lock for its
-  /// full body and resets to a known state at entry.
-  static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-  fn lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-  }
 
   /// `SpillOptions::new()` is `const fn` and produces the documented
   /// default values.
@@ -531,13 +465,12 @@ mod tests {
     assert_eq!(opts.spill_dir(), Some(Path::new("/tmp/dia")));
   }
 
-  /// `SpillVec::zeros(0)` returns an empty heap buffer, never
+  /// `SpillVec::zeros(0, _)` returns an empty heap buffer, never
   /// touching mmap (mmap of length 0 is `EINVAL` on most platforms).
   #[test]
   fn zeros_zero_returns_heap_empty() {
-    let _guard = lock();
-    set_spill_options(SpillOptions::default());
-    let v: SpillVec<f64> = SpillVec::zeros(0).expect("zero-length must succeed");
+    let opts = SpillOptions::default();
+    let v: SpillVec<f64> = SpillVec::zeros(0, &opts).expect("zero-length must succeed");
     assert_eq!(v.len(), 0);
     assert!(v.is_empty());
     assert_eq!(v.as_slice().len(), 0);
@@ -547,23 +480,21 @@ mod tests {
   /// Below threshold: heap-backed.
   #[test]
   fn small_allocation_uses_heap() {
-    let _guard = lock();
     // Default threshold is 256 MiB; a 1 KiB f64 buffer is well under.
-    set_spill_options(SpillOptions::default());
-    let v: SpillVec<f64> = SpillVec::zeros(128).expect("alloc");
+    let opts = SpillOptions::default();
+    let v: SpillVec<f64> = SpillVec::zeros(128, &opts).expect("alloc");
     assert_eq!(v.len(), 128);
     assert!(!v.is_mmapped());
     assert!(v.as_slice().iter().all(|&x| x == 0.0));
   }
 
-  /// Reads and writes round-trip through both backends. We force
-  /// the mmap path by overriding the threshold to 0.
+  /// Reads and writes round-trip through both backends. The two
+  /// allocations use different `SpillOptions` instances — no shared
+  /// state means no cross-test contamination.
   #[test]
   fn read_write_roundtrip_both_backends() {
-    let _guard = lock();
-    // Force mmap path by setting threshold to 0.
-    set_spill_options(SpillOptions::default().with_threshold_bytes(0));
-    let mut v: SpillVec<f64> = SpillVec::zeros(64).expect("mmap alloc");
+    let mmap_opts = SpillOptions::default().with_threshold_bytes(0);
+    let mut v: SpillVec<f64> = SpillVec::zeros(64, &mmap_opts).expect("mmap alloc");
     assert!(v.is_mmapped(), "should be mmap-backed at threshold=0");
     for (i, slot) in v.as_mut_slice().iter_mut().enumerate() {
       *slot = i as f64 * 1.5;
@@ -572,9 +503,9 @@ mod tests {
       assert_eq!(x, i as f64 * 1.5);
     }
     drop(v);
-    // Now force heap path by setting threshold huge.
-    set_spill_options(SpillOptions::default().with_threshold_bytes(usize::MAX));
-    let mut v: SpillVec<f64> = SpillVec::zeros(64).expect("heap alloc");
+
+    let heap_opts = SpillOptions::default().with_threshold_bytes(usize::MAX);
+    let mut v: SpillVec<f64> = SpillVec::zeros(64, &heap_opts).expect("heap alloc");
     assert!(
       !v.is_mmapped(),
       "should be heap-backed at threshold=usize::MAX"
@@ -585,17 +516,15 @@ mod tests {
     for (i, &x) in v.as_slice().iter().enumerate() {
       assert_eq!(x, i as f64 * 1.5);
     }
-    set_spill_options(SpillOptions::default());
   }
 
   /// Differential test: heap and mmap backends must produce
   /// bit-identical contents for the same write sequence.
   #[test]
   fn heap_mmap_differential_bit_equal() {
-    let _guard = lock();
     fn fill_and_collect<F: FnOnce(&mut SpillVec<f64>)>(threshold: usize, fill: F) -> Vec<f64> {
-      set_spill_options(SpillOptions::new().with_threshold_bytes(threshold));
-      let mut v: SpillVec<f64> = SpillVec::zeros(1024).expect("alloc");
+      let opts = SpillOptions::new().with_threshold_bytes(threshold);
+      let mut v: SpillVec<f64> = SpillVec::zeros(1024, &opts).expect("alloc");
       fill(&mut v);
       v.as_slice().to_vec()
     }
@@ -611,7 +540,6 @@ mod tests {
       mmap.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
       "heap and mmap backends must produce bit-equal contents"
     );
-    set_spill_options(SpillOptions::default());
   }
 
   /// Size-overflow surfaces a typed error instead of panicking.
@@ -620,7 +548,8 @@ mod tests {
     // `usize::MAX / 4` * `size_of::<f64>() = 8` overflows usize.
     // Use `.err()` rather than `assert!(matches!)` because `SpillVec`
     // is not `Debug` (mmap state isn't usefully printable).
-    let r: Result<SpillVec<f64>, _> = SpillVec::zeros(usize::MAX / 4);
+    let opts = SpillOptions::default();
+    let r: Result<SpillVec<f64>, _> = SpillVec::zeros(usize::MAX / 4, &opts);
     let err = r.err().expect("must error on overflow");
     assert!(
       matches!(err, SpillError::SizeOverflow { .. }),
@@ -632,9 +561,8 @@ mod tests {
   /// is not `Pod` so the masks switch to `u8` (0/1).
   #[test]
   fn u8_mask_roundtrip() {
-    let _guard = lock();
-    set_spill_options(SpillOptions::default());
-    let mut v: SpillVec<u8> = SpillVec::zeros(16).expect("alloc");
+    let opts = SpillOptions::default();
+    let mut v: SpillVec<u8> = SpillVec::zeros(16, &opts).expect("alloc");
     for (i, slot) in v.as_mut_slice().iter_mut().enumerate() {
       *slot = if i.is_multiple_of(2) { 1 } else { 0 };
     }
@@ -648,9 +576,8 @@ mod tests {
   /// the type works.
   #[test]
   fn f32_roundtrip() {
-    let _guard = lock();
-    set_spill_options(SpillOptions::default());
-    let mut v: SpillVec<f32> = SpillVec::zeros(8).expect("alloc");
+    let opts = SpillOptions::default();
+    let mut v: SpillVec<f32> = SpillVec::zeros(8, &opts).expect("alloc");
     let target: [f32; 8] = [
       0.0,
       1.0,
@@ -665,20 +592,17 @@ mod tests {
     assert_eq!(v.as_slice(), &target);
   }
 
-  /// `set_spill_options` round-trips and is observed by subsequent
-  /// `SpillVec::zeros` calls.
+  /// Distinct `SpillOptions` values produce distinct backend
+  /// choices on the same allocation size.
   #[test]
-  fn set_spill_options_takes_effect() {
-    let _guard = lock();
-    set_spill_options(SpillOptions::new().with_threshold_bytes(0));
-    let v: SpillVec<f64> = SpillVec::zeros(64).expect("alloc");
+  fn distinct_options_pick_distinct_backends() {
+    let mmap_opts = SpillOptions::new().with_threshold_bytes(0);
+    let v: SpillVec<f64> = SpillVec::zeros(64, &mmap_opts).expect("mmap alloc");
     assert!(v.is_mmapped());
     drop(v);
 
-    set_spill_options(SpillOptions::new().with_threshold_bytes(usize::MAX));
-    let v: SpillVec<f64> = SpillVec::zeros(64).expect("alloc");
+    let heap_opts = SpillOptions::new().with_threshold_bytes(usize::MAX);
+    let v: SpillVec<f64> = SpillVec::zeros(64, &heap_opts).expect("heap alloc");
     assert!(!v.is_mmapped());
-
-    set_spill_options(SpillOptions::default());
   }
 }

@@ -68,8 +68,8 @@ use crate::offline::algo::{check_min_duration_off, check_smoothing_epsilon};
 /// 1-second chunk step, 0.5 onset/offset binarization, threshold/Fa/Fb
 /// from the community-1 config.
 ///
-/// Not `Copy`: [`Self::spill_options`] is `Option<SpillOptions>` whose
-/// inner `Option<PathBuf>` heap-owns its directory string.
+/// Not `Copy`: [`Self::spill_options`] is a `SpillOptions` whose inner
+/// `Option<PathBuf>` heap-owns its directory string.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OwnedPipelineOptions {
@@ -90,17 +90,12 @@ pub struct OwnedPipelineOptions {
   #[cfg_attr(feature = "serde", serde(default = "default_smoothing_epsilon"))]
   smoothing_epsilon: Option<f32>,
   /// Spill backend configuration. Defaults to
-  /// [`SpillOptions::default`] (256 MiB heap
-  /// threshold, [`std::env::temp_dir`] spill directory).
-  /// [`OwnedDiarizationPipeline::run`] installs this on the
-  /// process-global via [`crate::ops::spill::set_spill_options`] at
-  /// entry, so every transitive [`crate::ops::spill::SpillVec::zeros`]
-  /// call honors it.
-  ///
-  /// Not serialized: spill paths are deployment-specific and the
-  /// `SpillOptions` type itself does not implement `Serialize` /
-  /// `Deserialize` (would require gating its `PathBuf` field
-  /// per-feature).
+  /// [`SpillOptions::default`] (256 MiB heap threshold,
+  /// [`std::env::temp_dir`] spill directory).
+  /// [`OwnedDiarizationPipeline::run`] passes this by reference to
+  /// every [`crate::ops::spill::SpillVec::zeros`] reached transitively
+  /// (AHC pdist, reconstruct grids, count buffers), so per-call
+  /// configuration is local — no process-global side-effects.
   #[cfg_attr(feature = "serde", serde(default))]
   spill_options: SpillOptions,
 }
@@ -355,18 +350,6 @@ impl OwnedDiarizationPipeline {
     plda: &PldaTransform,
     samples: &[f32],
   ) -> Result<OfflineOutput, Error> {
-    // Install the spill configuration on the process-global before
-    // any allocation. Every transitive `SpillVec::zeros` call (AHC
-    // pdist, reconstruct grids, count buffers) reads
-    // `spill_options()` and picks heap vs. mmap accordingly.
-    //
-    // This write is sticky across calls: callers that customize
-    // `spill_options` for one run see the same value applied to
-    // subsequent runs unless they re-set it. Multi-threaded callers
-    // with differing `spill_options` race on the global; either set
-    // a stable global at startup and leave the field default, or
-    // externally synchronize.
-    crate::ops::spill::set_spill_options(self.options.spill_options().clone());
     let cfg = &self.options;
     if samples.is_empty() {
       return Err(crate::offline::algo::ShapeError::EmptySamples.into());
@@ -602,6 +585,7 @@ impl OwnedDiarizationPipeline {
       cfg.onset() as f64,
       chunks_sw,
       frames_sw_template,
+      cfg.spill_options(),
     )?
     .into_parts();
     let num_output_frames = count.len();
@@ -624,7 +608,8 @@ impl OwnedDiarizationPipeline {
     .with_fb(cfg.fb())
     .with_max_iters(cfg.max_iters())
     .with_min_duration_off(cfg.min_duration_off())
-    .with_smoothing_epsilon(cfg.smoothing_epsilon());
+    .with_smoothing_epsilon(cfg.smoothing_epsilon())
+    .with_spill_options(cfg.spill_options().clone());
     diarize_offline(&input)
   }
 }

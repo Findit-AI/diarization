@@ -152,13 +152,11 @@ pub struct StreamingOfflineOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   diarization: OwnedPipelineOptions,
   /// Spill backend configuration. Defaults to
-  /// [`SpillOptions::default`]. Installed on the
-  /// process-global at the top of [`StreamingOfflineDiarizer::push_voice_range`]
-  /// and [`StreamingOfflineDiarizer::finalize`] so every transitive
-  /// [`crate::ops::spill::SpillVec::zeros`] call honors it.
-  ///
-  /// Not serialized: spill paths are deployment-specific and
-  /// `SpillOptions` itself does not implement `Serialize`/`Deserialize`.
+  /// [`SpillOptions::default`]. Passed by reference into
+  /// [`crate::aggregate::try_count_pyannote`] (per-range counts) and
+  /// the constructed [`OfflineInput`] / [`ReconstructInput`] so every
+  /// transitive [`crate::ops::spill::SpillVec::zeros`] call honors
+  /// it — no process-global side-effects.
   #[cfg_attr(feature = "serde", serde(default))]
   spill_options: SpillOptions,
 }
@@ -320,10 +318,6 @@ impl StreamingOfflineDiarizer {
     abs_start_sample: u64,
     samples: &[f32],
   ) -> Result<(), StreamingError> {
-    // Install the spill configuration on the process-global before
-    // any allocation. See `OwnedDiarizationPipeline::run` for the
-    // sticky-write tradeoff and multi-thread caveats.
-    crate::ops::spill::set_spill_options(self.options.spill_options.clone());
     let cfg = &self.options.diarization;
     if samples.is_empty() {
       return Err(StreamingShapeError::EmptyVoiceRange.into());
@@ -517,6 +511,7 @@ impl StreamingOfflineDiarizer {
       cfg.onset() as f64,
       chunks_sw_local,
       frames_sw_template,
+      &self.options.spill_options,
     )?
     .into_parts();
 
@@ -557,10 +552,6 @@ impl StreamingOfflineDiarizer {
   /// - All other errors propagate from `diarize_offline` /
   ///   `reconstruct`.
   pub fn finalize(&self, plda: &PldaTransform) -> Result<Arc<[DiarizedSpan]>, StreamingError> {
-    // Install the spill configuration on the process-global before
-    // any allocation in the global clustering / per-range
-    // reconstruct stages.
-    crate::ops::spill::set_spill_options(self.options.spill_options.clone());
     if self.ranges.is_empty() {
       return Ok(Arc::from([] as [DiarizedSpan; 0]));
     }
@@ -613,7 +604,8 @@ impl StreamingOfflineDiarizer {
     .with_fb(cfg.fb())
     .with_max_iters(cfg.max_iters())
     .with_min_duration_off(cfg.min_duration_off())
-    .with_smoothing_epsilon(cfg.smoothing_epsilon());
+    .with_smoothing_epsilon(cfg.smoothing_epsilon())
+    .with_spill_options(self.options.spill_options.clone());
     let offline_out = diarize_offline(&input)?;
     let hard_clusters = offline_out.hard_clusters();
     let num_clusters = offline_out.num_clusters();
@@ -647,7 +639,8 @@ impl StreamingOfflineDiarizer {
         r.chunks_sw_local,
         r.frames_sw_local,
       )
-      .with_smoothing_epsilon(cfg.smoothing_epsilon());
+      .with_smoothing_epsilon(cfg.smoothing_epsilon())
+      .with_spill_options(self.options.spill_options.clone());
       let discrete = reconstruct_grid(&recon_input)?;
 
       let max_cluster_local = hc_slice

@@ -81,8 +81,8 @@ pub struct AssignEmbeddingsInput<'a> {
   fa: f64,
   fb: f64,
   max_iters: usize,
-  /// Spill backend configuration. Installed on the process-global at
-  /// the top of [`assign_embeddings`] so the AHC pdist
+  /// Spill backend configuration. [`assign_embeddings`] passes this
+  /// by reference to [`crate::cluster::ahc::ahc_init`], whose pdist
   /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
   /// to [`SpillOptions::default`].
   spill_options: SpillOptions,
@@ -224,8 +224,8 @@ impl<'a> AssignEmbeddingsInput<'a> {
   pub const fn max_iters(&self) -> usize {
     self.max_iters
   }
-  /// Spill backend configuration. Installed on the process-global by
-  /// [`assign_embeddings`] before any allocation.
+  /// Spill backend configuration passed by reference to
+  /// [`crate::cluster::ahc::ahc_init`] from [`assign_embeddings`].
   pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
@@ -267,10 +267,9 @@ impl<'a> AssignEmbeddingsInput<'a> {
 pub fn assign_embeddings(
   input: &AssignEmbeddingsInput<'_>,
 ) -> Result<Arc<[ChunkAssignment]>, Error> {
-  // Install the spill configuration on the process-global before any
-  // allocation. Read separately because `spill_options` is non-Copy
-  // and would break the by-value scalar/reference destructure.
-  crate::ops::spill::set_spill_options(input.spill_options.clone());
+  // `..` skips `spill_options`: it is non-Copy, so destructuring it
+  // by value would not compile. The AHC call below reads it via
+  // `&input.spill_options` instead.
   let &AssignEmbeddingsInput {
     embeddings,
     num_chunks,
@@ -468,7 +467,7 @@ pub fn assign_embeddings(
       train_embeddings[(i, d)] = embeddings[(row, d)];
     }
   }
-  let ahc_clusters = ahc_init(&train_embeddings, threshold)?;
+  let ahc_clusters = ahc_init(&train_embeddings, threshold, &input.spill_options)?;
 
   // ── Stage 3 (caller-supplied): post_plda is the VBx feature matrix.
   // ── Stage 4: VBx ──────────────────────────────────────────────

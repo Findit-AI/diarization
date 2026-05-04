@@ -50,7 +50,11 @@ use nalgebra::DMatrix;
 /// `N=1` and returns `vec![0]` (one cluster, one member) so callers can
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
-pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>, Error> {
+pub fn ahc_init(
+  embeddings: &DMatrix<f64>,
+  threshold: f64,
+  spill_options: &crate::ops::spill::SpillOptions,
+) -> Result<Vec<usize>, Error> {
   use crate::cluster::ahc::error::{NonFiniteField, ShapeError};
   let (n, d) = embeddings.shape();
   if n == 0 {
@@ -122,7 +126,7 @@ pub fn ahc_init(embeddings: &DMatrix<f64>, threshold: f64) -> Result<Vec<usize>,
   // the buffer as `&mut [f64]`, which `SpillVec::as_mut_slice`
   // hands out for both backends without copying.
   let pair_count = crate::ops::scalar::pair_count(n);
-  let mut cond = crate::ops::spill::SpillVec::<f64>::zeros(pair_count)?;
+  let mut cond = crate::ops::spill::SpillVec::<f64>::zeros(pair_count, spill_options)?;
   crate::ops::scalar::pdist_euclidean_into(&normed_row_major, n, d, cond.as_mut_slice());
   let dend = linkage(cond.as_mut_slice(), n, Method::Centroid);
 

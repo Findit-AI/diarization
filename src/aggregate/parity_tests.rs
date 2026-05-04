@@ -49,6 +49,7 @@ fn run_count_parity(fixture_dir: &str) {
     0.5, // pyannote community-1 onset
     SlidingWindow::new(0.0, chunk_dur_arr[0], chunk_step_arr[0]),
     SlidingWindow::new(0.0, frame_dur_arr[0], frame_step_arr[0]),
+    &crate::ops::spill::SpillOptions::default(),
   );
   let computed = tensor.count();
 

@@ -158,10 +158,10 @@ pub struct ReconstructInput<'a> {
   chunks_sw: SlidingWindow,
   frames_sw: SlidingWindow,
   smoothing_epsilon: Option<f32>,
-  /// Spill backend configuration. Installed on the process-global at
-  /// the top of [`reconstruct`] so the per-cluster grid + mask
-  /// [`crate::ops::spill::SpillVec::zeros`] calls honor it. Defaults
-  /// to [`crate::ops::spill::SpillOptions::default`].
+  /// Spill backend configuration. [`reconstruct`] passes this by
+  /// reference to every per-cluster grid / mask
+  /// [`crate::ops::spill::SpillVec::zeros`] in its body. Defaults to
+  /// [`crate::ops::spill::SpillOptions::default`].
   spill_options: crate::ops::spill::SpillOptions,
 }
 
@@ -281,8 +281,9 @@ impl<'a> ReconstructInput<'a> {
   pub const fn smoothing_epsilon(&self) -> Option<f32> {
     self.smoothing_epsilon
   }
-  /// Spill backend configuration. Installed on the process-global by
-  /// [`reconstruct`] before any allocation.
+  /// Spill backend configuration passed by reference to every
+  /// [`crate::ops::spill::SpillVec::zeros`] call inside
+  /// [`reconstruct`].
   pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
     &self.spill_options
   }
@@ -307,10 +308,9 @@ impl<'a> ReconstructInput<'a> {
 /// - [`Error::Timing`] for non-finite or non-positive sliding-window
 ///   parameters.
 pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
-  // Install the spill configuration on the process-global before any
-  // allocation. Read separately because `spill_options` is non-Copy
-  // and would break the by-value scalar/reference destructure.
-  crate::ops::spill::set_spill_options(input.spill_options.clone());
+  // `..` skips `spill_options`: it is non-Copy, so destructuring it
+  // by value would not compile. The buffer-allocation sites below
+  // read it via `&input.spill_options` instead.
   let &ReconstructInput {
     segmentations,
     num_chunks,
@@ -601,8 +601,8 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // `SpillVec<u8>` because `bool` is not `bytemuck::Pod`; we use
   // `0u8` / `1u8` as the active flag (treated identically by the
   // downstream `mask[idx] == 1` check).
-  let mut clustered = crate::ops::spill::SpillVec::<f64>::zeros(cs_size)?;
-  let mut clustered_mask = crate::ops::spill::SpillVec::<u8>::zeros(cs_size)?;
+  let mut clustered = crate::ops::spill::SpillVec::<f64>::zeros(cs_size, &input.spill_options)?;
+  let mut clustered_mask = crate::ops::spill::SpillVec::<u8>::zeros(cs_size, &input.spill_options)?;
   let clustered = clustered.as_mut_slice();
   let clustered_mask = clustered_mask.as_mut_slice();
 
@@ -673,8 +673,10 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   // `output_grid_size` reaches `MAX_RECONSTRUCT_GRID_CELLS` at the
   // cap. `agg_mask` migrates from `Vec<bool>` to `SpillVec<u8>`
   // (0/1 sentinel; `bytemuck::Pod` requirement).
-  let mut aggregated = crate::ops::spill::SpillVec::<f32>::zeros(output_grid_size)?;
-  let mut agg_mask = crate::ops::spill::SpillVec::<u8>::zeros(output_grid_size)?;
+  let mut aggregated =
+    crate::ops::spill::SpillVec::<f32>::zeros(output_grid_size, &input.spill_options)?;
+  let mut agg_mask =
+    crate::ops::spill::SpillVec::<u8>::zeros(output_grid_size, &input.spill_options)?;
   let aggregated = aggregated.as_mut_slice();
   let agg_mask = agg_mask.as_mut_slice();
 

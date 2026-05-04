@@ -146,10 +146,11 @@ pub struct OfflineInput<'a> {
   max_iters: usize,
   min_duration_off: f64,
   smoothing_epsilon: Option<f32>,
-  /// Spill backend configuration. Installed on the process-global at
-  /// the top of [`diarize_offline`] so every transitive
-  /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
-  /// to [`SpillOptions::default`].
+  /// Spill backend configuration. [`diarize_offline`] forwards it to
+  /// the inner [`AssignEmbeddingsInput`] / [`ReconstructInput`], so
+  /// every transitive [`crate::ops::spill::SpillVec::zeros`] reached
+  /// from this call sees the same options. Defaults to
+  /// [`SpillOptions::default`].
   spill_options: SpillOptions,
 }
 
@@ -340,8 +341,9 @@ impl<'a> OfflineInput<'a> {
   pub const fn smoothing_epsilon(&self) -> Option<f32> {
     self.smoothing_epsilon
   }
-  /// Spill backend configuration. Installed on the process-global by
-  /// [`diarize_offline`] before any allocation.
+  /// Spill backend configuration forwarded into the inner
+  /// [`AssignEmbeddingsInput`] / [`ReconstructInput`] by
+  /// [`diarize_offline`].
   pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
@@ -436,11 +438,10 @@ impl OfflineOutput {
 /// - [`Error::Reconstruct`] for non-finite segmentations or invalid
 ///   sliding-window timing.
 pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error> {
-  // Install the spill configuration on the process-global before any
-  // allocation. Done before the destructure so we can read the
-  // non-Copy `spill_options` field directly; `..` in the pattern
-  // ignores it for the by-value scalar/reference bindings below.
-  crate::ops::spill::set_spill_options(input.spill_options.clone());
+  // `..` skips `spill_options`: it is non-Copy, so destructuring it
+  // by value would not compile. The inner `AssignEmbeddingsInput` /
+  // `ReconstructInput` carry their own clones (set below), and any
+  // direct allocation in this function reads `&input.spill_options`.
   let &OfflineInput {
     raw_embeddings,
     num_chunks,
@@ -618,7 +619,8 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   .with_threshold(threshold)
   .with_fa(fa)
   .with_fb(fb)
-  .with_max_iters(max_iters);
+  .with_max_iters(max_iters)
+  .with_spill_options(input.spill_options.clone());
   let hard_clusters = assign_embeddings(&pipeline_input)?;
   let _ = SP_ALIVE_THRESHOLD; // doc reference
 
@@ -656,7 +658,8 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     chunks_sw,
     frames_sw,
   )
-  .with_smoothing_epsilon(smoothing_epsilon);
+  .with_smoothing_epsilon(smoothing_epsilon)
+  .with_spill_options(input.spill_options.clone());
   let discrete_diarization = reconstruct(&recon_input)?;
 
   // ── Stage 6: discrete diarization → RTTM spans ─────────────────

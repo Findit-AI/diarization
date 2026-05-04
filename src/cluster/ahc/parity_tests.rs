@@ -129,7 +129,12 @@ fn run_ahc_parity(fixture_dir: &str) {
   let want: Vec<usize> = want_labels_i64.iter().map(|&v| v as usize).collect();
 
   // Run the port.
-  let got = ahc_init(&train, threshold).expect("ahc_init");
+  let got = ahc_init(
+    &train,
+    threshold,
+    &crate::ops::spill::SpillOptions::default(),
+  )
+  .expect("ahc_init");
 
   // Compare *partitions*, not exact label assignments. Scipy's fcluster
   // assigns labels via dendrogram tree traversal, which differs from
