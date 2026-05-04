@@ -31,5 +31,5 @@ mod parity_tests;
 mod tests;
 
 pub use crate::cluster::hungarian::ChunkAssignment;
-pub use algo::{AssignEmbeddingsInput, assign_embeddings};
+pub use algo::{AssignEmbeddingsInput, MAX_QINIT_CELLS, assign_embeddings};
 pub use error::Error;

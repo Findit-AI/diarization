@@ -19,6 +19,22 @@ use nalgebra::{DMatrix, DVector};
 /// pyannote (`utils/vbx.py:cluster_vbx`).
 const QINIT_SMOOTHING: f64 = 7.0;
 
+/// Hard upper bound on the `num_init * num_train` cell count of the
+/// dense `qinit` matrix that feeds VBx EM. Pyannote realistically
+/// converges on `num_init ∈ {1..15}` after AHC, and `num_train` is
+/// bounded by the pipeline's intended scale (~10_000 active pairs
+/// for a 1-hour stream). At those scales `qinit` is at most
+/// `15 * 10_000 = 150_000` cells (~1 MB).
+///
+/// A pathologically tiny `threshold` can isolate every training row
+/// (`num_init == num_train`); the resulting `num_train²` matrix
+/// allocation could hit hundreds of MB and OOM-abort the
+/// `Result`-returning pipeline. `MAX_QINIT_CELLS = 5_000_000`
+/// (~40 MB at f64) is well above realistic loads but well below the
+/// `vec!` capacity-overflow / OOM cliff. Surfaces as
+/// [`crate::pipeline::error::ShapeError::QinitAllocationTooLarge`].
+pub const MAX_QINIT_CELLS: usize = 5_000_000;
+
 /// Inputs to [`assign_embeddings`]. Grouped to keep the function
 /// signature manageable.
 #[derive(Debug, Clone)]
@@ -382,6 +398,26 @@ pub fn assign_embeddings(
   // ── Stage 3 (caller-supplied): post_plda is the VBx feature matrix.
   // ── Stage 4: VBx ──────────────────────────────────────────────
   let num_init = ahc_clusters.iter().copied().max().expect("num_train >= 2") + 1;
+  // Resource gate before the dense `num_train * num_init` qinit
+  // allocation. AHC with a pathologically tiny threshold can produce
+  // `num_init == num_train`, so the worst-case allocation scales
+  // quadratically with `num_train`. Surface as a typed error before
+  // hitting the `vec!` allocation panic / OOM-abort.
+  let qinit_cells = num_train
+    .checked_mul(num_init)
+    .ok_or(ShapeError::QinitAllocationTooLarge {
+      got: usize::MAX,
+      max: MAX_QINIT_CELLS,
+    })?;
+  if qinit_cells > MAX_QINIT_CELLS {
+    return Err(
+      ShapeError::QinitAllocationTooLarge {
+        got: qinit_cells,
+        max: MAX_QINIT_CELLS,
+      }
+      .into(),
+    );
+  }
   let qinit = build_qinit(&ahc_clusters, num_init);
   let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason() == StopReason::MaxIterationsReached {

@@ -132,6 +132,18 @@ pub enum ShapeError {
   /// the shape mismatch as data loss instead of a typed error.
   #[error("num_output_frames must be >= 1")]
   ZeroNumOutputFrames,
+  /// `num_output_frames` is positive but too small to cover the
+  /// last chunk's frames. The aggregation loop silently skips
+  /// `ofr >= num_output_frames` contributions via the `continue`
+  /// path, returning `Ok(_)` with a truncated aggregate instead of
+  /// surfacing the upstream frame-count drift. Required minimum is
+  /// `last_start_frame + num_frames_per_chunk`.
+  #[error(
+    "num_output_frames ({got}) is positive but smaller than the required \
+     minimum ({required} = last_start_frame + num_frames_per_chunk); \
+     trailing contributions would be silently truncated"
+  )]
+  HammingOutputFrameCountTooSmall { got: usize, required: usize },
   /// `num_output_frames` exceeds [`MAX_OUTPUT_FRAMES`]. The fallible
   /// aggregate APIs allocate `vec![0.0_f64; num_output_frames]` (or
   /// equivalent); a tiny `per_chunk_value` tensor combined with a
@@ -353,6 +365,25 @@ pub fn try_hamming_aggregate(
     let last_normalized = last_chunk_start_t / frame_step;
     if !last_normalized.is_finite() || !(safe_lo..=safe_hi).contains(&last_normalized) {
       return Err(ShapeError::HammingDerivedTimingOutOfRange.into());
+    }
+    // `num_output_frames` must cover the last chunk's last frame:
+    // `last_start_frame + num_frames_per_chunk` cells minimum.
+    // Smaller values silently drop trailing contributions via the
+    // `ofr >= num_output_frames` skip in the inner loop, returning
+    // `Ok(_)` with a truncated aggregate instead of surfacing the
+    // upstream frame-count drift.
+    let last_start_frame = last_normalized.round_ties_even() as i64;
+    if last_start_frame >= 0 {
+      let last_required = (last_start_frame as usize).saturating_add(num_frames_per_chunk);
+      if num_output_frames < last_required {
+        return Err(
+          ShapeError::HammingOutputFrameCountTooSmall {
+            got: num_output_frames,
+            required: last_required,
+          }
+          .into(),
+        );
+      }
     }
   }
   let mut out = vec![0.0_f64; num_output_frames];
@@ -1013,6 +1044,29 @@ mod try_variant_tests {
     let r = try_hamming_aggregate(&per_chunk, 1, 2, 1.0, 0.0169, 0);
     assert!(
       matches!(r, Err(Error::Shape(ShapeError::ZeroNumOutputFrames))),
+      "got {r:?}"
+    );
+  }
+
+  /// Round-24 [medium]: positive but undersized `num_output_frames`
+  /// would silently truncate trailing chunk contributions via the
+  /// inner-loop `ofr >= num_output_frames` skip. New guard rejects
+  /// any value below `last_start_frame + num_frames_per_chunk`.
+  #[test]
+  fn try_hamming_aggregate_rejects_undersized_num_output_frames() {
+    // 2 chunks of 4 frames each, chunk_step = 1.0, frame_step = 0.5.
+    // Last chunk start = 1 * 1.0 / 0.5 = 2 (round_ties_even).
+    // Required minimum = 2 + 4 = 6 frames.
+    let per_chunk = vec![1.0_f64; 2 * 4];
+    let r = try_hamming_aggregate(&per_chunk, 2, 4, 1.0, 0.5, 5);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::HammingOutputFrameCountTooSmall {
+          got: 5,
+          required: 6
+        }))
+      ),
       "got {r:?}"
     );
   }

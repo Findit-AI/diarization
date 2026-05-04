@@ -103,6 +103,27 @@ pub enum ShapeError {
     /// Cap (`MAX_ITERS_CAP = 1_000`).
     cap: usize,
   },
+  /// AHC initialization produced a `num_init × num_train` qinit
+  /// allocation whose cell count exceeds [`MAX_QINIT_CELLS`]. Pyannote
+  /// realistically converges on `num_init ≈ {1..15}`, so an
+  /// induced `num_init` matching `num_train` indicates either a
+  /// pathological tiny `threshold` or `num_train` past the
+  /// pipeline's intended scale (`~10_000` for a 1-hour stream).
+  /// The dense `qinit` plus VBx's `gamma`/posterior matrices would
+  /// allocate hundreds of MB before `vbx_iterate` runs — surface as
+  /// a typed error instead of OOM-aborting.
+  ///
+  /// [`MAX_QINIT_CELLS`]: crate::pipeline::MAX_QINIT_CELLS
+  #[error(
+    "AHC produced num_init * num_train ({got}) cells in qinit, exceeds MAX_QINIT_CELLS ({max}); \
+     reduce input size or raise threshold"
+  )]
+  QinitAllocationTooLarge {
+    /// `num_init * num_train`.
+    got: usize,
+    /// Cap (`MAX_QINIT_CELLS`).
+    max: usize,
+  },
 }
 
 /// Field that contained a non-finite value.
