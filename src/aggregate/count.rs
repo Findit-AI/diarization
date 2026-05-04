@@ -97,6 +97,18 @@ pub enum ShapeError {
   NonFiniteSegmentations,
   #[error("per_chunk_value contains non-finite values (NaN / +inf / -inf)")]
   NonFinitePerChunkValue,
+  /// Derived hamming chunk-start frame index `(c * chunk_step /
+  /// frame_step).round_ties_even() as i64` falls outside the
+  /// `[i64::MIN/2, i64::MAX/2]` safety range. Adversarial-but-finite
+  /// `chunk_step / frame_step` values can saturate the float-to-int
+  /// cast to `i64::MAX/MIN`; the subsequent `start_frame + cf`
+  /// addition then panics in debug or wraps/skips in release. Same
+  /// derived-index threat shape as `reconstruct`'s timing guard.
+  #[error(
+    "hamming derived chunk-start frame index out of i64 safety range; \
+     finite-but-extreme chunk_step / frame_step would saturate the cast"
+  )]
+  HammingDerivedTimingOutOfRange,
 }
 
 /// Output of [`count_pyannote`] / [`try_count_pyannote`]: the
@@ -232,6 +244,32 @@ pub fn try_hamming_aggregate(
   for &v in per_chunk_value {
     if !v.is_finite() {
       return Err(ShapeError::NonFinitePerChunkValue.into());
+    }
+  }
+  // Validate the derived chunk-start frame index for both endpoints
+  // (c=0 and c=num_chunks-1). The inner loop computes
+  //   start_frame = (c * chunk_step / frame_step).round_ties_even() as i64
+  //   ofr         = start_frame + cf
+  // For finite-but-adversarial `chunk_step / frame_step`, the
+  // float-to-int cast saturates to `i64::MAX/MIN`, after which
+  // `start_frame + cf` panics in debug or wraps/skips in release.
+  // Same threat shape as the reconstruct derived-timing guard;
+  // bound the index well within `i64` so the addition is always safe.
+  // The `c=0` endpoint is trivially `0 / step = 0`, but we check it
+  // for symmetry and to catch a future code change that lets `c=0`
+  // pull in a non-zero offset.
+  let safe_lo = -(i64::MAX / 2) as f64;
+  let safe_hi = (i64::MAX / 2) as f64;
+  // First chunk: c = 0 → chunk_start_t = 0. normalized = 0 always.
+  // Last chunk: c = num_chunks - 1.
+  if num_chunks > 0 {
+    let last_chunk_start_t = (num_chunks as f64 - 1.0) * chunk_step;
+    if !last_chunk_start_t.is_finite() {
+      return Err(ShapeError::HammingDerivedTimingOutOfRange.into());
+    }
+    let last_normalized = last_chunk_start_t / frame_step;
+    if !last_normalized.is_finite() || !(safe_lo..=safe_hi).contains(&last_normalized) {
+      return Err(ShapeError::HammingDerivedTimingOutOfRange.into());
     }
   }
   let mut out = vec![0.0_f64; num_output_frames];
@@ -814,5 +852,41 @@ mod try_variant_tests {
   #[should_panic(expected = "shape precondition violated")]
   fn hamming_aggregate_panics_on_short_input() {
     let _ = hamming_aggregate(&[0.0; 7], 3, 4, 1.0, 0.0169, 100);
+  }
+
+  /// Round-20 [medium]: derived chunk-start frame index must be
+  /// bounded within `[i64::MIN/2, i64::MAX/2]`. With finite-but-
+  /// adversarial `chunk_step / frame_step`, the float-to-int cast
+  /// `as i64` saturates, after which `start_frame + cf` panics in
+  /// debug or wraps/skips in release. Same threat shape as the
+  /// reconstruct derived-timing guard.
+  #[test]
+  fn try_hamming_aggregate_rejects_extreme_chunk_step_to_frame_step_ratio() {
+    // chunk_step = f64::MAX, frame_step = 1.0 → last chunk normalized
+    // = (num_chunks - 1) * f64::MAX → +inf or way past i64::MAX/2.
+    let per_chunk = vec![1.0_f64; 2 * 4]; // 2 chunks, 4 frames/chunk.
+    let r = try_hamming_aggregate(&per_chunk, 2, 4, f64::MAX, 1.0, 16);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::HammingDerivedTimingOutOfRange))
+      ),
+      "got {r:?}"
+    );
+  }
+
+  #[test]
+  fn try_hamming_aggregate_rejects_tiny_frame_step_makes_normalized_overflow_i64() {
+    // chunk_step = 1e150, frame_step = 1e-150. Their ratio = 1e300,
+    // multiplied by (num_chunks-1) overflows i64 safety bound.
+    let per_chunk = vec![1.0_f64; 2 * 4];
+    let r = try_hamming_aggregate(&per_chunk, 2, 4, 1e150, 1e-150, 16);
+    assert!(
+      matches!(
+        r,
+        Err(Error::Shape(ShapeError::HammingDerivedTimingOutOfRange))
+      ),
+      "got {r:?}"
+    );
   }
 }
