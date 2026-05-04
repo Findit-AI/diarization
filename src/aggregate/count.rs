@@ -564,6 +564,7 @@ pub fn try_num_output_frames_pyannote(
 /// Panics if `segmentations.len() != num_chunks * num_frames_per_chunk
 /// * num_speakers`. Use [`try_count_pyannote`] to surface the
 /// precondition as `Result<_, Error>` instead.
+#[allow(clippy::too_many_arguments)]
 pub fn count_pyannote(
   segmentations: &[f64],
   num_chunks: usize,
@@ -591,6 +592,7 @@ pub fn count_pyannote(
 /// when `segmentations.len() != num_chunks * num_frames_per_chunk *
 /// num_speakers` (or when that product overflows `usize`); otherwise
 /// identical output.
+#[allow(clippy::too_many_arguments)]
 pub fn try_count_pyannote(
   segmentations: &[f64],
   num_chunks: usize,

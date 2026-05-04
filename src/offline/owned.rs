@@ -435,8 +435,18 @@ impl OwnedDiarizationPipeline {
       (samples.len() - win).div_ceil(step) + 1
     };
 
+    // `padded_chunk` is fixed at WINDOW_SAMPLES = 160_000 f32 = 640 KB
+    // — well under any conceivable spill threshold. Leave on heap.
     let mut padded_chunk = vec![0.0_f32; win];
-    let mut segmentations: Vec<f64> = vec![0.0; num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK];
+    // `segmentations` and `raw_embeddings` scale with audio length:
+    // `segmentations` ≈ 50 MB / hour (f64), `raw_embeddings` ≈ 11 MB /
+    // hour (f32). Multi-hour recordings cross the 256 MiB default
+    // spill threshold; route through `SpillVec` so the heap path is
+    // bounded and large allocations fall back to file-backed mmap.
+    let segs_len = num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
+    let mut segmentations =
+      crate::ops::spill::SpillVec::<f64>::zeros(segs_len, cfg.spill_options())?;
+    let segs = segmentations.as_mut_slice();
 
     for c in 0..num_chunks {
       let start = c * step;
@@ -468,13 +478,16 @@ impl OwnedDiarizationPipeline {
         // both of which assume hard argmax binarization.
         let speakers = powerset_to_speakers_hard(&probs);
         for s in 0..SLOTS_PER_CHUNK {
-          segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = speakers[s] as f64;
+          segs[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = speakers[s] as f64;
         }
       }
     }
 
     // ── Stage 2: per-(chunk, slot) masked embedding ────────────────
-    let mut raw_embeddings: Vec<f32> = vec![0.0; num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM];
+    let emb_len = num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
+    let mut raw_embeddings =
+      crate::ops::spill::SpillVec::<f32>::zeros(emb_len, cfg.spill_options())?;
+    let embs = raw_embeddings.as_mut_slice();
 
     for c in 0..num_chunks {
       let start = c * step;
@@ -494,7 +507,7 @@ impl OwnedDiarizationPipeline {
         let mut any_active = false;
         for f in 0..FRAMES_PER_WINDOW {
           let active =
-            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset() as f64;
+            segs[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] >= cfg.onset() as f64;
           frame_mask[f] = active;
           any_active |= active;
         }
@@ -505,7 +518,7 @@ impl OwnedDiarizationPipeline {
           // satisfy `sum > 0` and admit a zero-embedding into PLDA,
           // failing `RawEmbedding::from_raw_array`'s norm guard.
           for f in 0..FRAMES_PER_WINDOW {
-            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
+            segs[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
           }
           continue;
         }
@@ -522,7 +535,7 @@ impl OwnedDiarizationPipeline {
           Err(crate::embed::Error::InvalidClip { .. })
           | Err(crate::embed::Error::DegenerateEmbedding) => {
             for f in 0..FRAMES_PER_WINDOW {
-              segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
+              segs[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
             }
             continue;
           }
@@ -544,14 +557,17 @@ impl OwnedDiarizationPipeline {
         let norm_sq: f64 = raw.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
         if norm_sq.sqrt() < 0.01 {
           for f in 0..FRAMES_PER_WINDOW {
-            segmentations[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
+            segs[(c * FRAMES_PER_WINDOW + f) * SLOTS_PER_CHUNK + s] = 0.0;
           }
           continue;
         }
         let dst = (c * SLOTS_PER_CHUNK + s) * EMBEDDING_DIM;
-        raw_embeddings[dst..dst + EMBEDDING_DIM].copy_from_slice(&raw);
+        embs[dst..dst + EMBEDDING_DIM].copy_from_slice(&raw);
       }
     }
+    // Drop the mutable handles before reborrowing as immutable for
+    // the count + offline-input dispatch below.
+    let _ = (segs, embs);
 
     // ── Stage 3: build count tensor + sliding-window timing ────────
     //
@@ -578,7 +594,7 @@ impl OwnedDiarizationPipeline {
     // Surface it as a typed `Error::Aggregate` instead so untrusted
     // config can never crash the process.
     let (count, frames_sw) = try_count_pyannote(
-      &segmentations,
+      segmentations.as_slice(),
       num_chunks,
       FRAMES_PER_WINDOW,
       SLOTS_PER_CHUNK,
@@ -592,10 +608,10 @@ impl OwnedDiarizationPipeline {
 
     // ── Stage 4: dispatch to diarize_offline ───────────────────────
     let input = OfflineInput::new(
-      &raw_embeddings,
+      raw_embeddings.as_slice(),
       num_chunks,
       SLOTS_PER_CHUNK,
-      &segmentations,
+      segmentations.as_slice(),
       FRAMES_PER_WINDOW,
       &count,
       num_output_frames,

@@ -42,6 +42,15 @@ pub enum Error {
   /// `count_pyannote` wrapper used by the audio entrypoint.
   #[error("offline: aggregate: {0}")]
   Aggregate(#[from] crate::aggregate::Error),
+  /// Propagated from `crate::ops::spill::SpillVec::zeros` when the
+  /// per-call segmentation / embedding scratch buffers cannot be
+  /// allocated (mmap failure on the spill backend, tempfile creation
+  /// failure, size overflow). At multi-hour scale these buffers
+  /// cross the 256 MiB default threshold and route through the
+  /// file-backed mmap path; surfacing the failure here keeps a
+  /// `Result`-returning API from OOM-aborting.
+  #[error("offline: spill: {0}")]
+  Spill(#[from] crate::ops::spill::SpillError),
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].
@@ -711,6 +720,7 @@ mod reconstruction_knob_validation_tests {
   /// the reconstruction-knob validation runs before any tensor work.
   /// Field-by-field construction bypasses the `with_*` setter
   /// panics, which is exactly what we are exercising.
+  #[allow(clippy::too_many_arguments)]
   fn build_input<'a>(
     raw: &'a [f32],
     seg: &'a [f64],
