@@ -124,6 +124,14 @@ pub enum ShapeError {
      finite-but-extreme chunk_step / frame_step would saturate the cast"
   )]
   HammingDerivedTimingOutOfRange,
+  /// `num_output_frames == 0`. Valid pyannote geometry with
+  /// `num_chunks > 0` produces a positive output-frame count; a
+  /// zero indicates a malformed frame-count computation upstream.
+  /// Without this guard, `try_hamming_aggregate` would silently
+  /// return `Ok([])` even for non-empty `per_chunk_value`, hiding
+  /// the shape mismatch as data loss instead of a typed error.
+  #[error("num_output_frames must be >= 1")]
+  ZeroNumOutputFrames,
   /// `num_output_frames` exceeds [`MAX_OUTPUT_FRAMES`]. The fallible
   /// aggregate APIs allocate `vec![0.0_f64; num_output_frames]` (or
   /// equivalent); a tiny `per_chunk_value` tensor combined with a
@@ -283,6 +291,15 @@ pub fn try_hamming_aggregate(
   }
   if !frame_step.is_finite() || frame_step <= 0.0 {
     return Err(ShapeError::InvalidHammingFrameStep.into());
+  }
+  // Reject `num_output_frames == 0`. Valid pyannote geometry with
+  // `num_chunks > 0` always produces a positive output-frame count;
+  // a zero here is a malformed frame-count computation. Without
+  // this guard the function silently returns `Ok([])` even for
+  // non-empty `per_chunk_value`, turning a shape error into data
+  // loss.
+  if num_output_frames == 0 {
+    return Err(ShapeError::ZeroNumOutputFrames.into());
   }
   // Cap output frame count to prevent allocation panics. Pyannote
   // community-1 produces ~59 frames/sec, so `MAX_OUTPUT_FRAMES`
@@ -983,6 +1000,19 @@ mod try_variant_tests {
         Err(Error::Shape(ShapeError::OutputFrameCountAboveMax { got, max }))
           if got == MAX_OUTPUT_FRAMES + 1 && max == MAX_OUTPUT_FRAMES
       ),
+      "got {r:?}"
+    );
+  }
+
+  /// Round-23 [medium]: `num_output_frames == 0` with non-empty
+  /// input would silently return `Ok([])`, hiding a malformed
+  /// frame-count computation as data loss.
+  #[test]
+  fn try_hamming_aggregate_rejects_zero_num_output_frames() {
+    let per_chunk = vec![0.0_f64; 1 * 2]; // 1 chunk, 2 frames/chunk.
+    let r = try_hamming_aggregate(&per_chunk, 1, 2, 1.0, 0.0169, 0);
+    assert!(
+      matches!(r, Err(Error::Shape(ShapeError::ZeroNumOutputFrames))),
       "got {r:?}"
     );
   }

@@ -121,6 +121,24 @@ pub enum StreamingShapeError {
   /// constraint as `OwnedPipelineOptions::with_smoothing_epsilon`.
   #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
   SmoothingEpsilonOutOfRange { value: Option<f32> },
+  /// AHC merge threshold is non-finite or non-positive. Caught
+  /// upfront so a misconfigured config doesn't burn per-range
+  /// segmentation + embedding inference before failing at the
+  /// final clustering boundary.
+  #[error("threshold ({value}) must be a positive finite scalar")]
+  InvalidThreshold { value: f64 },
+  /// VBx EM `fa` is non-finite or non-positive.
+  #[error("fa ({value}) must be a positive finite scalar")]
+  InvalidFa { value: f64 },
+  /// VBx EM `fb` is non-finite or non-positive.
+  #[error("fb ({value}) must be a positive finite scalar")]
+  InvalidFb { value: f64 },
+  /// `max_iters == 0`. Caught upfront in the streaming push path.
+  #[error("max_iters must be at least 1")]
+  ZeroMaxIters,
+  /// `max_iters` exceeds the documented cap. Caught upfront.
+  #[error("max_iters ({got}) exceeds cap ({cap})")]
+  MaxItersExceedsCap { got: usize, cap: usize },
 }
 
 /// Configuration for [`StreamingOfflineDiarizer`].
@@ -302,6 +320,38 @@ impl StreamingOfflineDiarizer {
       return Err(
         StreamingShapeError::SmoothingEpsilonOutOfRange {
           value: cfg.smoothing_epsilon(),
+        }
+        .into(),
+      );
+    }
+    // Preflight clustering hyperparameters BEFORE running per-range
+    // segmentation + embedding inference. `finalize` re-validates,
+    // but a misconfigured `threshold`/`fa`/`fb`/`max_iters` would
+    // otherwise burn every range's model-inference pass before
+    // failing at the global clustering boundary. Surface the error
+    // upfront on the first `push_voice_range` call.
+    if !cfg.threshold().is_finite() || cfg.threshold() <= 0.0 {
+      return Err(
+        StreamingShapeError::InvalidThreshold {
+          value: cfg.threshold(),
+        }
+        .into(),
+      );
+    }
+    if !cfg.fa().is_finite() || cfg.fa() <= 0.0 {
+      return Err(StreamingShapeError::InvalidFa { value: cfg.fa() }.into());
+    }
+    if !cfg.fb().is_finite() || cfg.fb() <= 0.0 {
+      return Err(StreamingShapeError::InvalidFb { value: cfg.fb() }.into());
+    }
+    if cfg.max_iters() == 0 {
+      return Err(StreamingShapeError::ZeroMaxIters.into());
+    }
+    if cfg.max_iters() > crate::cluster::vbx::MAX_ITERS_CAP {
+      return Err(
+        StreamingShapeError::MaxItersExceedsCap {
+          got: cfg.max_iters(),
+          cap: crate::cluster::vbx::MAX_ITERS_CAP,
         }
         .into(),
       );

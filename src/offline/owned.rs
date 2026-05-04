@@ -362,6 +362,34 @@ impl OwnedDiarizationPipeline {
         .into(),
       );
     }
+    // Preflight clustering hyperparameters (threshold/fa/fb/max_iters)
+    // BEFORE running segmentation + embedding inference. These are
+    // re-validated by `assign_embeddings` at the actual clustering
+    // boundary, but a misconfigured production deployment with e.g.
+    // `threshold = NaN` or `max_iters = 0` would otherwise burn an
+    // entire model-inference pass before failing — making config
+    // errors data-dependent and slow to detect. Surfacing them
+    // upfront keeps validation latency bounded.
+    use crate::pipeline::error::ShapeError as PipelineShapeError;
+    let to_err = |s: PipelineShapeError| -> Error { crate::pipeline::Error::Shape(s).into() };
+    if !cfg.threshold().is_finite() || cfg.threshold() <= 0.0 {
+      return Err(to_err(PipelineShapeError::InvalidThreshold));
+    }
+    if !cfg.fa().is_finite() || cfg.fa() <= 0.0 {
+      return Err(to_err(PipelineShapeError::InvalidFa));
+    }
+    if !cfg.fb().is_finite() || cfg.fb() <= 0.0 {
+      return Err(to_err(PipelineShapeError::InvalidFb));
+    }
+    if cfg.max_iters() == 0 {
+      return Err(to_err(PipelineShapeError::ZeroMaxIters));
+    }
+    if cfg.max_iters() > crate::cluster::vbx::MAX_ITERS_CAP {
+      return Err(to_err(PipelineShapeError::MaxItersExceedsCap {
+        got: cfg.max_iters(),
+        cap: crate::cluster::vbx::MAX_ITERS_CAP,
+      }));
+    }
 
     // ── Stage 1: chunked sliding-window segmentation ───────────────
     // Last-chunk zero-pad if `samples` doesn't align with the grid.
