@@ -26,6 +26,7 @@ use crate::{
   aggregate::try_count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
   offline::{Error, OfflineInput, OfflineOutput, diarize_offline},
+  ops::spill::SpillOptions,
   plda::PldaTransform,
   reconstruct::SlidingWindow,
   segment::{
@@ -89,7 +90,7 @@ pub struct OwnedPipelineOptions {
   #[cfg_attr(feature = "serde", serde(default = "default_smoothing_epsilon"))]
   smoothing_epsilon: Option<f32>,
   /// Spill backend configuration. Defaults to
-  /// [`crate::ops::spill::SpillOptions::default`] (256 MiB heap
+  /// [`SpillOptions::default`] (256 MiB heap
   /// threshold, [`std::env::temp_dir`] spill directory).
   /// [`OwnedDiarizationPipeline::run`] installs this on the
   /// process-global via [`crate::ops::spill::set_spill_options`] at
@@ -100,8 +101,8 @@ pub struct OwnedPipelineOptions {
   /// `SpillOptions` type itself does not implement `Serialize` /
   /// `Deserialize` (would require gating its `PathBuf` field
   /// per-feature).
-  #[cfg_attr(feature = "serde", serde(skip))]
-  spill_options: crate::ops::spill::SpillOptions,
+  #[cfg_attr(feature = "serde", serde(default))]
+  spill_options: SpillOptions,
 }
 
 #[cfg(feature = "serde")]
@@ -135,7 +136,7 @@ const fn default_smoothing_epsilon() -> Option<f32> {
 
 impl OwnedPipelineOptions {
   /// Construct with `community-1` defaults. `spill_options` defaults
-  /// to [`crate::ops::spill::SpillOptions::new`] (256 MiB threshold,
+  /// to [`SpillOptions::new`] (256 MiB threshold,
   /// [`std::env::temp_dir`] spill directory).
   pub const fn new() -> Self {
     Self {
@@ -147,7 +148,7 @@ impl OwnedPipelineOptions {
       max_iters: 20,
       min_duration_off: 0.0,
       smoothing_epsilon: Some(0.1),
-      spill_options: crate::ops::spill::SpillOptions::new(),
+      spill_options: SpillOptions::new(),
     }
   }
 
@@ -187,7 +188,7 @@ impl OwnedPipelineOptions {
   }
   /// Spill backend configuration. Installed on the process-global at
   /// the start of [`OwnedDiarizationPipeline::run`].
-  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+  pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
 
@@ -289,13 +290,13 @@ impl OwnedPipelineOptions {
   /// Not `const fn` because dropping the previous `SpillOptions`
   /// runs `<PathBuf as Drop>::drop`, which is not const.
   #[must_use]
-  pub fn with_spill_options(mut self, opts: crate::ops::spill::SpillOptions) -> Self {
+  pub fn with_spill_options(mut self, opts: SpillOptions) -> Self {
     self.spill_options = opts;
     self
   }
   /// Mutating: replace the spill backend configuration. Same semantics
   /// as [`Self::with_spill_options`].
-  pub fn set_spill_options(&mut self, opts: crate::ops::spill::SpillOptions) -> &mut Self {
+  pub fn set_spill_options(&mut self, opts: SpillOptions) -> &mut Self {
     self.spill_options = opts;
     self
   }

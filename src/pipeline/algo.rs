@@ -9,6 +9,7 @@ use crate::{
     hungarian::{ChunkAssignment, UNMATCHED, constrained_argmax},
     vbx::{StopReason, vbx_iterate},
   },
+  ops::spill::SpillOptions,
   pipeline::error::Error,
   segment::options::MAX_SPEAKER_SLOTS,
 };
@@ -83,8 +84,8 @@ pub struct AssignEmbeddingsInput<'a> {
   /// Spill backend configuration. Installed on the process-global at
   /// the top of [`assign_embeddings`] so the AHC pdist
   /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
-  /// to [`crate::ops::spill::SpillOptions::default`].
-  spill_options: crate::ops::spill::SpillOptions,
+  /// to [`SpillOptions::default`].
+  spill_options: SpillOptions,
 }
 
 impl<'a> AssignEmbeddingsInput<'a> {
@@ -129,7 +130,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
       fa: 0.07,
       fb: 0.8,
       max_iters: 20,
-      spill_options: crate::ops::spill::SpillOptions::new(),
+      spill_options: SpillOptions::new(),
     }
   }
 
@@ -166,7 +167,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
   /// Not `const fn`: `SpillOptions` has a non-const destructor
   /// (`Option<PathBuf>`).
   #[must_use]
-  pub fn with_spill_options(mut self, spill_options: crate::ops::spill::SpillOptions) -> Self {
+  pub fn with_spill_options(mut self, spill_options: SpillOptions) -> Self {
     self.spill_options = spill_options;
     self
   }
@@ -225,7 +226,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
   }
   /// Spill backend configuration. Installed on the process-global by
   /// [`assign_embeddings`] before any allocation.
-  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+  pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
 }

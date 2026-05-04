@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::{
   cluster::centroid::SP_ALIVE_THRESHOLD,
   embed::EMBEDDING_DIM,
+  ops::spill::SpillOptions,
   pipeline::{AssignEmbeddingsInput, ChunkAssignment, assign_embeddings},
   plda::{PldaTransform, RawEmbedding},
   reconstruct::{ReconstructInput, RttmSpan, SlidingWindow, reconstruct, try_discrete_to_spans},
@@ -148,8 +149,8 @@ pub struct OfflineInput<'a> {
   /// Spill backend configuration. Installed on the process-global at
   /// the top of [`diarize_offline`] so every transitive
   /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
-  /// to [`crate::ops::spill::SpillOptions::default`].
-  spill_options: crate::ops::spill::SpillOptions,
+  /// to [`SpillOptions::default`].
+  spill_options: SpillOptions,
 }
 
 impl<'a> OfflineInput<'a> {
@@ -198,7 +199,7 @@ impl<'a> OfflineInput<'a> {
       max_iters: 20,
       min_duration_off: 0.0,
       smoothing_epsilon: None,
-      spill_options: crate::ops::spill::SpillOptions::new(),
+      spill_options: SpillOptions::new(),
     }
   }
 
@@ -270,7 +271,7 @@ impl<'a> OfflineInput<'a> {
   /// Not `const fn`: `SpillOptions` has a non-const destructor
   /// (`Option<PathBuf>`).
   #[must_use]
-  pub fn with_spill_options(mut self, spill_options: crate::ops::spill::SpillOptions) -> Self {
+  pub fn with_spill_options(mut self, spill_options: SpillOptions) -> Self {
     self.spill_options = spill_options;
     self
   }
@@ -341,7 +342,7 @@ impl<'a> OfflineInput<'a> {
   }
   /// Spill backend configuration. Installed on the process-global by
   /// [`diarize_offline`] before any allocation.
-  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+  pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
 }
@@ -734,7 +735,7 @@ mod reconstruction_knob_validation_tests {
       max_iters: 20,
       min_duration_off,
       smoothing_epsilon,
-      spill_options: crate::ops::spill::SpillOptions::new(),
+      spill_options: SpillOptions::new(),
     }
   }
 

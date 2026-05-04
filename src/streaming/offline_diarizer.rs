@@ -52,6 +52,7 @@ use crate::{
   aggregate::try_count_pyannote,
   embed::{EMBEDDING_DIM, EmbedModel},
   offline::{OfflineInput, OwnedPipelineOptions, diarize_offline},
+  ops::spill::SpillOptions,
   plda::PldaTransform,
   reconstruct::{
     ReconstructInput, RttmSpan, SlidingWindow, discrete_to_spans, reconstruct as reconstruct_grid,
@@ -151,15 +152,15 @@ pub struct StreamingOfflineOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   diarization: OwnedPipelineOptions,
   /// Spill backend configuration. Defaults to
-  /// [`crate::ops::spill::SpillOptions::default`]. Installed on the
+  /// [`SpillOptions::default`]. Installed on the
   /// process-global at the top of [`StreamingOfflineDiarizer::push_voice_range`]
   /// and [`StreamingOfflineDiarizer::finalize`] so every transitive
   /// [`crate::ops::spill::SpillVec::zeros`] call honors it.
   ///
   /// Not serialized: spill paths are deployment-specific and
   /// `SpillOptions` itself does not implement `Serialize`/`Deserialize`.
-  #[cfg_attr(feature = "serde", serde(skip))]
-  spill_options: crate::ops::spill::SpillOptions,
+  #[cfg_attr(feature = "serde", serde(default))]
+  spill_options: SpillOptions,
 }
 
 impl StreamingOfflineOptions {
@@ -168,7 +169,7 @@ impl StreamingOfflineOptions {
   pub const fn new() -> Self {
     Self {
       diarization: OwnedPipelineOptions::new(),
-      spill_options: crate::ops::spill::SpillOptions::new(),
+      spill_options: SpillOptions::new(),
     }
   }
 
@@ -178,14 +179,14 @@ impl StreamingOfflineOptions {
   }
 
   /// Borrow the spill backend configuration.
-  pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
+  pub const fn spill_options(&self) -> &SpillOptions {
     &self.spill_options
   }
 
   /// Builder: replace the diarization parameters.
   ///
   /// Not `const fn`: [`OwnedPipelineOptions`] now has a non-const
-  /// destructor through [`crate::ops::spill::SpillOptions`]'s `PathBuf`.
+  /// destructor through [`SpillOptions`]'s `PathBuf`.
   #[must_use]
   pub fn with_diarization(mut self, diarization: OwnedPipelineOptions) -> Self {
     self.diarization = diarization;
@@ -194,13 +195,13 @@ impl StreamingOfflineOptions {
 
   /// Builder: replace the spill backend configuration.
   #[must_use]
-  pub fn with_spill_options(mut self, opts: crate::ops::spill::SpillOptions) -> Self {
+  pub fn with_spill_options(mut self, opts: SpillOptions) -> Self {
     self.spill_options = opts;
     self
   }
 
   /// Mutating: replace the spill backend configuration.
-  pub fn set_spill_options(&mut self, opts: crate::ops::spill::SpillOptions) -> &mut Self {
+  pub fn set_spill_options(&mut self, opts: SpillOptions) -> &mut Self {
     self.spill_options = opts;
     self
   }
