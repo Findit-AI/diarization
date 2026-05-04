@@ -35,6 +35,27 @@ const QINIT_SMOOTHING: f64 = 7.0;
 /// [`crate::pipeline::error::ShapeError::QinitAllocationTooLarge`].
 pub const MAX_QINIT_CELLS: usize = 5_000_000;
 
+/// Hard upper bound on `num_train` — the pre-AHC active-pair count.
+/// AHC's hot path is `pdist_euclidean` which is `O(num_train²)`
+/// memory and `O(num_train² · embed_dim)` time. With pyannote's
+/// `embed_dim = 256` and the documented intended scale of ~10_000
+/// active pairs for a 1-hour stream, that's ~50M f64 pair distances
+/// (~400 MB) — already heavy but tractable.
+///
+/// The pre-AHC cap rejects pathologically large inputs that would
+/// burn unbounded distance work before any clustering decision is
+/// made. `MAX_AHC_TRAIN = 32_000` covers ~3 hours at 1-second chunks
+/// (~3× the documented 1-hour intended scale), but rejects inputs
+/// past the point where AHC's `O(N²)` allocation crosses 1 GB. The
+/// realistic post-AHC `num_init` after VBx convergence is small
+/// (typically `≤ 15`), so the post-AHC `num_init * num_train` check
+/// against `MAX_QINIT_CELLS` is the precise allocation guard;
+/// `MAX_AHC_TRAIN` is the broader pre-AHC work guard.
+///
+/// Surfaces as
+/// [`crate::pipeline::error::ShapeError::AhcTrainSizeAboveMax`].
+pub const MAX_AHC_TRAIN: usize = 32_000;
+
 /// Inputs to [`assign_embeddings`]. Grouped to keep the function
 /// signature manageable.
 #[derive(Debug, Clone)]
@@ -378,6 +399,26 @@ pub fn assign_embeddings(
       (0..num_chunks)
         .map(|_| [0_i32; MAX_SPEAKER_SLOTS as usize])
         .collect(),
+    );
+  }
+
+  // Pre-AHC work cap. AHC's hot path is `pdist_euclidean` with
+  // `O(num_train² · embed_dim)` time + `O(num_train²)` memory.
+  // Reject `num_train > MAX_AHC_TRAIN` upfront so a pathological
+  // input cannot burn unbounded distance work before any clustering
+  // decision. This is a SEPARATE concern from the qinit allocation
+  // cap (`MAX_QINIT_CELLS`): qinit is `num_init * num_train` post-
+  // AHC, and realistic `num_init ≤ 15`, so `num_train²` would be
+  // far too tight. The post-AHC check below catches the actual
+  // qinit allocation; this pre-AHC check just bounds the AHC work
+  // itself.
+  if num_train > MAX_AHC_TRAIN {
+    return Err(
+      ShapeError::AhcTrainSizeAboveMax {
+        got: num_train,
+        max: MAX_AHC_TRAIN,
+      }
+      .into(),
     );
   }
 

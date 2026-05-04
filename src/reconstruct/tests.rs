@@ -754,6 +754,107 @@ fn reconstruct_rejects_chunks_sw_start_at_f64_max() {
   assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
 }
 
+/// Round-26 [high]: `reconstruct` must reject grid allocations that
+/// would OOM-abort the `Result`-returning API. A direct caller with
+/// a modest count buffer + `num_output_frames` in the millions +
+/// hard cluster id near 1023 could otherwise allocate multi-GB
+/// `aggregated`/`agg_mask` scratch buffers. Cap at
+/// `MAX_RECONSTRUCT_GRID_CELLS`.
+#[test]
+fn reconstruct_rejects_grid_size_above_max() {
+  use crate::reconstruct::{MAX_RECONSTRUCT_GRID_CELLS, error::ShapeError};
+  // We can't realistically allocate `MAX_RECONSTRUCT_GRID_CELLS + 1`
+  // segmentation cells in a test, but the cap fires before the
+  // shape product check is consulted: we pass declared dimensions
+  // whose product exceeds the cap. The segmentation length check
+  // would later flag `SegmentationsLenMismatch`, but the cap fires
+  // first since it is positioned above the post-derived-timing
+  // boundary.
+  //
+  // A high cluster id with large num_output_frames is the realistic
+  // adversarial shape. We use `num_output_frames = 1e8` (== cap)
+  // and `num_clusters_from_hard = MAX_CLUSTER_ID + 1 = 1024` —
+  // product = ~1e11 cells.
+  //
+  // Synthesizing valid input with that geometry needs careful
+  // sizing; instead, exercise the cap via a small num_chunks but a
+  // hard_clusters that drives num_clusters_from_hard high.
+  // num_clusters_from_hard = max_cluster_id + 1.
+  let chunks_sw = SlidingWindow::new(0.0, 1.0, 1.0);
+  let frames_sw = SlidingWindow::new(0.0, 0.062, 0.0169);
+  let num_chunks = 1;
+  let num_frames_per_chunk = 4;
+  let num_speakers = 2;
+  let segmentations = vec![0.5_f64; num_chunks * num_frames_per_chunk * num_speakers];
+  // Use MAX_CLUSTER_ID = 1023 to drive num_clusters_from_hard = 1024.
+  use crate::reconstruct::MAX_CLUSTER_ID;
+  let hard_clusters = vec![[0i32, MAX_CLUSTER_ID, UNMATCHED]; num_chunks];
+  // num_output_frames * 1024 > MAX_RECONSTRUCT_GRID_CELLS (1e8) →
+  // num_output_frames > ~98_000. Use 200_000 to be comfortably above.
+  let num_output_frames = 200_000;
+  let count = vec![0u8; num_output_frames];
+  let input = ReconstructInput::new(
+    &segmentations,
+    num_chunks,
+    num_frames_per_chunk,
+    num_speakers,
+    &hard_clusters,
+    &count,
+    num_output_frames,
+    chunks_sw,
+    frames_sw,
+  );
+  let r = reconstruct(&input);
+  assert!(
+    matches!(
+      r,
+      Err(Error::Shape(ShapeError::OutputGridTooLarge { got, max }))
+        if got > MAX_RECONSTRUCT_GRID_CELLS && max == MAX_RECONSTRUCT_GRID_CELLS
+    ),
+    "got {r:?}"
+  );
+}
+
+/// Round-25 [medium]: `reconstruct` must reject `num_output_frames`
+/// smaller than `last_start_frame + num_frames_per_chunk`. Same
+/// truncation pattern as `try_hamming_aggregate`. Without this the
+/// inner-loop `out_f >= num_output_frames` skip silently drops
+/// trailing chunk contributions.
+#[test]
+fn reconstruct_rejects_undersized_num_output_frames() {
+  use crate::reconstruct::error::ShapeError;
+  // 2 chunks of 4 frames each, chunk_step = 1.0, frames_sw step = 0.5.
+  // Last chunk start = round_ties_even(1 * 1.0 / 0.5) = 2.
+  // Required minimum = 2 + 4 = 6 frames. We declare 5.
+  let chunks_sw = SlidingWindow::new(0.0, 1.0, 1.0);
+  let frames_sw = SlidingWindow::new(0.0, 0.5, 0.5);
+  let segmentations = vec![0.5_f64; 2 * 4 * 2];
+  let hard_clusters = vec![[0i32, 1i32, UNMATCHED]; 2];
+  let count = vec![1u8; 5];
+  let input = ReconstructInput::new(
+    &segmentations,
+    2,
+    4,
+    2,
+    &hard_clusters,
+    &count,
+    5,
+    chunks_sw,
+    frames_sw,
+  );
+  let r = reconstruct(&input);
+  assert!(
+    matches!(
+      r,
+      Err(Error::Shape(ShapeError::OutputFrameCountTooSmall {
+        got: 5,
+        required: 6,
+      }))
+    ),
+    "got {r:?}"
+  );
+}
+
 /// Round-22 [medium]: `try_discrete_to_spans` must reject empty
 /// grids and huge `num_clusters`. Without these, `num_frames *
 /// num_clusters == 0` makes any `num_clusters` pass the length

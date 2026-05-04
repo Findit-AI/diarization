@@ -22,7 +22,10 @@ mod rttm_parity_tests;
 #[cfg(test)]
 mod tests;
 
-pub use algo::{MAX_CLUSTER_ID, MAX_COUNT_PER_FRAME, ReconstructInput, SlidingWindow, reconstruct};
+pub use algo::{
+  MAX_CLUSTER_ID, MAX_COUNT_PER_FRAME, MAX_RECONSTRUCT_GRID_CELLS, ReconstructInput, SlidingWindow,
+  reconstruct,
+};
 pub use error::Error;
 pub use rttm::{RttmSpan, discrete_to_spans, spans_to_rttm_lines, try_discrete_to_spans};
 

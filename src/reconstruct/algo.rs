@@ -27,6 +27,20 @@ pub const MAX_CLUSTER_ID: i32 = 1023;
 /// speaker space.
 pub const MAX_COUNT_PER_FRAME: u8 = 64;
 
+/// Hard upper bound on `num_output_frames * num_clusters` accepted by
+/// [`reconstruct`]. The function allocates `aggregated` and
+/// `agg_mask` (each `output_grid_size` cells of `f32` and `bool`),
+/// plus per-frame downstream buffers. Without this cap, a caller can
+/// pass `num_output_frames` in the millions and `num_clusters` near
+/// `MAX_CLUSTER_ID + 1 = 1024`, producing multi-GB allocations from a
+/// `Result`-returning API and aborting the process on OOM.
+///
+/// `1e8` cells is `400 MB` of `f32` plus `100 MB` of `bool`, well
+/// above the realistic production envelope (`num_output_frames`
+/// bounded by the audio duration, `num_clusters` typically 1–4) but
+/// safely below the `vec!` capacity-overflow / OOM cliff.
+pub const MAX_RECONSTRUCT_GRID_CELLS: usize = 100_000_000;
+
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingWindow {
@@ -84,8 +98,17 @@ impl SlidingWindow {
   /// `pyannote.core.SlidingWindow.closest_frame(t)` — round to the
   /// nearest frame index whose center is at `t`. Frame `i`'s center
   /// is at `start + duration / 2 + i * step`.
+  ///
+  /// Uses `round_ties_even` (banker's rounding) so the rounding
+  /// contract matches `crate::aggregate::count`'s
+  /// `(c * chunk_step / frame_step).round_ties_even() as i64`. With
+  /// plain `f64::round` (half-away-from-zero), exact `k + 0.5`
+  /// inputs would shift the chunk start by one frame relative to
+  /// the aggregate code, producing version/parity-dependent
+  /// boundaries on tie inputs. The captured fixtures don't hit
+  /// exact ties, so the parity tests can't catch this drift.
   fn closest_frame(&self, t: f64) -> i64 {
-    ((t - self.start - self.duration / 2.0) / self.step).round() as i64
+    ((t - self.start - self.duration / 2.0) / self.step).round_ties_even() as i64
   }
 }
 
@@ -411,6 +434,37 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     if !normalized_last.is_finite() || !(safe_lo..=safe_hi).contains(&normalized_last) {
       return Err(TimingError::NonFiniteParameter.into());
     }
+    // `num_output_frames` must cover the last chunk's last frame.
+    // Otherwise the inner loop's `out_f >= num_output_frames` skip
+    // silently truncates trailing chunk contributions, returning
+    // `Ok(_)` with the tail of the diarization dropped. Same shape
+    // as the `try_hamming_aggregate` undersized-frames guard.
+    //
+    // Use `usize::try_from` rather than `as usize`: on 32-bit
+    // targets a positive `i64` past `u32::MAX` wraps via `as`, so
+    // the cast could produce a small valid usize and pass the
+    // following `<` check, then write into a low-numbered output
+    // frame. `try_from` returns `Err` for out-of-range values,
+    // which we surface as `InvalidFramesTiming` (the same path
+    // adversarial-but-finite raw timing already takes).
+    let last_start_frame = normalized_last.round_ties_even() as i64;
+    if last_start_frame >= 0 {
+      let last_start_usize = usize::try_from(last_start_frame).map_err(|_| {
+        ShapeError::InvalidFramesTiming(
+          "derived last_start_frame exceeds usize::MAX on this target",
+        )
+      })?;
+      let last_required = last_start_usize.saturating_add(num_frames_per_chunk);
+      if num_output_frames < last_required {
+        return Err(
+          ShapeError::OutputFrameCountTooSmall {
+            got: num_output_frames,
+            required: last_required,
+          }
+          .into(),
+        );
+      }
+    }
   }
   // Reject all non-finite segmentation values (NaN and ±inf). Pyannote's
   // `Inference.aggregate` does `np.nan_to_num(score, nan=0.0)` and tracks
@@ -549,6 +603,20 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   let output_grid_size = num_output_frames
     .checked_mul(num_clusters)
     .ok_or(ShapeError::OutputGridSizeOverflow)?;
+  // Cap the grid allocation at `MAX_RECONSTRUCT_GRID_CELLS` so the
+  // `Result`-returning API never reaches an OOM-aborting `vec!`
+  // even from valid-shape inputs. A multi-million-frame +
+  // ~1024-cluster grid would allocate multiple GB; production
+  // realistic loads stay well within the cap.
+  if output_grid_size > MAX_RECONSTRUCT_GRID_CELLS {
+    return Err(
+      ShapeError::OutputGridTooLarge {
+        got: output_grid_size,
+        max: MAX_RECONSTRUCT_GRID_CELLS,
+      }
+      .into(),
+    );
+  }
   let mut aggregated = vec![0.0f32; output_grid_size];
   let mut agg_mask = vec![false; output_grid_size];
 

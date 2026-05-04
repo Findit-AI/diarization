@@ -121,6 +121,30 @@ pub enum ShapeError {
   /// unbounded per-cluster loop.
   #[error("num_clusters ({got}) exceeds cap ({max} = MAX_CLUSTER_ID + 1)")]
   TooManyClusters { got: usize, max: usize },
+  /// `num_output_frames * num_clusters` exceeds
+  /// [`MAX_RECONSTRUCT_GRID_CELLS`]. The `reconstruct` function
+  /// allocates `aggregated` and `agg_mask` of that size; without
+  /// this cap a caller could pass valid-shape but pathologically
+  /// large dimensions (millions of frames × ~1024 clusters) and
+  /// trigger OOM-abort from a `Result`-returning API. Surface a
+  /// typed error before the `vec!` allocation.
+  ///
+  /// [`MAX_RECONSTRUCT_GRID_CELLS`]: crate::reconstruct::MAX_RECONSTRUCT_GRID_CELLS
+  #[error("num_output_frames * num_clusters ({got}) exceeds MAX_RECONSTRUCT_GRID_CELLS ({max})")]
+  OutputGridTooLarge { got: usize, max: usize },
+  /// `num_output_frames` is positive but too small to cover the
+  /// last chunk's frames. The `reconstruct` aggregation loop
+  /// silently skips `out_f >= num_output_frames` contributions via
+  /// the `continue` path, returning `Ok(_)` with a truncated
+  /// diarization grid (trailing speech dropped). Same shape as the
+  /// `try_hamming_aggregate` undersized-frames guard. Required
+  /// minimum is `last_start_frame + num_frames_per_chunk`.
+  #[error(
+    "num_output_frames ({got}) is positive but smaller than the required \
+     minimum ({required} = last_start_frame + num_frames_per_chunk); \
+     trailing chunk contributions would be silently truncated"
+  )]
+  OutputFrameCountTooSmall { got: usize, required: usize },
 }
 
 /// Field that contained a non-finite value.

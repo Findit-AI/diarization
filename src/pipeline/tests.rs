@@ -476,53 +476,41 @@ mod hyperparameter_validation_before_fast_path {
   }
 }
 
-/// Round-24 [high]: the dense `num_train * num_init` qinit
-/// allocation must be capped before VBx EM runs. AHC with a
-/// pathologically tiny threshold isolates every training row
-/// (`num_init == num_train`); on a large `num_train` this would
-/// allocate hundreds of MB and OOM-abort the `Result`-returning
-/// pipeline.
-///
-/// Synthesizing a `num_train` whose square exceeds
-/// `MAX_QINIT_CELLS = 5e6` while keeping the input buffers within
-/// available memory means `num_train > sqrt(5e6) ≈ 2237`. We use
-/// `num_train = 3000` and force AHC to assign every row to its own
-/// cluster by passing distinct one-hot embeddings (cosine distance
-/// = 1.0 between any two; AHC's default threshold of `1.0` would
-/// merge them, so we pass an extremely tight threshold via
-/// `with_threshold(0.001)`).
+/// Round-26 [high]: pre-AHC `num_train` cap rejects pathologically
+/// large inputs upfront so AHC's `O(num_train² · embed_dim)`
+/// distance work cannot run unbounded. The cap is sized at
+/// `MAX_AHC_TRAIN = 32_000` (~3× the documented 1-hour intended
+/// scale of ~10k active pairs); production loads pass through, but
+/// adversarial inputs an order of magnitude past intended scale are
+/// rejected with a typed error.
 #[cfg(test)]
-mod qinit_allocation_cap_tests {
+mod ahc_train_cap_tests {
   use super::*;
-  use crate::pipeline::{MAX_QINIT_CELLS, error::ShapeError};
+  use crate::pipeline::{MAX_AHC_TRAIN, error::ShapeError};
 
   #[test]
-  fn rejects_qinit_when_num_train_squared_exceeds_cap() {
-    // num_train = 3000 → num_train * num_init worst case = 9e6,
-    // > MAX_QINIT_CELLS (5e6). We need num_init == num_train, which
-    // happens when AHC's threshold is so tight that no pairs merge.
-    // Use orthogonal one-hot embeddings: cosine distance = 1.0 between
-    // any two, so threshold = 0.001 keeps every row isolated.
-    let num_train = 3000;
-    let num_chunks = 1000; // 3 slots/chunk * 1000 = 3000 train rows.
-    let num_speakers = 3; // pipeline requires MAX_SPEAKER_SLOTS = 3.
-    let embed_dim = num_train; // one-hot per row, full rank.
+  fn rejects_num_train_above_max_ahc_train() {
+    // num_train = MAX_AHC_TRAIN + 1 = 32_001. Use small embed_dim so
+    // the test allocates tiny buffers; the cap fires before any
+    // pdist work.
+    let num_train = MAX_AHC_TRAIN + 1;
+    let num_speakers = 3;
+    let num_chunks = num_train.div_ceil(num_speakers);
+    let embed_dim = 4;
     let plda_dim = 4;
     let num_frames = 1;
 
-    // One-hot embeddings: row i has 1.0 at column i, else 0.
-    let mut emb = DMatrix::<f64>::zeros(num_chunks * num_speakers, embed_dim);
-    for i in 0..(num_chunks * num_speakers) {
-      emb[(i, i % embed_dim)] = 1.0;
-    }
+    let emb = DMatrix::<f64>::from_element(num_chunks * num_speakers, embed_dim, 0.5);
     let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
     let post_plda = DMatrix::<f64>::from_element(num_train, plda_dim, 0.1);
     let phi = DVector::<f64>::from_element(plda_dim, 1.0);
-    // Build train indices that span every (chunk, speaker) pair.
     let mut train_chunk_idx = Vec::with_capacity(num_train);
     let mut train_speaker_idx = Vec::with_capacity(num_train);
-    for c in 0..num_chunks {
+    'outer: for c in 0..num_chunks {
       for s in 0..num_speakers {
+        if train_chunk_idx.len() >= num_train {
+          break 'outer;
+        }
         train_chunk_idx.push(c);
         train_speaker_idx.push(s);
       }
@@ -537,14 +525,13 @@ mod qinit_allocation_cap_tests {
       &phi,
       &train_chunk_idx,
       &train_speaker_idx,
-    )
-    .with_threshold(0.001);
+    );
     let r = assign_embeddings(&input);
     assert!(
       matches!(
         r,
-        Err(crate::pipeline::Error::Shape(ShapeError::QinitAllocationTooLarge { got, max }))
-          if got > MAX_QINIT_CELLS && max == MAX_QINIT_CELLS
+        Err(crate::pipeline::Error::Shape(ShapeError::AhcTrainSizeAboveMax { got, max }))
+          if got == MAX_AHC_TRAIN + 1 && max == MAX_AHC_TRAIN
       ),
       "got {r:?}"
     );

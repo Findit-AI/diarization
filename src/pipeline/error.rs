@@ -103,6 +103,22 @@ pub enum ShapeError {
     /// Cap (`MAX_ITERS_CAP = 1_000`).
     cap: usize,
   },
+  /// `num_train` exceeds [`MAX_AHC_TRAIN`]. Bounds AHC's
+  /// `O(num_train² · embed_dim)` distance work upfront so a
+  /// pathological caller cannot burn unbounded compute before any
+  /// clustering decision is made. Realistic production loads
+  /// (~10_000 active pairs for a 1-hour stream) are well within
+  /// the cap; rejection here means the input scale exceeds the
+  /// documented intended use.
+  ///
+  /// [`MAX_AHC_TRAIN`]: crate::pipeline::MAX_AHC_TRAIN
+  #[error("num_train ({got}) exceeds MAX_AHC_TRAIN ({max})")]
+  AhcTrainSizeAboveMax {
+    /// Actual `num_train` (active-pair count).
+    got: usize,
+    /// Cap (`MAX_AHC_TRAIN`).
+    max: usize,
+  },
   /// AHC initialization produced a `num_init × num_train` qinit
   /// allocation whose cell count exceeds [`MAX_QINIT_CELLS`]. Pyannote
   /// realistically converges on `num_init ≈ {1..15}`, so an
