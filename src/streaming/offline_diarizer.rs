@@ -90,7 +90,7 @@ pub enum StreamingError {
   Aggregate(#[from] crate::aggregate::Error),
   /// Propagated from `crate::ops::spill::SpillBytesMut::zeros` when the
   /// per-range or concatenated scratch buffers cannot be allocated.
-  /// At multi-hour scale these cross the 256 MiB default threshold
+  /// At multi-hour scale these cross the 64 MiB default threshold
   /// and route through the file-backed mmap path; this surfaces
   /// tempfile / mmap failures from a `Result`-returning API.
   #[error("streaming: spill: {0}")]
@@ -596,7 +596,7 @@ impl StreamingOfflineDiarizer {
     //
     // The concatenated tensors are the dominant memory footprint at
     // multi-hour scale: `all_segs` ≈ 50 MB / hour, plus
-    // `all_emb` ≈ 11 MB / hour. Both cross the 256 MiB default
+    // `all_emb` ≈ 11 MB / hour. Both cross the 64 MiB default
     // threshold past ~5 h of accumulated voice. Spill-back so we
     // don't OOM the heap.
     let total_segs_len = total_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;

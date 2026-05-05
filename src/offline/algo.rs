@@ -46,7 +46,7 @@ pub enum Error {
   /// per-call segmentation / embedding scratch buffers cannot be
   /// allocated (mmap failure on the spill backend, tempfile creation
   /// failure, size overflow). At multi-hour scale these buffers
-  /// cross the 256 MiB default threshold and route through the
+  /// cross the 64 MiB default threshold and route through the
   /// file-backed mmap path; surfacing the failure here keeps a
   /// `Result`-returning API from OOM-aborting.
   #[error("offline: spill: {0}")]
@@ -128,14 +128,15 @@ pub enum ShapeError {
 /// allocation; unlike the upstream segmentations/embeddings, this
 /// matrix cannot spill to mmap.
 ///
-/// `4e7` cells × 8 B = 320 MB, sized to stay below the default
-/// 256 MiB spill threshold's downstream usage and bounded
-/// independently of the upstream spill caps. At pyannote
-/// community-1's 3-slot × 256-dim geometry that admits
-/// `num_chunks ≤ ~52000`, ~14 hours of audio at the 1 s step.
-/// Streaming or batch inputs above that should be split into
-/// shorter passes; a future refactor can replace this matrix
-/// with a row-accessor over the spill-backed raw embeddings.
+/// `4e7` cells × 8 B = 320 MB, sized as an upper bound on the
+/// heap-only allocation independent of the per-buffer spill cap
+/// (which is 64 MiB by default but only applies to spill-capable
+/// allocations — this matrix is not one). At pyannote community-1's
+/// 3-slot × 256-dim geometry that admits `num_chunks ≤ ~52000`,
+/// ~14 hours of audio at the 1 s step. Streaming or batch inputs
+/// above that should be split into shorter passes; a future
+/// refactor can replace this matrix with a row-accessor over the
+/// spill-backed raw embeddings.
 ///
 /// Surfaces as
 /// [`crate::offline::algo::ShapeError::EmbeddingsHeapTooLarge`].
@@ -631,10 +632,9 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   //
   // Heap-only: nalgebra's `DMatrix` is one contiguous heap
   // allocation and cannot fall back to mmap. At pyannote
-  // community-1's 3-slot geometry × 256 dims × 8 B,
-  // `num_chunks * num_speakers * EMBEDDING_DIM` reaches the 256 MiB
-  // default spill threshold around 5.7 hours of audio and grows
-  // linearly past that. Without a gate, multi-hour streaming
+  // community-1's 3-slot geometry × 256 dims × 8 B, the matrix
+  // grows linearly with audio length (~6 KB / chunk, ~22 MB / hour
+  // at the 1 s step). Without a gate, multi-hour streaming
   // `finalize` calls feed through `diarize_offline` and OOM-abort
   // here even though the upstream segmentations / embeddings
   // tensors are spill-backed.

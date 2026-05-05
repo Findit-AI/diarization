@@ -34,7 +34,7 @@ pub const MAX_COUNT_PER_FRAME: u8 = 64;
 /// [`crate::ops::spill::SpillBytesMut`] / [`crate::ops::spill::SpillBytes`]
 /// and spill to file-backed mmap above
 /// [`crate::ops::spill::SpillOptions::threshold_bytes`] (default
-/// 256 MiB). This cap is therefore a soft upper bound on disk
+/// 64 MiB). This cap is therefore a soft upper bound on disk
 /// space, not an OOM cliff: at `4e8` cells the scratch state
 /// approaches `1.6 GB` of `f32`/`f64` plus `400 MB` of `u8` mask,
 /// well above the realistic production envelope but bounded by
@@ -598,7 +598,7 @@ pub fn reconstruct(
   // Spill-aware: `cs_size` reaches `MAX_RECONSTRUCT_GRID_CELLS = 1e8`
   // (~800 MB f64 + 100 MB u8 mask) at the cap. Routing through
   // `SpillBytesMut` lets the allocation fall back to file-backed mmap
-  // above `SpillOptions::threshold_bytes` (default 256 MiB) instead
+  // above `SpillOptions::threshold_bytes` (default 64 MiB) instead
   // of OOM-aborting. The mask migrates from `Vec<bool>` to
   // `SpillBytesMut<u8>` because `bool` is not `bytemuck::Pod`; we use
   // `0u8` / `1u8` as the active flag (treated identically by the

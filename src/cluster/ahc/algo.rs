@@ -121,7 +121,7 @@ pub fn ahc_init(
   // The condensed buffer can hit ~1 GB at the documented production
   // scale (`MAX_AHC_TRAIN = 16_000` → 128M f64 cells). Route through
   // `SpillBytesMut` so the allocation falls back to file-backed mmap
-  // above `SpillOptions::threshold_bytes` (default 256 MiB) instead
+  // above `SpillOptions::threshold_bytes` (default 64 MiB) instead
   // of OOM-aborting from the heap path. `kodama::linkage` consumes
   // the buffer as `&mut [f64]`, which `SpillBytesMut::as_mut_slice`
   // hands out for both backends without copying.

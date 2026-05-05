@@ -51,7 +51,7 @@ pub const MAX_QINIT_CELLS: usize = 5_000_000;
 /// modern CPUs at `embed_dim = 256`). The 4 GB allocation is safe
 /// because the pdist condensed buffer routes through
 /// `crate::ops::spill::SpillBytesMut`, which falls back to file-backed
-/// mmap above `SpillOptions::threshold_bytes` (default 256 MiB).
+/// mmap above `SpillOptions::threshold_bytes` (default 64 MiB).
 /// The kernel pages cold rows out via the mmap'd tempfile rather
 /// than RAM+swap.
 ///

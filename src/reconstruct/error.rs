@@ -13,7 +13,7 @@ pub enum Error {
   /// Failed to allocate a scratch buffer (`clustered`, `clustered_mask`,
   /// `aggregated`, `agg_mask`). The buffers route through
   /// `crate::ops::spill::SpillBytesMut`; on inputs whose grid sizes
-  /// exceed `SpillOptions::threshold_bytes` (default 256 MiB), the
+  /// exceed `SpillOptions::threshold_bytes` (default 64 MiB), the
   /// allocation falls through to file-backed mmap, and tempfile /
   /// mmap failures surface here.
   ///

@@ -99,7 +99,7 @@
 //! Concurrent multi-threaded calls cannot interfere because there
 //! is no shared mutable state.
 //!
-//! Default: 256 MiB threshold, [`std::env::temp_dir`] for the spill
+//! Default: 64 MiB threshold, [`std::env::temp_dir`] for the spill
 //! file. Production deployments where `/tmp` is `tmpfs` (Docker
 //! default) **must** override `spill_dir` to a real-disk path,
 //! otherwise "spill to disk" is a misnomer and the OOM concern
@@ -252,16 +252,34 @@ pub struct SpillOptions {
 }
 
 impl SpillOptions {
-  /// Default threshold: 256 MiB. Allocations smaller than this stay
+  /// Default threshold: 64 MiB. Allocations smaller than this stay
   /// on the heap; larger ones spill to file-backed mmap.
   ///
-  /// 256 MiB is the OOM-cliff floor for typical 1–2 GiB container
-  /// memory budgets: most production deployments can absorb a
-  /// 256 MiB scratch buffer on the heap, but a 512 MiB or larger
-  /// allocation hits container limits or fragments the heap arena.
-  pub const DEFAULT_THRESHOLD_BYTES: usize = 256 * 1024 * 1024;
+  /// 64 MiB is a defensive choice for the containerized inference
+  /// workloads `dia` typically runs in: 1–2 GiB total memory
+  /// budget, model weights + ORT/torch runtime + audio buffers
+  /// already consuming several hundred MB, and **multiple**
+  /// `SpillBytesMut` allocations live concurrently on a single
+  /// pipeline call (segmentations + raw_embeddings + count×2 + AHC
+  /// pdist + reconstruct grids ×4). A higher threshold (e.g.
+  /// 256 MiB) lets each individual allocation pass the cap while
+  /// the aggregate quietly stacks into multi-GB heap usage and
+  /// OOMs the container.
+  ///
+  /// At 64 MiB:
+  /// - typical sub-hour pipeline calls stay heap-resident (the
+  ///   per-buffer ceiling for 1 h of audio is ~50 MB);
+  /// - multi-hour batches and adversarial inputs spill earlier,
+  ///   well before they can stack into an OOM;
+  /// - the page-fault cost on workloads that would have fit on
+  ///   heap is sub-millisecond per page on NVMe — negligible
+  ///   compared to an OOM crash.
+  ///
+  /// Override per-call via [`SpillOptions::with_threshold_bytes`]
+  /// when the deployment has a known different memory profile.
+  pub const DEFAULT_THRESHOLD_BYTES: usize = 64 * 1024 * 1024;
 
-  /// Construct with default values: 256 MiB threshold,
+  /// Construct with default values: 64 MiB threshold,
   /// [`std::env::temp_dir`] for the spill directory.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn new() -> Self {
@@ -511,7 +529,7 @@ impl<T: Pod> SpillBytesMut<T> {
     };
     // Linux: hint the kernel to back the mapping with Transparent
     // Huge Pages where possible. Reduces TLB pressure for the
-    // sequential read patterns in pdist/reconstruct (256 MB+
+    // sequential read patterns in pdist/reconstruct (64 MB+
     // mappings touch ~64k regular pages but only ~128 huge pages).
     //
     // This is a HINT — `MADV_HUGEPAGE` is silently a no-op on
@@ -763,7 +781,7 @@ mod tests {
       OPTS.threshold_bytes(),
       SpillOptions::DEFAULT_THRESHOLD_BYTES
     );
-    assert_eq!(SpillOptions::DEFAULT_THRESHOLD_BYTES, 256 * 1024 * 1024);
+    assert_eq!(SpillOptions::DEFAULT_THRESHOLD_BYTES, 64 * 1024 * 1024);
   }
 
   /// `with_threshold_bytes` is `const fn`; constructing a tuned
@@ -801,7 +819,7 @@ mod tests {
   /// Below threshold: heap-backed.
   #[test]
   fn small_allocation_uses_heap() {
-    // Default threshold is 256 MiB; a 1 KiB f64 buffer is well under.
+    // Default threshold is 64 MiB; a 1 KiB f64 buffer is well under.
     let opts = SpillOptions::default();
     let v: SpillBytesMut<f64> = SpillBytesMut::zeros(128, &opts).expect("alloc");
     assert_eq!(v.len(), 128);

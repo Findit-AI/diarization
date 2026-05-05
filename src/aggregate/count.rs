@@ -42,7 +42,7 @@ use crate::reconstruct::SlidingWindow;
 /// APIs. The internal `aggregated` / `overlapping_count` buffers
 /// route through `crate::ops::spill::SpillBytesMut`, so this cap is a
 /// soft upper bound rather than an OOM cliff: above
-/// `SpillOptions::threshold_bytes` (default 256 MiB) the buffers
+/// `SpillOptions::threshold_bytes` (default 64 MiB) the buffers
 /// are file-backed via mmap.
 ///
 /// `4e8` frames at the pyannote community-1 frame_step of `0.016875 s`
@@ -679,7 +679,7 @@ pub fn try_count_pyannote(
   // mismatch tolerance).
   // Spill-back this scratch buffer too: it scales with audio length
   // (`num_chunks * num_frames_per_chunk` cells), about 17 MB/hour at
-  // pyannote community-1 geometry. Crosses the 256 MiB default
+  // pyannote community-1 geometry. Crosses the 64 MiB default
   // threshold around 12 h. Without spilling, a long-running
   // `Result` API would still OOM-abort here even though the
   // larger `aggregated` / `overlapping_count` buffers below are

@@ -90,7 +90,7 @@ pub struct OwnedPipelineOptions {
   #[cfg_attr(feature = "serde", serde(default = "default_smoothing_epsilon"))]
   smoothing_epsilon: Option<f32>,
   /// Spill backend configuration. Defaults to
-  /// [`SpillOptions::default`] (256 MiB heap threshold,
+  /// [`SpillOptions::default`] (64 MiB heap threshold,
   /// [`std::env::temp_dir`] spill directory).
   /// [`OwnedDiarizationPipeline::run`] passes this by reference to
   /// every [`crate::ops::spill::SpillBytesMut::zeros`] reached transitively
@@ -131,7 +131,7 @@ const fn default_smoothing_epsilon() -> Option<f32> {
 
 impl OwnedPipelineOptions {
   /// Construct with `community-1` defaults. `spill_options` defaults
-  /// to [`SpillOptions::new`] (256 MiB threshold,
+  /// to [`SpillOptions::new`] (64 MiB threshold,
   /// [`std::env::temp_dir`] spill directory).
   pub const fn new() -> Self {
     Self {
@@ -440,7 +440,7 @@ impl OwnedDiarizationPipeline {
     let mut padded_chunk = vec![0.0_f32; win];
     // `segmentations` and `raw_embeddings` scale with audio length:
     // `segmentations` ≈ 50 MB / hour (f64), `raw_embeddings` ≈ 11 MB /
-    // hour (f32). Multi-hour recordings cross the 256 MiB default
+    // hour (f32). Multi-hour recordings cross the 64 MiB default
     // spill threshold; route through `SpillBytesMut` so the heap path is
     // bounded and large allocations fall back to file-backed mmap.
     let segs_len = num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
