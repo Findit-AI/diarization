@@ -72,6 +72,7 @@ fn rttm_matches_pyannote_reference_06_long_recording() {
 }
 
 fn run_rttm_parity(fixture_dir: &str, uri: &str) {
+  crate::parity_fixtures_or_skip!();
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 
   // ── Stage 5a + 5b: produce discrete_diarization ───────────────────

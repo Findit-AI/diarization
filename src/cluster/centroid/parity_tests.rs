@@ -62,6 +62,7 @@ where
 
 #[test]
 fn weighted_centroids_match_pyannote_clustering_centroids() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   // Load q_final, sp_final from VBx capture.

@@ -130,6 +130,7 @@ fn assign_embeddings_matches_pyannote_hard_clusters_06_long_recording() {
 }
 
 fn run_pipeline_parity(fixture_dir: &str) {
+  crate::parity_fixtures_or_skip!();
   require_fixtures(fixture_dir);
 
   let base = format!("tests/parity/fixtures/{fixture_dir}");

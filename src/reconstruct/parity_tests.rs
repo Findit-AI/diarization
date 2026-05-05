@@ -119,6 +119,7 @@ fn reconstruct_within_tolerance_06_long_recording() {
 }
 
 fn run_reconstruct_parity(fixture_dir: &str) {
+  crate::parity_fixtures_or_skip!();
   require_fixtures(fixture_dir);
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 
@@ -256,6 +257,7 @@ fn run_reconstruct_parity(fixture_dir: &str) {
 /// drift but the per-frame label content is still essentially
 /// equivalent.
 fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f64) {
+  crate::parity_fixtures_or_skip!();
   require_fixtures(fixture_dir);
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 

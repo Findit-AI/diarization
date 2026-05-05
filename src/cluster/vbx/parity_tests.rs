@@ -65,6 +65,7 @@ where
 
 #[test]
 fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   // ── Inputs (post_plda, phi from PLDA stage; qinit, fa, fb,
@@ -230,6 +231,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
 /// safe for the VBx path.
 #[test]
 fn vbx_pi_has_safe_margin_from_sp_alive_threshold() {
+  crate::parity_fixtures_or_skip!();
   use crate::cluster::centroid::SP_ALIVE_THRESHOLD;
 
   // pi must be at least this much away from the threshold (ratio).

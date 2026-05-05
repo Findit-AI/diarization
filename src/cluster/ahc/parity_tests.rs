@@ -75,6 +75,7 @@ where
 }
 
 fn run_ahc_parity(fixture_dir: &str) {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   let base = format!("tests/parity/fixtures/{fixture_dir}");

@@ -27,6 +27,7 @@ fn read_npz_array<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, V
 }
 
 fn run_offline_parity(fixture_dir: &str) {
+  crate::parity_fixtures_or_skip!();
   let base = format!("tests/parity/fixtures/{fixture_dir}");
 
   // Inputs.

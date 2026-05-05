@@ -22,6 +22,7 @@ fn read_npz_array<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, V
 }
 
 fn run_count_parity(fixture_dir: &str) {
+  crate::parity_fixtures_or_skip!();
   let base = format!("tests/parity/fixtures/{fixture_dir}");
   let (seg_flat_f32, seg_shape) = read_npz_array::<f32>(
     &fixture(&format!("{base}/segmentations.npz")),

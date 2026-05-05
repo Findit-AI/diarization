@@ -55,6 +55,7 @@ where
 
 #[test]
 fn constrained_argmax_matches_pyannote_hard_clusters() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   let path = fixture("tests/parity/fixtures/01_dialogue/clustering.npz");

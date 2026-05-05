@@ -86,6 +86,9 @@ pub mod ep;
 #[cfg(all(feature = "ort", feature = "serde"))]
 mod ort_serde;
 
+#[cfg(test)]
+pub(crate) mod test_util;
+
 // Numerical primitives shared across the algorithm modules. Three-tier
 // backend layout (scalar/arch/dispatch) modeled on the colconv crate.
 // Crate-private — algorithm modules call into `ops::*`; downstream

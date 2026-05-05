@@ -81,6 +81,7 @@ where
 
 #[test]
 fn xvec_transform_matches_pyannote_on_train_embeddings() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   let plda = PldaTransform::new().expect("PldaTransform::new");
@@ -167,6 +168,7 @@ fn xvec_transform_matches_pyannote_on_train_embeddings() {
 
 #[test]
 fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
 
   let plda = PldaTransform::new().expect("PldaTransform::new");
@@ -246,6 +248,7 @@ fn plda_transform_matches_pyannote_modulo_eigenvector_signs() {
 
 #[test]
 fn phi_matches_pyannote_descending_eigenvalues() {
+  crate::parity_fixtures_or_skip!();
   require_fixtures();
   let plda = PldaTransform::new().expect("PldaTransform::new");
   let phi = plda.phi();

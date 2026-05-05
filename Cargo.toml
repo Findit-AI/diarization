@@ -226,19 +226,34 @@ fs4 = "1"
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
+# IMPORTANT: any deps below must be cross-platform. The
+# `[target.'cfg(...)']` table above ONLY covers `rustix`; `silero` /
+# `serde` / `humantime-serde` belong under the regular `[dependencies]`
+# block so they remain available on macOS/Windows. (Codex review HIGH:
+# they were briefly placed inside the target-specific block, which
+# silently scoped them Linux/Android-only and broke `serde` and
+# `silero-vad` feature builds elsewhere.)
+[dependencies.silero]
 # Phase 5e: silero VAD for streaming voice-range detection. Sister
 # project at `findit-studio/silero` (path dep until both publish to
 # the same registry). Optional + feature-gated so clean checkouts
 # without `../silero/` materialized still build the lib (Codex review
 # CRITICAL). Enable via `--features silero-vad`.
-silero = { version = "0.2", optional = true }
+version = "0.3"
+optional = true
 
+[dependencies.serde]
 # Optional `serde` support for `*Options` / `*Config` types. Gated
-# behind `feature = "serde"`. `humantime-serde` provides the
-# "humantime" string format ("250ms", "1.5s") for `Duration` fields
-# — same convention as the sister `silero` crate.
-serde = { version = "1", optional = true, features = ["derive"] }
-humantime-serde = { version = "1", optional = true }
+# behind `feature = "serde"`.
+version = "1"
+optional = true
+features = ["derive"]
+
+[dependencies.humantime-serde]
+# Provides the "humantime" string format ("250ms", "1.5s") for
+# `Duration` fields — same convention as the sister `silero` crate.
+version = "1"
+optional = true
 
 
 [dev-dependencies]

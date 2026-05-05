@@ -38,13 +38,45 @@ spec.
 
 ## Quick start
 
+The segmentation model and PLDA weights ship inside the crate — only the
+WeSpeaker ResNet34-LM embedding ONNX is BYO (~26 MB; above the
+crates.io 10 MB hard limit, so it cannot be bundled). Fetch it from the
+[FinDIT-Studio/dia-models](https://huggingface.co/FinDIT-Studio/dia-models)
+HuggingFace bundle in either of two ways:
+
 ```sh
-./scripts/download-embed-model.sh   # WeSpeaker ResNet34 (27 MB, BYO)
-cargo run --release --features ort --example run_streaming_pipeline -- path/to/clip.wav
+# Option A: huggingface_hub CLI (recommended; handles caching + auth).
+hf download FinDIT-Studio/dia-models wespeaker_resnet34_lm.onnx \
+  --local-dir models
+
+# Option B: plain curl, no extra tools.
+mkdir -p models
+curl -L -o models/wespeaker_resnet34_lm.onnx \
+  https://huggingface.co/FinDIT-Studio/dia-models/resolve/main/wespeaker_resnet34_lm.onnx
 ```
 
-The segmentation model and PLDA weights ship inside the crate — no
-download needed.
+(Workspace developers can also run `./scripts/download-embed-model.sh`,
+which wraps the same URL and verifies the SHA-256. The script is
+omitted from the published crate tarball.)
+
+Then run an end-to-end example. The simplest needs only the `ort`
+feature:
+
+```sh
+cargo run --release --features ort --example run_owned_pipeline -- \
+  path/to/clip_16k.wav > hyp.rttm
+```
+
+For the streaming pipeline (uses `silero-vad` to detect voice ranges
+on the fly), enable the matching feature:
+
+```sh
+cargo run --release --features ort,silero-vad --example run_streaming_pipeline -- \
+  path/to/clip.wav
+```
+
+`DIA_EMBED_MODEL_PATH` overrides the default `models/wespeaker_resnet34_lm.onnx`
+location if you keep the model elsewhere.
 
 ## License
 
