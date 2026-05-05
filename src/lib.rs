@@ -74,6 +74,15 @@ pub mod cluster;
 pub mod embed;
 pub mod segment;
 
+/// Opt-in ONNX Runtime execution providers (CoreML, CUDA, TensorRT,
+/// DirectML, ROCm, OpenVINO, WebGPU, …) for hardware-accelerated
+/// segmentation + embedding inference. See [`crate::ep`] for the full
+/// list, the `ep-*` cargo features that toggle each one, and an
+/// `auto_providers()` helper that picks the right EP at runtime.
+#[cfg(feature = "ort")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
+pub mod ep;
+
 #[cfg(all(feature = "ort", feature = "serde"))]
 mod ort_serde;
 

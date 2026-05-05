@@ -54,6 +54,49 @@ bundled-segmentation = ["ort"]
 # in addition to the existing `from_file` (ONNX). See
 # `scripts/export-wespeaker-torchscript.py` for the model export step.
 tch = ["dep:tch"]
+# ─── ONNX Runtime execution providers ─────────────────────────────────
+# Each `*` feature pulls in the matching `ort` execution provider.
+# All are off by default; the default ort dispatch runs on CPU.
+#
+# **Runtime requirements**: each EP needs the corresponding native
+# library installed on the host (CUDA toolkit, ROCm runtime,
+# DirectML.dll, etc.). The ort `download-binaries` default ships
+# CPU-only; vendor-specific EPs require either a vendor build of
+# onnxruntime or `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` pointing at
+# the vendor libs. See <https://ort.pyke.io/perf/execution-providers>
+# for vendor-specific install notes.
+#
+# Callers register an EP via `SegmentModelOptions::with_providers` /
+# `EmbedModelOptions::with_providers`, or use the `dia::ep::auto_providers`
+# helper (returns the EPs compiled in, in a sensible priority order).
+coreml = ["ort", "ort/coreml"]
+cuda = ["ort", "ort/cuda"]
+tensorrt = ["ort", "ort/tensorrt"]
+directml = ["ort", "ort/directml"]
+rocm = ["ort", "ort/rocm"]
+migraphx = ["ort", "ort/migraphx"]
+openvino = ["ort", "ort/openvino"]
+webgpu = ["ort", "ort/webgpu"]
+xnnpack = ["ort", "ort/xnnpack"]
+onednn = ["ort", "ort/onednn"]
+cann = ["ort", "ort/cann"]
+acl = ["ort", "ort/acl"]
+qnn = ["ort", "ort/qnn"]
+nnapi = ["ort", "ort/nnapi"]
+tvm = ["ort", "ort/tvm"]
+azure = ["ort", "ort/azure"]
+# Convenience meta-feature: enable the common GPU-flavored EPs across
+# vendors. The caller still picks at runtime which provider to register
+# (only one will accelerate; the rest stay dormant). Useful for
+# distributing a single binary that detects the host GPU and dispatches.
+gpu = [
+  "cuda",
+  "tensorrt",
+  "coreml",
+  "directml",
+  "rocm",
+  "webgpu",
+]
 # Pulls in the sister `silero` crate (path dep at `../silero/`) as an
 # optional dependency, used only by the `run_streaming_pipeline` example
 # to drive VAD externally. The crate's lib + non-streaming examples do

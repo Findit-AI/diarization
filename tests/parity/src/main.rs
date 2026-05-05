@@ -12,9 +12,10 @@
 
 use anyhow::{Context, Result, bail};
 use diarization::{
-  embed::EmbedModel,
+  embed::{EmbedModel, EmbedModelOptions},
+  ep::CoreMLExecutionProvider,
   plda::PldaTransform,
-  segment::SegmentModel,
+  segment::{SegmentModel, SegmentModelOptions},
   streaming::{StreamingOfflineOptions, StreamingOfflineDiarizer},
 };
 
@@ -49,13 +50,47 @@ fn main() -> Result<()> {
     ),
   };
 
+  // Optionally register the CoreML execution provider. Two env vars
+  // cover the M-series-Mac knob:
+  //   DIA_USE_COREML_SEG=1   — segmentation model on CoreML
+  //   DIA_USE_COREML_EMB=1   — embedding model on CoreML (note: the
+  //                            shipped wespeaker_resnet34_lm.onnx uses
+  //                            external data in `.onnx.data`, and
+  //                            CoreML's optimizer fails to relocate
+  //                            external initializers; expect a
+  //                            "model_path must not be empty" error
+  //                            unless the model is repacked.)
+  // CoreML EP registers itself as `MayUse`, so unsupported ops auto-
+  // fall back to CPU.
+  let use_coreml_seg = std::env::var("DIA_USE_COREML_SEG").ok().as_deref() == Some("1");
+  let use_coreml_emb = std::env::var("DIA_USE_COREML_EMB").ok().as_deref() == Some("1");
+  let seg_opts = if use_coreml_seg {
+    SegmentModelOptions::default()
+      .with_providers(vec![CoreMLExecutionProvider::default().build()])
+  } else {
+    SegmentModelOptions::default()
+  };
+  let emb_opts = if use_coreml_emb {
+    EmbedModelOptions::default()
+      .with_providers(vec![CoreMLExecutionProvider::default().build()])
+  } else {
+    EmbedModelOptions::default()
+  };
   // Segmentation ships bundled in the crate. Embedding model is BYO
   // (27 MB, doesn't fit under the crates.io 10 MB cap).
-  let mut seg = SegmentModel::bundled().context("load bundled segment model")?;
+  let mut seg =
+    SegmentModel::bundled_with_options(seg_opts).context("load bundled segment model")?;
   let emb_path = std::env::var("DIA_EMBED_MODEL_PATH")
     .unwrap_or_else(|_| "models/wespeaker_resnet34_lm.onnx".into());
-  let mut emb = EmbedModel::from_file(&emb_path).context("load embed model")?;
+  let mut emb = EmbedModel::from_file_with_options(&emb_path, emb_opts)
+    .context("load embed model")?;
   let plda = PldaTransform::new().context("load plda")?;
+  if use_coreml_seg || use_coreml_emb {
+    eprintln!(
+      "# dia: CoreML execution provider — seg={} emb={}",
+      use_coreml_seg, use_coreml_emb
+    );
+  }
 
   let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());
   diarizer
