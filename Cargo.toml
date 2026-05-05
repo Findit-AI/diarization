@@ -20,19 +20,44 @@ homepage = "https://github.com/al8n/diarization"
 documentation = "https://docs.rs/diarization"
 description = "Sans-I/O speaker diarization for streaming audio. Bundles the pyannote/segmentation-3.0 model and the speaker-diarization-community-1 PLDA weights — only the WeSpeaker embedding ONNX is BYO."
 readme = "README.md"
-# Keep large WeSpeaker artifacts out of the crate tarball: the
-# packed embed model is ~26 MB (above the crates.io 10 MB hard
-# limit), and the TorchScript variant is the same scale. Both are
-# committed to git so they can be served as GitHub release assets
-# / fetched via `scripts/download-embed-model.sh`, but neither
-# belongs in `cargo package`. The `bundled-segmentation` model
-# (~6 MB) IS included on purpose — it's the only ONNX dia
-# embeds via `include_bytes!`. Verify with `cargo package --list`.
+# Keep `cargo package` lean. crates.io's hard limit is 10 MB
+# compressed; we ship the bundled segmentation model (~6 MB) and
+# PLDA `.bin` blobs (~530 KB) which are loaded via `include_bytes!`
+# at runtime, but everything else dev-only is excluded.
+#
+# Verify with `cargo package --list --allow-dirty` and
+# `ls -lh /Users/user/.cargo/target/package/diarization-*.crate`.
 exclude = [
+  # WeSpeaker artifacts: ~26 MB single-file ONNX (above crates.io
+  # 10 MB hard limit), ~26 MB TorchScript variant, plus the older
+  # external-data form `.onnx.data` sidecar (no longer used but
+  # listed defensively in case someone re-adds it). Distributed
+  # via FinDIT-Studio/dia-models on HF + GitHub release assets;
+  # callers grab it via `scripts/download-embed-model.sh` or set
+  # `DIA_EMBED_MODEL_PATH`.
   "models/wespeaker_resnet34_lm.onnx",
   "models/wespeaker_resnet34_lm.onnx.data",
   "models/wespeaker_resnet34_lm.pt",
   "models/wespeaker_resnet34_lm_packed.onnx",
+  # PLDA `.npz` files — build-time sources for the `.bin` extraction
+  # in `scripts/extract-plda-blobs.sh`; production code never reads
+  # them. The `.bin` blobs are the runtime data and DO ship.
+  "models/plda/*.npz",
+  # Parity sub-workspace (its own `Cargo.toml` makes cargo skip
+  # this by default; listed defensively so removing the inner
+  # `[workspace]` later doesn't suddenly bloat the crate).
+  "tests/parity/",
+  # Dev-only trees: benches (Criterion harnesses), CI configs,
+  # build / model-export scripts, GitHub Actions workflows,
+  # codecov config, spike experiments. None of these are needed
+  # by a downstream `cargo build` of the published crate.
+  "benches/",
+  "ci/",
+  "scripts/",
+  ".github/",
+  ".codecov.yml",
+  ".gitignore",
+  "spikes/",
 ]
 
 [features]
