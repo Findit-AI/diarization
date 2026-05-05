@@ -140,16 +140,9 @@ fn run_pipeline_parity(fixture_dir: &str) {
   let num_chunks = raw_shape[0] as usize;
   let num_speakers = raw_shape[1] as usize;
   let embed_dim = raw_shape[2] as usize;
-  let mut embeddings = DMatrix::<f64>::zeros(num_chunks * num_speakers, embed_dim);
-  for c in 0..num_chunks {
-    for s in 0..num_speakers {
-      let row = c * num_speakers + s;
-      let base = (c * num_speakers + s) * embed_dim;
-      for d in 0..embed_dim {
-        embeddings[(row, d)] = raw_flat[base + d] as f64;
-      }
-    }
-  }
+  // Row-major flat `[c][s][d]`, matching the new
+  // `AssignEmbeddingsInput::embeddings: &[f64]` contract.
+  let embeddings: Vec<f64> = raw_flat.iter().map(|&v| v as f64).collect();
 
   // Segmentations (chunks, frames, speakers).
   let seg_path = fixture(&format!("{base}/segmentations.npz"));
@@ -195,6 +188,7 @@ fn run_pipeline_parity(fixture_dir: &str) {
   // Run the port.
   let input = AssignEmbeddingsInput::new(
     &embeddings,
+    embed_dim,
     num_chunks,
     num_speakers,
     &segmentations,

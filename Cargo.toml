@@ -131,6 +131,18 @@ tempfile = "3"
 # before mmap so writes through the mapping cannot SIGBUS on
 # ENOSPC. Used in `ops::spill::SpillBytesMut::new_mmap`.
 fs4 = "1"
+# `rustix::fs::OFlags::TMPFILE` on Linux/Android: the spill backend
+# opens an anonymous (never-linked) tempfile so there is no race
+# window between create + unlink for a same-UID process to grab a
+# writable fd. `tempfile`'s Linux fast path also tries `O_TMPFILE`
+# but silently falls back to `mkstemp + unlink` on filesystems
+# without support — we want to surface that as a typed error
+# instead. `rustix` is already in the dep graph transitively via
+# `tempfile` / `fs4`, so promoting it to a direct dependency adds
+# no compile-time cost while letting us avoid a separate `libc`
+# import.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 # Phase 5e: silero VAD for streaming voice-range detection. Sister
 # project at `findit-studio/silero` (path dep until both publish to

@@ -68,7 +68,24 @@ pub const MAX_AHC_TRAIN: usize = 32_000;
 /// signature manageable.
 #[derive(Debug, Clone)]
 pub struct AssignEmbeddingsInput<'a> {
-  embeddings: &'a DMatrix<f64>,
+  /// Pre-PLDA per-`(chunk, speaker)` f64 embeddings, **row-major**
+  /// flat layout `[c][s][d]`. Length must equal
+  /// `num_chunks * num_speakers * embed_dim`. The slice is the
+  /// authoritative shape — use [`Self::embed_dim`] to reconstruct
+  /// the matrix dimensions.
+  ///
+  /// This used to be a `&DMatrix<f64>` (column-major) but was
+  /// changed so the caller can back the storage with anything that
+  /// can hand out a `&[f64]` — e.g. a heap `Vec<f64>` or a
+  /// spill-backed [`crate::ops::spill::SpillBytes<f64>`]. All
+  /// internal access here is by manual row indexing
+  /// (`row * embed_dim + d`); no nalgebra ops are applied to
+  /// `embeddings` itself.
+  embeddings: &'a [f64],
+  /// Per-row dimensionality of [`Self::embeddings`]. Must equal
+  /// `embed_dim` (the speaker-embedding dimension produced by the
+  /// upstream embedder, e.g. `EMBEDDING_DIM = 256` for community-1).
+  embed_dim: usize,
   num_chunks: usize,
   num_speakers: usize,
   segmentations: &'a [f64],
@@ -94,8 +111,12 @@ impl<'a> AssignEmbeddingsInput<'a> {
   /// Override individual hyperparameters via the `with_*` builders.
   ///
   /// Required data inputs:
-  /// - `embeddings`: raw per-(chunk, speaker) embeddings flattened to
-  ///   `(num_chunks * num_speakers, embed_dim)`.
+  /// - `embeddings`: raw per-(chunk, speaker) embeddings, **row-major**
+  ///   flat layout `[c][s][d]`. Length `num_chunks * num_speakers *
+  ///   embed_dim`. Backed by anything that exposes `&[f64]` — a heap
+  ///   `Vec<f64>`, a spill-backed `SpillBytes<f64>`, or any other
+  ///   `Deref<Target=[f64]>` storage.
+  /// - `embed_dim`: per-row dimensionality of `embeddings`.
   /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
   ///   `[c][f][s]`. Length `num_chunks * num_frames * num_speakers`.
   /// - `post_plda`: post-PLDA features for the active training subset,
@@ -105,7 +126,8 @@ impl<'a> AssignEmbeddingsInput<'a> {
   ///   indices, length `num_train`.
   #[allow(clippy::too_many_arguments)]
   pub const fn new(
-    embeddings: &'a DMatrix<f64>,
+    embeddings: &'a [f64],
+    embed_dim: usize,
     num_chunks: usize,
     num_speakers: usize,
     segmentations: &'a [f64],
@@ -117,6 +139,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
   ) -> Self {
     Self {
       embeddings,
+      embed_dim,
       num_chunks,
       num_speakers,
       segmentations,
@@ -172,9 +195,14 @@ impl<'a> AssignEmbeddingsInput<'a> {
     self
   }
 
-  /// Raw per-`(chunk, speaker)` embeddings.
-  pub const fn embeddings(&self) -> &'a DMatrix<f64> {
+  /// Raw per-`(chunk, speaker)` embeddings (row-major flat slice;
+  /// length `num_chunks * num_speakers * embed_dim`).
+  pub const fn embeddings(&self) -> &'a [f64] {
     self.embeddings
+  }
+  /// Per-row dimensionality of [`Self::embeddings`].
+  pub const fn embed_dim(&self) -> usize {
+    self.embed_dim
   }
   /// Number of chunks.
   pub const fn num_chunks(&self) -> usize {
@@ -272,6 +300,7 @@ pub fn assign_embeddings(
   // `&input.spill_options` instead.
   let &AssignEmbeddingsInput {
     embeddings,
+    embed_dim,
     num_chunks,
     num_speakers,
     segmentations,
@@ -295,7 +324,6 @@ pub fn assign_embeddings(
   if num_speakers != MAX_SPEAKER_SLOTS as usize {
     return Err(ShapeError::WrongNumSpeakers.into());
   }
-  let embed_dim = embeddings.ncols();
   if embed_dim == 0 {
     return Err(ShapeError::ZeroEmbeddingDim.into());
   }
@@ -307,7 +335,10 @@ pub fn assign_embeddings(
   let expected_emb_rows = num_chunks
     .checked_mul(num_speakers)
     .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
-  if embeddings.nrows() != expected_emb_rows {
+  let expected_emb_len = expected_emb_rows
+    .checked_mul(embed_dim)
+    .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
+  if embeddings.len() != expected_emb_len {
     return Err(ShapeError::EmbeddingsRowMismatch.into());
   }
   if num_frames == 0 {
@@ -372,10 +403,10 @@ pub fn assign_embeddings(
   // a plausible but wrong assignment). Mirrors `cluster::ahc`'s
   // `RowNormOverflow` defense for the train subset, extended to the
   // full matrix.
-  for r in 0..embeddings.nrows() {
+  for r in 0..expected_emb_rows {
+    let row = &embeddings[r * embed_dim..(r + 1) * embed_dim];
     let mut sq = 0.0f64;
-    for c in 0..embeddings.ncols() {
-      let v = embeddings[(r, c)];
+    for &v in row {
       if !v.is_finite() {
         return Err(NonFiniteField::Embeddings.into());
       }
@@ -458,13 +489,18 @@ pub fn assign_embeddings(
   // ── Stage 2: AHC on active embeddings ──────────────────────────
   // Project the rows of `embeddings` selected by `(chunk_idx,
   // speaker_idx)` into a contiguous `(num_train, embed_dim)` matrix.
+  // `embeddings` is row-major flat (`row * embed_dim + d`); the
+  // built `train_embeddings` is still a column-major `DMatrix`
+  // because `ahc_init` and `weighted_centroids` consume it that
+  // way (a follow-up will spill-back this matrix too).
   let mut train_embeddings = DMatrix::<f64>::zeros(num_train, embed_dim);
   for i in 0..num_train {
     let c = train_chunk_idx[i];
     let s = train_speaker_idx[i];
     let row = c * num_speakers + s;
-    for d in 0..embed_dim {
-      train_embeddings[(i, d)] = embeddings[(row, d)];
+    let src = &embeddings[row * embed_dim..(row + 1) * embed_dim];
+    for (d, &v) in src.iter().enumerate() {
+      train_embeddings[(i, d)] = v;
     }
   }
   let ahc_clusters = ahc_init(&train_embeddings, threshold, &input.spill_options)?;
@@ -544,16 +580,16 @@ pub fn assign_embeddings(
     .chunks_exact(embed_dim)
     .map(|row| crate::ops::scalar::dot(row, row))
     .collect();
-  let mut emb_row: Vec<f64> = vec![0.0; embed_dim];
   for (c, soft_c) in soft.iter_mut().enumerate() {
     for s in 0..num_speakers {
       let row = c * num_speakers + s;
-      for d in 0..embed_dim {
-        emb_row[d] = embeddings[(row, d)];
-      }
-      let emb_norm_sq = crate::ops::scalar::dot(&emb_row, &emb_row);
+      // `embeddings` is row-major flat: rows are already contiguous.
+      // No need for an `emb_row` scratch copy — pass the slice
+      // directly to `dot` / `cosine_distance_pre_norm`.
+      let emb_row = &embeddings[row * embed_dim..(row + 1) * embed_dim];
+      let emb_norm_sq = crate::ops::scalar::dot(emb_row, emb_row);
       for (k, c_row) in centroid_buf.chunks_exact(embed_dim).enumerate() {
-        let dist = cosine_distance_pre_norm(&emb_row, emb_norm_sq, c_row, centroid_norm_sq[k]);
+        let dist = cosine_distance_pre_norm(emb_row, emb_norm_sq, c_row, centroid_norm_sq[k]);
         soft_c[(s, k)] = 2.0 - dist;
       }
     }

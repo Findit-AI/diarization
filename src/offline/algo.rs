@@ -104,43 +104,33 @@ pub enum ShapeError {
   /// pyannote-argmax bit-exact path and is always valid.
   #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
   SmoothingEpsilonOutOfRange { value: Option<f32> },
-  /// `num_chunks * num_speakers * EMBEDDING_DIM` exceeds
-  /// [`MAX_OFFLINE_EMBEDDINGS_CELLS`]. The full f64 embeddings
-  /// `DMatrix` allocated by `diarize_offline` is heap-only (one
-  /// contiguous nalgebra allocation), so a multi-hour input that
-  /// passes the upstream spill-backed segmentation/embedding caps
-  /// can still OOM-abort here. Reject up front rather than letting
-  /// the matrix `zeros(...)` panic / abort.
-  ///
-  /// [`MAX_OFFLINE_EMBEDDINGS_CELLS`]: crate::offline::MAX_OFFLINE_EMBEDDINGS_CELLS
-  #[error(
-    "num_chunks * num_speakers * EMBEDDING_DIM ({got}) exceeds heap-only cap \
-     MAX_OFFLINE_EMBEDDINGS_CELLS ({max}); split the input or use a \
-     spill-backed matrix in a future refactor"
-  )]
-  EmbeddingsHeapTooLarge { got: usize, max: usize },
 }
 
-/// Hard upper bound on `num_chunks * num_speakers * EMBEDDING_DIM`
-/// for the **heap-allocated** f64 embeddings `DMatrix` that
-/// [`diarize_offline`] materializes from the spill-backed raw
-/// embeddings. nalgebra's `DMatrix` is one contiguous heap
-/// allocation; unlike the upstream segmentations/embeddings, this
-/// matrix cannot spill to mmap.
-///
-/// `4e7` cells × 8 B = 320 MB, sized as an upper bound on the
-/// heap-only allocation independent of the per-buffer spill cap
-/// (which is 64 MiB by default but only applies to spill-capable
-/// allocations — this matrix is not one). At pyannote community-1's
-/// 3-slot × 256-dim geometry that admits `num_chunks ≤ ~52000`,
-/// ~14 hours of audio at the 1 s step. Streaming or batch inputs
-/// above that should be split into shorter passes; a future
-/// refactor can replace this matrix with a row-accessor over the
-/// spill-backed raw embeddings.
-///
-/// Surfaces as
-/// [`crate::offline::algo::ShapeError::EmbeddingsHeapTooLarge`].
-pub const MAX_OFFLINE_EMBEDDINGS_CELLS: usize = 40_000_000;
+// ── Heap-bound matrix cluster (no cap, deliberate) ────────────────
+//
+// `diarize_offline` allocates several heap-only `nalgebra::DMatrix`
+// values whose footprint scales with input length:
+//   * `embeddings`           — `(num_chunks * num_speakers, embed_dim)` f64
+//   * `post_plda`            — `(num_train, plda_dim)` f64
+//   * `train_embeddings`     — same `(num_train, embed_dim)` shape, in
+//     `assign_embeddings`
+//   * VBx state (rho, gamma, log_p, etc.) — also `O(num_train *
+//     plda_dim)` f64 working sets in `cluster_vbx`
+//   * AHC pdist condensed — `n*(n-1)/2` f64; this one IS spill-backed
+//     via `SpillBytesMut`
+//   * `qinit` — `(num_train, num_init)` f64, gated by the existing
+//     `MAX_QINIT_CELLS` check in `pipeline::algo`
+//
+// At pyannote community-1's 3-slot × 256-dim geometry with `num_train`
+// in the thousands, the cumulative live heap can comfortably reach
+// hundreds of MB on multi-hour inputs. We deliberately do **not**
+// surface a single-matrix cap here: a partial cap that admits 14 h
+// inputs while another matrix in the same call OOMs at 7 h is more
+// misleading than no cap. Callers that need a tight heap budget
+// should either (a) split very long inputs into shorter passes
+// before calling `diarize_offline`, or (b) wait for the planned
+// row-accessor / spill-backed-DMatrix refactor that routes these
+// matrices through `SpillBytesMut`.
 
 /// `const fn` predicate: `v` is finite and `>= 0` (f64). Used for
 /// `min_duration_off`, a non-negative seconds quantity passed
@@ -627,53 +617,37 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   }
   let num_train = train_chunk_idx.len();
 
-  // ── Stage 2: build full f64 embeddings DMatrix ─────────────────
-  // shape (num_chunks * num_speakers, EMBEDDING_DIM).
-  //
-  // Heap-only: nalgebra's `DMatrix` is one contiguous heap
-  // allocation and cannot fall back to mmap. At pyannote
-  // community-1's 3-slot geometry × 256 dims × 8 B, the matrix
-  // grows linearly with audio length (~6 KB / chunk, ~22 MB / hour
-  // at the 1 s step). Without a gate, multi-hour streaming
-  // `finalize` calls feed through `diarize_offline` and OOM-abort
-  // here even though the upstream segmentations / embeddings
-  // tensors are spill-backed.
-  //
-  // Surface a typed error before the allocation. A future
-  // refactor can hand `assign_embeddings` a row accessor instead
-  // of materializing the full matrix; for now, callers that
-  // exceed this cap should split their input or accept the
-  // resource limit. Cap matches `MAX_RECONSTRUCT_OUTPUT_CELLS`'s
-  // intent (heap-bounded, more conservative than the spill cap):
-  // `4e7` cells × 8 B = 320 MB, with `num_chunks * num_speakers`
-  // implicit at ≤ `~156k` for 3-slot configs (~13 h of audio at
-  // 1 s step).
-  let embeddings_cells = num_chunks
+  // ── Stage 2: build full f64 embeddings buffer ──────────────────
+  // shape `(num_chunks * num_speakers, EMBEDDING_DIM)`, row-major
+  // flat layout. Spill-backed via `SpillBytesMut` so multi-hour
+  // inputs cross the heap threshold cleanly into mmap rather than
+  // OOM-aborting on the previous `DMatrix::zeros` heap allocation.
+  // After fill, the buffer is frozen into `SpillBytes<f64>` and
+  // passed by slice into `assign_embeddings` (no DMatrix needed —
+  // the consumer accesses by manual row indexing). See the
+  // heap-bound matrix-cluster note above `ShapeError` for the
+  // remaining heap matrices.
+  let embeddings_len = num_chunks
     .checked_mul(num_speakers)
     .and_then(|n| n.checked_mul(EMBEDDING_DIM))
-    .ok_or(ShapeError::EmbeddingsHeapTooLarge {
-      got: usize::MAX,
-      max: MAX_OFFLINE_EMBEDDINGS_CELLS,
-    })?;
-  if embeddings_cells > MAX_OFFLINE_EMBEDDINGS_CELLS {
-    return Err(
-      ShapeError::EmbeddingsHeapTooLarge {
-        got: embeddings_cells,
-        max: MAX_OFFLINE_EMBEDDINGS_CELLS,
-      }
-      .into(),
-    );
-  }
-  let mut embeddings = DMatrix::<f64>::zeros(num_chunks * num_speakers, EMBEDDING_DIM);
-  for c in 0..num_chunks {
-    for s in 0..num_speakers {
-      let row = c * num_speakers + s;
-      let base = (c * num_speakers + s) * EMBEDDING_DIM;
-      for d in 0..EMBEDDING_DIM {
-        embeddings[(row, d)] = raw_embeddings[base + d] as f64;
+    .ok_or(ShapeError::RawEmbeddingsOverflow)?;
+  let mut embeddings_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(embeddings_len, &input.spill_options)?;
+  {
+    let dst = embeddings_buf.as_mut_slice();
+    for c in 0..num_chunks {
+      for s in 0..num_speakers {
+        let row = c * num_speakers + s;
+        let base = row * EMBEDDING_DIM;
+        let src = &raw_embeddings[base..base + EMBEDDING_DIM];
+        let row_dst = &mut dst[base..base + EMBEDDING_DIM];
+        for (d, &v) in src.iter().enumerate() {
+          row_dst[d] = v as f64;
+        }
       }
     }
   }
+  let embeddings = embeddings_buf.freeze();
 
   // ── Stage 3: PLDA project active embeddings ────────────────────
   let plda_dim = plda.phi().len();
@@ -696,7 +670,8 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
   // ── Stage 4: assign_embeddings (AHC + VBx + centroid + Hungarian) ─
   let pipeline_input = AssignEmbeddingsInput::new(
-    &embeddings,
+    embeddings.as_slice(),
+    EMBEDDING_DIM,
     num_chunks,
     num_speakers,
     segmentations,

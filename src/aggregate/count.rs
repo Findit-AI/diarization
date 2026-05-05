@@ -249,7 +249,7 @@ pub fn hamming_aggregate(
   frame_step: f64,
   num_output_frames: usize,
   spill_options: &crate::ops::spill::SpillOptions,
-) -> Vec<f64> {
+) -> crate::ops::spill::SpillBytes<f64> {
   try_hamming_aggregate(
     per_chunk_value,
     num_chunks,
@@ -265,6 +265,16 @@ pub fn hamming_aggregate(
 /// Fallible variant of [`hamming_aggregate`]. Returns
 /// [`Error::Shape`] when `per_chunk_value.len() != num_chunks *
 /// num_frames_per_chunk`; otherwise identical output.
+///
+/// Returns a [`SpillBytes<f64>`] (heap or mmap, depending on
+/// `spill_options.threshold_bytes()`). The output is `Clone`-cheap
+/// for fan-out and `Send + Sync`. Previously this returned
+/// `Vec<f64>` and re-materialized the spill-backed scratch buffer
+/// on the heap at the boundary, defeating spilling for large
+/// outputs; the current design keeps the buffer spill-backed all
+/// the way to the caller.
+///
+/// [`SpillBytes<f64>`]: crate::ops::spill::SpillBytes
 pub fn try_hamming_aggregate(
   per_chunk_value: &[f64],
   num_chunks: usize,
@@ -273,7 +283,7 @@ pub fn try_hamming_aggregate(
   frame_step: f64,
   num_output_frames: usize,
   spill_options: &crate::ops::spill::SpillOptions,
-) -> Result<Vec<f64>, Error> {
+) -> Result<crate::ops::spill::SpillBytes<f64>, Error> {
   // `num_chunks == 0` makes `num_chunks * num_frames_per_chunk == 0`,
   // so the length check below passes for `per_chunk_value == &[]`
   // regardless of `num_frames_per_chunk`. Without this guard, a
@@ -438,13 +448,13 @@ pub fn try_hamming_aggregate(
       out[ofr] += per_chunk_value[c * num_frames_per_chunk + cf] * hamming[cf];
     }
   }
-  // Copy the spilled scratch buffer into the documented public
-  // return type (`Vec<f64>`). The aggregate work is the heavy
-  // bit (kernel pages 800 MB through the pdist + hamming loop);
-  // the final materialization to `Vec` allocates the same N cells
-  // on the heap. Future API: return `SpillBytesMut<f64>` directly to
-  // eliminate this copy, but that's a public-signature change.
-  Ok(out.to_vec())
+  // End the &mut borrow on `out_buf` so `freeze` can take ownership
+  // (NLL would also let the implicit drop happen, but the explicit
+  // shadow makes the order obvious). `freeze` is zero-copy on both
+  // backends — heap moves out the existing `Arc<[f64]>` (refcount 1),
+  // mmap wraps `MmapMut + std::fs::File` in a fresh `Arc<MmapHandle>`.
+  let _ = out;
+  Ok(out_buf.freeze())
 }
 
 /// Compute pyannote's exact `num_output_frames` for the given

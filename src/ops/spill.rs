@@ -64,6 +64,38 @@
 //! RAM + swap and consumes physical memory identically to `Vec`.
 //! File-backed mmap is what actually trades RAM for disk.
 //!
+//! ### mmap backing-file safety
+//!
+//! The `unsafe MmapOptions::map_mut` call requires that the
+//! underlying file not be modified concurrently by another writer.
+//! We obtain that guarantee differently per platform:
+//!
+//! - **Linux / Android**: `open(dir, O_TMPFILE | O_RDWR, 0600)`
+//!   creates an anonymous inode that has *never* been linked
+//!   into the directory. No path on disk; no race window. If the
+//!   filesystem does not support `O_TMPFILE` (NFS, some FUSE, very
+//!   old kernels), the syscall fails with `EOPNOTSUPP` / `EISDIR`
+//!   and we surface it as `SpillError::TempfileCreation` rather
+//!   than silently falling back. Configure
+//!   [`SpillOptions::with_spill_dir`] to point at an
+//!   `O_TMPFILE`-supporting filesystem (ext4 / xfs / btrfs / tmpfs)
+//!   if your default `/tmp` is on one that does not.
+//!
+//! - **macOS / other Unix**: no `O_TMPFILE` equivalent. We fall
+//!   back to `tempfile::tempfile[_in]`, which uses `mkstemp + unlink`
+//!   — a microsecond-scale race window where the random 0600 path
+//!   is briefly visible. After unlink, `nlink() == 0` is verified
+//!   defensively (`SpillError::TempfileNotUnlinked` if not), but
+//!   that check cannot retroactively close the create-window race.
+//!   This residual exposure is acceptable for **single-tenant
+//!   container** deployments (the dominant target) but should be
+//!   considered when running on a shared-UID multi-tenant host;
+//!   such deployments should prefer Linux with O_TMPFILE-supporting
+//!   storage.
+//!
+//! - **Windows**: `FILE_FLAG_DELETE_ON_CLOSE` with sharing denied
+//!   (via `tempfile`); no other process can open the file at all.
+//!
 //! ## Transparent Huge Pages (Linux)
 //!
 //! On Linux, mmap'd buffers are advised with `MADV_HUGEPAGE`
@@ -404,6 +436,66 @@ enum SpillMutInner<T> {
   Mmap { map: MmapMut, _file: std::fs::File },
 }
 
+/// Open the unlinked file that backs an mmap-spilled `SpillBytesMut`.
+///
+/// On Linux/Android we call `open(dir, O_TMPFILE | O_RDWR, 0o600)`
+/// directly via `libc` so the file is anonymous from creation —
+/// there is no path on disk for another process to find, no race
+/// window between create and unlink. If the filesystem does not
+/// support `O_TMPFILE` (rare in modern container deployments;
+/// NFS / some FUSE / very old kernels) the syscall returns
+/// `EOPNOTSUPP` / `EISDIR` and we surface it as
+/// `TempfileCreation`. Production deployments with such storage
+/// should configure `SpillOptions::with_spill_dir` to point at an
+/// `O_TMPFILE`-supporting filesystem (ext4 / xfs / btrfs / tmpfs)
+/// or ensure the spill backend is never reached.
+///
+/// On other Unix (macOS, BSDs) and Windows we fall back to
+/// `tempfile::tempfile[_in]`. macOS has no `O_TMPFILE` analogue;
+/// the `mkstemp + unlink` race window is inherent to POSIX. Windows
+/// uses `FILE_FLAG_DELETE_ON_CLOSE` with sharing denied, which
+/// prevents external opens entirely.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_backing_file(spill_dir: Option<&Path>) -> Result<std::fs::File, SpillError> {
+  use rustix::fs::{Mode, OFlags};
+  // `O_TMPFILE` is not exposed on stable `std::fs`; rustix wraps
+  // the syscall directly. The open target is a *directory* — the
+  // kernel uses it to pick the mount point for the unnamed inode.
+  // If the filesystem doesn't support `O_TMPFILE` (NFS / some FUSE
+  // / very old kernels), the syscall returns `EOPNOTSUPP`/`EISDIR`
+  // and we surface it as `TempfileCreation`.
+  let dir_owned = match spill_dir {
+    Some(d) => d.to_path_buf(),
+    None => std::env::temp_dir(),
+  };
+  let owned_fd = rustix::fs::open(
+    &dir_owned,
+    OFlags::RDWR | OFlags::TMPFILE | OFlags::CLOEXEC,
+    Mode::from_bits_truncate(0o600),
+  )
+  .map_err(|errno| SpillError::TempfileCreation {
+    dir: spill_dir.map(|d| d.to_path_buf()),
+    source: std::io::Error::from(errno),
+  })?;
+  // `OwnedFd` → `std::fs::File` is a zero-cost conversion: both
+  // own the same raw fd and close it on drop. After this point the
+  // file is just a regular `std::fs::File` from the rest of the
+  // module's perspective.
+  Ok(std::fs::File::from(owned_fd))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_backing_file(spill_dir: Option<&Path>) -> Result<std::fs::File, SpillError> {
+  match spill_dir {
+    Some(dir) => tempfile::tempfile_in(dir),
+    None => tempfile::tempfile(),
+  }
+  .map_err(|source| SpillError::TempfileCreation {
+    dir: spill_dir.map(|d| d.to_path_buf()),
+    source,
+  })
+}
+
 impl<T: Pod> SpillBytesMut<T> {
   /// Allocate `n` zero-initialized cells of `T` using the supplied
   /// [`SpillOptions`].
@@ -449,35 +541,36 @@ impl<T: Pod> SpillBytesMut<T> {
   }
 
   fn new_mmap(n: usize, bytes: usize, spill_dir: Option<&Path>) -> Result<Self, SpillError> {
-    // `tempfile::tempfile[_in]` returns a `std::fs::File` that is
-    // already unlinked from the directory on Unix (the link count
-    // hits zero before this call returns; the inode persists only
-    // because we still hold the open `File`). On Windows it uses
-    // `FILE_FLAG_DELETE_ON_CLOSE` with sharing denied. In both
-    // cases no other process can open the backing file by path
-    // while this `SpillBytesMut` is alive — that is the precondition
-    // the `unsafe` `map_mut` call below relies on, and it is what
-    // distinguishes us from `NamedTempFile`, whose pathname stays
-    // visible until the wrapper is dropped.
+    // Backing-file creation strategy depends on the platform:
     //
-    // ⚠ The Unix `tempfile_in` fallback for filesystems without
-    // `O_TMPFILE` (NFS, some CIFS mounts, very old Linux) creates a
-    // named file and best-effort unlinks it; tempfile 3.x ignores
-    // the unlink error. We verify the unlink-private invariant
-    // explicitly via `nlink()` below.
-    let file = match spill_dir {
-      Some(dir) => tempfile::tempfile_in(dir),
-      None => tempfile::tempfile(),
-    }
-    .map_err(|source| SpillError::TempfileCreation {
-      dir: spill_dir.map(|d| d.to_path_buf()),
-      source,
-    })?;
-    // Refuse to map a still-linked file. On filesystems where
-    // `tempfile`'s fast path failed to unlink, another same-UID
-    // process can still open and modify the file by path —
-    // violating the `unsafe` `map_mut` precondition that no
-    // concurrent writer exists.
+    // * **Linux/Android**: `open(dir, O_TMPFILE | O_RDWR, 0o600)`
+    //   creates an anonymous inode that has *never* been linked
+    //   into the directory. There is no race window between create
+    //   and unlink for another same-UID process to grab a writable
+    //   fd by path — the path simply does not exist. If the
+    //   filesystem doesn't support `O_TMPFILE` (NFS, some FUSE,
+    //   very old Linux), the kernel returns `EOPNOTSUPP`/`EISDIR`,
+    //   and we surface that as `TempfileCreation` rather than
+    //   silently falling back to `mkstemp + unlink`.
+    //
+    // * **macOS / other Unix**: no `O_TMPFILE` equivalent.
+    //   `tempfile::tempfile_in` calls `mkstemp` then `unlink` (the
+    //   classic POSIX dance) — there is a microsecond-scale race
+    //   window in which the random 0600 path is visible. The
+    //   subsequent `nlink() == 0` check verifies the unlink
+    //   succeeded but cannot retroactively close the race; we
+    //   accept that residual exposure for single-tenant container
+    //   deployments and document it in the module-level docs.
+    //
+    // * **Windows**: `tempfile::tempfile_in` uses
+    //   `FILE_FLAG_DELETE_ON_CLOSE` with sharing denied; no other
+    //   process can open the file at all.
+    let file = open_backing_file(spill_dir)?;
+    // Defense-in-depth: refuse to map a still-linked file. On
+    // Linux/Android the `O_TMPFILE` path makes this provably 0;
+    // on macOS / other Unix this catches the case where `unlink`
+    // failed entirely and we'd otherwise map a file an external
+    // observer can still write to.
     #[cfg(unix)]
     {
       use std::os::unix::fs::MetadataExt;
