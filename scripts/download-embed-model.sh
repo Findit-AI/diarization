@@ -8,9 +8,17 @@
 #   ./scripts/download-embed-model.sh
 #   cargo test --features ort -- --ignored
 #
-# Source: onnx-community/wespeaker-voxceleb-resnet34-LM on Hugging Face.
-# Variant: model.onnx (FP32, 26.5 MB). The FP16 / quantized variants
-# diverge from the pyannote reference and are deferred to v0.2.
+# Source: FinDIT-Studio/dia-models on Hugging Face — the canonical
+# bundle of all dia model artifacts (segmentation, WeSpeaker embedding
+# in three forms, PLDA weights, with attribution preserved).
+#
+# Variant fetched: `wespeaker_resnet34_lm.onnx` (FP32, single-file
+# packed form, ~25.5 MiB). All weights are inlined; no `.onnx.data`
+# sidecar is needed. This is the form that loads cleanly on every
+# ORT execution provider — including CoreML, whose optimizer fails
+# to relocate external initializers in the alternative external-data
+# layout. FP16 / quantized variants are deferred (they perturb the
+# pyannote-parity numerics and need separate validation).
 
 set -euo pipefail
 
@@ -18,13 +26,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODELS_DIR="$SCRIPT_DIR/../models"
 mkdir -p "$MODELS_DIR"
 
-URL="https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM/resolve/main/onnx/model.onnx"
+URL="https://huggingface.co/FinDIT-Studio/dia-models/resolve/main/wespeaker_resnet34_lm.onnx"
 DEST="$MODELS_DIR/wespeaker_resnet34_lm.onnx"
 
-# SHA-256 of the FP32 model.onnx as of 2026-04-27. Update if the upstream
-# repo re-publishes the model — a mismatch indicates a content drift that
-# could silently invalidate the byte-determinism / pyannote-parity gates.
-EXPECTED_SHA256="3955447b0499dc9e0a4541a895df08b03c69098eba4e56c02b5603e9f7f4fcbb"
+# SHA-256 of the canonical packed FP32 model (single-file, no
+# external data). Update if the upstream HF repo re-publishes — a
+# mismatch indicates content drift that could silently invalidate
+# byte-determinism / pyannote-parity gates.
+EXPECTED_SHA256="4c15c6be4235318d092c9d347e00c68ba476136d6172f675f76ad6b0c2661f01"
 
 if [ -f "$DEST" ]; then
   ACTUAL_SHA256="$(shasum -a 256 "$DEST" | awk '{print $1}')"

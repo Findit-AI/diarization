@@ -142,12 +142,40 @@ pub struct SegmentModel {
 }
 
 impl SegmentModel {
+  /// Build the [`SegmentModelOptions`] used by the no-arg constructors.
+  ///
+  /// Equivalent to [`SegmentModelOptions::default`] but additionally
+  /// registers any execution providers compiled into the binary via the
+  /// `ep-*` cargo features (CoreML, CUDA, TensorRT, DirectML, ROCm,
+  /// OpenVINO, …). When no `ep-*` feature is enabled,
+  /// [`crate::ep::auto_providers`] returns an empty list and behavior
+  /// matches `SegmentModelOptions::default` exactly — the default
+  /// build dispatches to ORT's CPU EP unchanged.
+  ///
+  /// Callers who want to override or disable provider auto-registration
+  /// should construct an options struct explicitly and pass it through
+  /// [`Self::from_file_with_options`] / [`Self::bundled_with_options`].
+  fn default_options_with_auto_providers() -> SegmentModelOptions {
+    SegmentModelOptions::default().with_providers(crate::ep::auto_providers())
+  }
+
   /// Load the model from disk with default options.
+  ///
+  /// Default options come from
+  /// [`Self::default_options_with_auto_providers`] — when an `ep-*`
+  /// cargo feature (e.g. `coreml`, `cuda`) is enabled, the matching
+  /// execution provider is auto-registered at session creation. With
+  /// no `ep-*` feature on, this is identical to
+  /// `from_file_with_options(path, SegmentModelOptions::default())`.
   pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-    Self::from_file_with_options(path, SegmentModelOptions::default())
+    Self::from_file_with_options(path, Self::default_options_with_auto_providers())
   }
 
   /// Load the model from disk with custom options.
+  ///
+  /// Bypasses provider auto-registration — the caller's `opts` (and
+  /// thus the providers explicitly set via
+  /// [`SegmentModelOptions::with_providers`]) are honored as-is.
   pub fn from_file_with_options<P: AsRef<Path>>(
     path: P,
     opts: SegmentModelOptions,
@@ -167,8 +195,11 @@ impl SegmentModel {
   ///
   /// `bytes` is **copied** into ort's session; the buffer can be dropped
   /// immediately after this call returns.
+  ///
+  /// Default options auto-register `ep-*`-compiled execution providers.
+  /// See [`Self::from_file`] for details.
   pub fn from_memory(bytes: &[u8]) -> Result<Self, Error> {
-    Self::from_memory_with_options(bytes, SegmentModelOptions::default())
+    Self::from_memory_with_options(bytes, Self::default_options_with_auto_providers())
   }
 
   /// Load the model from an in-memory ONNX byte buffer with custom options.
@@ -184,12 +215,29 @@ impl SegmentModel {
   /// `include_bytes!` (gated on the `bundled-segmentation` cargo feature,
   /// which is on by default). No filesystem path or env var needed.
   ///
+  /// Default options auto-register any execution providers compiled in
+  /// via the `ep-*` cargo features (CoreML, CUDA, TensorRT, DirectML,
+  /// ROCm, OpenVINO, …). See [`Self::from_file`] for the auto-register
+  /// contract. With no `ep-*` feature on, dispatch is ORT-CPU as
+  /// before.
+  ///
+  /// # Asymmetric default with embedding
+  ///
+  /// Segmentation's auto-register default is paired with an
+  /// **explicit** default for embedding:
+  /// [`crate::embed::EmbedModel::from_file`] does NOT auto-register
+  /// EPs even when `ep-*` features are on. The reason is empirical:
+  /// ORT's CoreML EP mistranslates the WeSpeaker ResNet34-LM graph
+  /// and emits NaN/Inf on most inputs, while it handles the
+  /// segmentation graph correctly. The asymmetry preserves the
+  /// segmentation speedup without breaking the embedding pipeline.
+  ///
   /// Source: `pyannote/segmentation-3.0` on HuggingFace, MIT-licensed —
   /// see `NOTICE` for attribution requirements.
   #[cfg(feature = "bundled-segmentation")]
   #[cfg_attr(docsrs, doc(cfg(feature = "bundled-segmentation")))]
   pub fn bundled() -> Result<Self, Error> {
-    Self::bundled_with_options(SegmentModelOptions::default())
+    Self::bundled_with_options(Self::default_options_with_auto_providers())
   }
 
   /// Load the bundled segmentation model with custom options.

@@ -7,10 +7,15 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# Enable the `ep-coreml` feature so we can flip the CoreML provider
+# Enable the `coreml` feature so we can flip the CoreML provider
 # on via the `DIA_USE_COREML_*` env vars in `src/main.rs`. The full
 # `ep-*` matrix is documented in dia's `Cargo.toml`; flip the right
 # feature on for the GPU/EP you want to benchmark on.
-diarization = { path = "../..", features = ["ort", "ep-coreml"] }
+diarization = { path = "../..", features = ["ort", "coreml"] }
+# Direct ort dep so we can construct `CoreML::default().with_compute_units(...)`
+# for the CoreML compute-unit isolation knob (debugging the WeSpeaker
+# embed NaN regression on the ANE path). The version MUST match what
+# `diarization` pulls in.
+ort = { version = "2.0.0-rc.12", features = ["coreml"] }
 hound = "3"
 anyhow = "1"

@@ -18,6 +18,7 @@ use diarization::{
   segment::{SegmentModel, SegmentModelOptions},
   streaming::{StreamingOfflineOptions, StreamingOfflineDiarizer},
 };
+use ort::ep::coreml::{ComputeUnits, ModelFormat};
 
 fn main() -> Result<()> {
   let args: Vec<String> = std::env::args().collect();
@@ -50,47 +51,102 @@ fn main() -> Result<()> {
     ),
   };
 
-  // Optionally register the CoreML execution provider. Two env vars
-  // cover the M-series-Mac knob:
-  //   DIA_USE_COREML_SEG=1   — segmentation model on CoreML
-  //   DIA_USE_COREML_EMB=1   — embedding model on CoreML (note: the
-  //                            shipped wespeaker_resnet34_lm.onnx uses
-  //                            external data in `.onnx.data`, and
-  //                            CoreML's optimizer fails to relocate
-  //                            external initializers; expect a
-  //                            "model_path must not be empty" error
-  //                            unless the model is repacked.)
-  // CoreML EP registers itself as `MayUse`, so unsupported ops auto-
-  // fall back to CPU.
-  let use_coreml_seg = std::env::var("DIA_USE_COREML_SEG").ok().as_deref() == Some("1");
-  let use_coreml_emb = std::env::var("DIA_USE_COREML_EMB").ok().as_deref() == Some("1");
-  let seg_opts = if use_coreml_seg {
-    SegmentModelOptions::default()
-      .with_providers(vec![CoreMLExecutionProvider::default().build()])
-  } else {
-    SegmentModelOptions::default()
+  // EP dispatch knobs — useful for isolating CoreML correctness
+  // regressions per model:
+  //   DIA_DISABLE_AUTO_PROVIDERS=1   — force CPU on both seg + emb
+  //   DIA_FORCE_CPU_SEG=1            — force CPU on seg only
+  //   DIA_FORCE_CPU_EMB=1            — force CPU on emb only
+  //   DIA_COREML_COMPUTE_UNITS=cpu|gpu|ane|all   — when CoreML auto-
+  //     registers, pin the compute unit selection. Useful for
+  //     debugging which dispatch produces NaN (the ANE is FP16-only
+  //     on M-series and is the most likely culprit for precision
+  //     regressions). Default = "all" (CoreML's own picker).
+  // Default (all unset) auto-registers `dia::ep::auto_providers()`
+  // for both — at build time with `--features coreml`, the CoreML EP.
+  let disable_auto = std::env::var("DIA_DISABLE_AUTO_PROVIDERS").ok().as_deref() == Some("1");
+  let force_cpu_seg =
+    disable_auto || std::env::var("DIA_FORCE_CPU_SEG").ok().as_deref() == Some("1");
+  let force_cpu_emb =
+    disable_auto || std::env::var("DIA_FORCE_CPU_EMB").ok().as_deref() == Some("1");
+  let compute_units = match std::env::var("DIA_COREML_COMPUTE_UNITS").ok().as_deref() {
+    Some("cpu") => Some(ComputeUnits::CPUOnly),
+    Some("gpu") => Some(ComputeUnits::CPUAndGPU),
+    Some("ane") => Some(ComputeUnits::CPUAndNeuralEngine),
+    Some("all") | None => None, // None = CoreML's default = ALL
+    Some(other) => bail!(
+      "DIA_COREML_COMPUTE_UNITS must be one of: cpu, gpu, ane, all (got {other:?})"
+    ),
   };
-  let emb_opts = if use_coreml_emb {
-    EmbedModelOptions::default()
-      .with_providers(vec![CoreMLExecutionProvider::default().build()])
-  } else {
-    EmbedModelOptions::default()
+  // Additional CoreML knobs for debugging the WeSpeaker NaN.
+  //   DIA_COREML_MODEL_FORMAT=mlprogram|nn   default = nn
+  //   DIA_COREML_STATIC_SHAPES=1             require static shapes
+  let model_format = match std::env::var("DIA_COREML_MODEL_FORMAT").ok().as_deref() {
+    Some("mlprogram") => Some(ModelFormat::MLProgram),
+    Some("nn") | None => None,
+    Some(other) => bail!(
+      "DIA_COREML_MODEL_FORMAT must be 'mlprogram' or 'nn' (got {other:?})"
+    ),
   };
-  // Segmentation ships bundled in the crate. Embedding model is BYO
-  // (27 MB, doesn't fit under the crates.io 10 MB cap).
-  let mut seg =
-    SegmentModel::bundled_with_options(seg_opts).context("load bundled segment model")?;
+  let static_shapes = std::env::var("DIA_COREML_STATIC_SHAPES").ok().as_deref() == Some("1");
+  let coreml_provider = || {
+    let mut ep = ort::ep::CoreML::default();
+    if let Some(u) = compute_units {
+      ep = ep.with_compute_units(u);
+    }
+    if let Some(f) = model_format {
+      ep = ep.with_model_format(f);
+    }
+    if static_shapes {
+      ep = ep.with_static_input_shapes(true);
+    }
+    ep.build()
+  };
   let emb_path = std::env::var("DIA_EMBED_MODEL_PATH")
     .unwrap_or_else(|_| "models/wespeaker_resnet34_lm.onnx".into());
-  let mut emb = EmbedModel::from_file_with_options(&emb_path, emb_opts)
-    .context("load embed model")?;
   let plda = PldaTransform::new().context("load plda")?;
-  if use_coreml_seg || use_coreml_emb {
-    eprintln!(
-      "# dia: CoreML execution provider — seg={} emb={}",
-      use_coreml_seg, use_coreml_emb
-    );
-  }
+  let mut seg = if force_cpu_seg {
+    SegmentModel::bundled_with_options(SegmentModelOptions::default())
+      .context("load bundled segment model (CPU)")?
+  } else if compute_units.is_some() {
+    // Caller pinned a compute unit — explicitly construct the EP
+    // with that pin and pass via `_with_options`. Default
+    // `bundled()` would auto_providers() with CoreML's defaults.
+    let opts = SegmentModelOptions::default().with_providers(vec![coreml_provider()]);
+    SegmentModel::bundled_with_options(opts).context("load bundled segment model (CoreML pinned)")?
+  } else {
+    SegmentModel::bundled().context("load bundled segment model (auto)")?
+  };
+  let mut emb = if force_cpu_emb {
+    EmbedModel::from_file_with_options(&emb_path, EmbedModelOptions::default())
+      .context("load embed model (CPU)")?
+  } else if compute_units.is_some() {
+    let opts = EmbedModelOptions::default().with_providers(vec![coreml_provider()]);
+    EmbedModel::from_file_with_options(&emb_path, opts).context("load embed model (CoreML pinned)")?
+  } else {
+    EmbedModel::from_file(&emb_path).context("load embed model (auto)")?
+  };
+  let cu_label = compute_units
+    .map(|u| match u {
+      ComputeUnits::CPUOnly => "cpu",
+      ComputeUnits::CPUAndGPU => "gpu",
+      ComputeUnits::CPUAndNeuralEngine => "ane",
+      ComputeUnits::All => "all",
+    })
+    .unwrap_or("default");
+  eprintln!(
+    "# dia: seg={} emb={} coreml_cu={}",
+    if force_cpu_seg { "CPU" } else { "auto" },
+    if force_cpu_emb { "CPU" } else { "auto" },
+    cu_label,
+  );
+  // Suppress unused-import warning (the explicit `_with_options`
+  // path keeps the type alive; CoreML import is for downstream use
+  // by callers reading this binary as an integration example).
+  let _ = (
+    SegmentModelOptions::default(),
+    EmbedModelOptions::default(),
+    CoreMLExecutionProvider::default(),
+  );
 
   let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());
   diarizer

@@ -398,6 +398,40 @@ impl EmbedModel {
   /// Load the ONNX model from disk with default options.
   ///
   /// Available with the `ort` feature (on by default).
+  ///
+  /// **Embedding inference defaults to ORT-CPU dispatch** even when
+  /// `ep-*` cargo features (e.g. `coreml`, `cuda`) are compiled in.
+  /// This is intentional: ORT's CoreML EP is known to mistranslate
+  /// the WeSpeaker ResNet34-LM graph and emit NaN/Inf on common
+  /// inputs (independent of compute-unit / model-format /
+  /// static-shape knobs); auto-registering CoreML for embed would
+  /// cause a hard pipeline failure on most realistic clips. We have
+  /// no parity coverage proving CUDA/TensorRT/DirectML/ROCm produce
+  /// finite output on this model either, so dia treats CPU as the
+  /// only known-safe default for embed and leaves the override
+  /// explicit.
+  ///
+  /// Callers on a vetted EP host can opt in by passing providers
+  /// explicitly:
+  ///
+  /// ```ignore
+  /// # // ignored: requires the `cuda` cargo feature + a CUDA host.
+  /// use diarization::{
+  ///   embed::{EmbedModel, EmbedModelOptions},
+  ///   ep::CUDAExecutionProvider,
+  /// };
+  /// let opts = EmbedModelOptions::default()
+  ///   .with_providers(vec![CUDAExecutionProvider::default().build()]);
+  /// let mut emb = EmbedModel::from_file_with_options(
+  ///   "wespeaker_resnet34_lm.onnx",
+  ///   opts,
+  /// )?;
+  /// # Ok::<(), Box<dyn std::error::Error>>(())
+  /// ```
+  ///
+  /// `SegmentModel::bundled()` does auto-register `ep-*`-compiled
+  /// providers because the segmentation graph is CoreML-safe — see
+  /// [`crate::segment::SegmentModel::bundled`] for that contract.
   #[cfg(feature = "ort")]
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
@@ -405,6 +439,10 @@ impl EmbedModel {
   }
 
   /// Load the ONNX model from disk with custom options.
+  ///
+  /// Honors the caller's `opts` verbatim — including any execution
+  /// providers explicitly set via
+  /// [`EmbedModelOptions::with_providers`].
   #[cfg(feature = "ort")]
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn from_file_with_options<P: AsRef<Path>>(
@@ -426,6 +464,8 @@ impl EmbedModel {
   }
 
   /// Load the ONNX model from an in-memory byte buffer (default options).
+  ///
+  /// CPU dispatch — see [`Self::from_file`] for the rationale.
   #[cfg(feature = "ort")]
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   pub fn from_memory(bytes: &[u8]) -> Result<Self, Error> {
