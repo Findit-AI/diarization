@@ -125,6 +125,12 @@ itoa = "1"
 memmapix = "0.9"
 bytemuck = "1"
 tempfile = "3"
+# Cross-platform `File::allocate` for the spill backend
+# (`posix_fallocate` on Linux, `F_PREALLOCATE` on macOS,
+# `SetFileValidData`/`SetEndOfFile` on Windows). Reserves disk blocks
+# before mmap so writes through the mapping cannot SIGBUS on
+# ENOSPC. Used in `ops::spill::SpillBytesMut::new_mmap`.
+fs4 = "1"
 
 # Phase 5e: silero VAD for streaming voice-range detection. Sister
 # project at `findit-studio/silero` (path dep until both publish to

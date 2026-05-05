@@ -48,7 +48,7 @@ mod parity_tests;
 #[cfg(all(test, feature = "ort"))]
 mod owned_smoke_tests;
 
-pub use algo::{Error, OfflineInput, OfflineOutput, diarize_offline};
+pub use algo::{Error, MAX_OFFLINE_EMBEDDINGS_CELLS, OfflineInput, OfflineOutput, diarize_offline};
 
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]

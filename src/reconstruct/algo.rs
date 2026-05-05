@@ -1,8 +1,6 @@
 //! Reconstruction math: clustered_segmentations + overlap-add aggregate
 //! + top-K binarize.
 
-use std::sync::Arc;
-
 use crate::{
   cluster::hungarian::{ChunkAssignment, UNMATCHED},
   reconstruct::error::Error,
@@ -28,18 +26,19 @@ pub const MAX_CLUSTER_ID: i32 = 1023;
 pub const MAX_COUNT_PER_FRAME: u8 = 64;
 
 /// Hard upper bound on `num_output_frames * num_clusters` accepted by
-/// [`reconstruct`]. The function allocates `aggregated`,
-/// `agg_mask`, `clustered`, and `clustered_mask` scratch buffers,
-/// each up to `output_grid_size` cells.
+/// [`reconstruct`].
 ///
-/// `4e8` cells is `1.6 GB` of `f32`/`f64` plus `400 MB` of `u8`
-/// mask, well above the realistic production envelope
-/// (`num_output_frames` bounded by audio duration, `num_clusters`
-/// typically 1–4). The big-allocation safety budget is delivered
-/// by `crate::ops::spill::SpillBytesMut` — buffers above
-/// `SpillOptions::threshold_bytes` (default 256 MiB) are
-/// file-backed via mmap rather than heap, so the cap represents a
-/// soft upper bound on disk space rather than an OOM cliff.
+/// All four large allocations along the reconstruct path —
+/// `aggregated`, `agg_mask`, `clustered`, `clustered_mask`, and the
+/// returned discrete diarization grid — route through
+/// [`crate::ops::spill::SpillBytesMut`] / [`crate::ops::spill::SpillBytes`]
+/// and spill to file-backed mmap above
+/// [`crate::ops::spill::SpillOptions::threshold_bytes`] (default
+/// 256 MiB). This cap is therefore a soft upper bound on disk
+/// space, not an OOM cliff: at `4e8` cells the scratch state
+/// approaches `1.6 GB` of `f32`/`f64` plus `400 MB` of `u8` mask,
+/// well above the realistic production envelope but bounded by
+/// the configured `spill_dir` filesystem rather than RAM.
 pub const MAX_RECONSTRUCT_GRID_CELLS: usize = 400_000_000;
 
 /// Pyannote `SlidingWindow` (start, duration, step), all in seconds.
@@ -307,7 +306,9 @@ impl<'a> ReconstructInput<'a> {
 ///   mask path; arbitrary `±inf` is rejected).
 /// - [`Error::Timing`] for non-finite or non-positive sliding-window
 ///   parameters.
-pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
+pub fn reconstruct(
+  input: &ReconstructInput<'_>,
+) -> Result<crate::ops::spill::SpillBytes<f32>, Error> {
   // `..` skips `spill_options`: it is non-Copy, so destructuring it
   // by value would not compile. The buffer-allocation sites below
   // read it via `&input.spill_options` instead.
@@ -550,12 +551,13 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     }
   }
   if max_cluster < 0 {
-    // No assigned clusters anywhere — return all-zero grid built
-    // directly via the trusted-len iterator collect. `Range<usize>`
-    // is `TrustedLen`, `Map` preserves it, so std's specialized
-    // `<Arc<[T]> as FromIterator<T>>::from_iter` allocates the
-    // `Arc<[f32]>` once and writes each element straight in.
-    return Ok((0..num_output_frames).map(|_| 0.0_f32).collect());
+    // No assigned clusters anywhere — return an all-zero grid via
+    // a fresh `SpillBytesMut::zeros` (which honors the per-call
+    // spill threshold) frozen for cheap-clone fan-out. The
+    // zero-init is intrinsic to `zeros`; no fill loop needed.
+    let buf =
+      crate::ops::spill::SpillBytesMut::<f32>::zeros(num_output_frames, &input.spill_options)?;
+    return Ok(buf.freeze());
   }
   let num_clusters_from_hard = (max_cluster + 1) as usize;
 
@@ -720,28 +722,16 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
 
   // ── Stage 3: top-`count[t]` binarize per output frame ──────────
   //
-  // Build the output `Arc<[f32]>` directly via
-  // `Arc::new_uninit_slice` + `Arc::get_mut` for unique mutable
-  // access (the freshly-allocated `Arc` has refcount 1, so
-  // `get_mut` returns `Some`). Each cell is initialized to 0.0
-  // first, then non-default selections overwrite. After all writes,
-  // `assume_init` converts the `MaybeUninit` slice in place — no
-  // `Vec`-then-`Arc` round-trip and no copy through the refcount
-  // prefix.
-  // Reuse the checked product computed above for the aggregated /
-  // agg_mask Vec so the Arc allocation can't disagree with them.
-  let total = output_grid_size;
-  let mut arc_uninit: Arc<[std::mem::MaybeUninit<f32>]> = Arc::new_uninit_slice(total);
-  // SAFETY: `arc_uninit` was just constructed and has refcount 1, so
-  // `get_mut` returns `Some` with unique mutable access to the
-  // backing storage.
-  let out: &mut [std::mem::MaybeUninit<f32>] = Arc::get_mut(&mut arc_uninit)
-    .expect("Arc::get_mut on freshly-allocated new_uninit_slice (unique owner) returns Some");
-  for slot in out.iter_mut() {
-    slot.write(0.0_f32);
-  }
-  // SAFETY: every element was just initialized via `slot.write(0.0)`.
-  let out: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast(), total) };
+  // Build the output through `SpillBytesMut<f32>` so the final grid
+  // honors the same heap-or-mmap budget as the scratch buffers.
+  // After the fill loop the buffer is frozen into a cheap-clone
+  // `SpillBytes<f32>` — read-phase, `Send + Sync`, and shareable
+  // across consumers without copying. `SpillBytesMut::zeros`
+  // pre-zeros the cells, so the body only needs to overwrite cells
+  // that get a `1.0` selection.
+  let mut out_buf =
+    crate::ops::spill::SpillBytesMut::<f32>::zeros(output_grid_size, &input.spill_options)?;
+  let out = out_buf.as_mut_slice();
   let mut prev_selected: Vec<usize> = Vec::new();
   for (t, &c_byte) in count.iter().enumerate().take(num_output_frames) {
     let c_count = c_byte as usize;
@@ -820,13 +810,12 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
     prev_selected = now_selected;
   }
 
-  // SAFETY: every cell in `arc_uninit` was initialized to 0.0 above
-  // (the `slot.write(0.0)` loop covered the full slice), and the
-  // subsequent `out[..] = 1.0` writes are also fully initialized
-  // f32 values. `assume_init` is the canonical conversion from
-  // `Arc<[MaybeUninit<f32>]>` to `Arc<[f32]>`.
-  let arc_init: Arc<[f32]> = unsafe { arc_uninit.assume_init() };
+  // Drop the `&mut [f32]` borrow so `freeze` can move out of
+  // `out_buf`. NLL would also let the implicit drop happen at the
+  // end of scope, but the explicit name-rebind makes the
+  // ordering clear.
+  let _ = out;
   // Reference UNMATCHED so the import isn't dead code.
   let _ = UNMATCHED;
-  Ok(arc_init)
+  Ok(out_buf.freeze())
 }

@@ -728,7 +728,7 @@ impl StreamingOfflineDiarizer {
       };
 
       let local_spans: Vec<RttmSpan> = discrete_to_spans(
-        &discrete,
+        discrete.as_slice(),
         r.count.len(),
         num_clusters_local,
         r.frames_sw_local,

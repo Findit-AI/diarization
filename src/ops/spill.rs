@@ -187,6 +187,47 @@ pub enum SpillError {
     #[source]
     source: std::io::Error,
   },
+  /// `tempfile::tempfile[_in]` returned a file with a non-zero
+  /// link count, so the backing file is still reachable by name
+  /// from the spill directory. This happens when the underlying
+  /// filesystem (e.g. NFS, or an old Linux without `O_TMPFILE`)
+  /// makes the unlink-on-create fast path unavailable; the
+  /// `tempfile` 3.x fallback creates a named file and ignores
+  /// `remove_file` failures, leaving the file linked.
+  ///
+  /// We refuse to map a still-linked file because it violates the
+  /// `unsafe MmapOptions::map_mut` precondition: another same-UID
+  /// process could open and modify the file behind our back,
+  /// breaking the read-only invariant of `SpillBytes` after
+  /// `freeze`. Configure a `spill_dir` on a filesystem that
+  /// supports unlinked tempfiles to avoid this.
+  #[error(
+    "spill: tempfile in {dir:?} was not unlinked at creation \
+     (filesystem does not support O_TMPFILE-style unlink-private \
+     temp files); refusing to map writable buffer that other \
+     same-UID processes can still open by path"
+  )]
+  TempfileNotUnlinked {
+    /// Directory the tempfile was created in (`None` =
+    /// [`std::env::temp_dir`]).
+    dir: Option<PathBuf>,
+  },
+  /// `posix_fallocate(2)` failed to reserve disk blocks for the
+  /// mmap-backed tempfile. Without preallocation, `set_len` alone
+  /// produces a sparse file whose pages may be backed only after
+  /// the kernel observes a write fault; running out of disk space
+  /// at fault time is delivered as `SIGBUS` (process crash) rather
+  /// than as a typed I/O error from a syscall. We reserve up front
+  /// so the spill backend either succeeds with a fully-backed file
+  /// or returns this error.
+  #[error("spill: failed to preallocate {bytes} bytes for tempfile: {source}")]
+  TempfilePreallocate {
+    /// Requested file length in bytes.
+    bytes: u64,
+    /// Underlying I/O error.
+    #[source]
+    source: std::io::Error,
+  },
 }
 
 #[cfg_attr(not(tarpaulin), inline(always))]
@@ -400,6 +441,12 @@ impl<T: Pod> SpillBytesMut<T> {
     // the `unsafe` `map_mut` call below relies on, and it is what
     // distinguishes us from `NamedTempFile`, whose pathname stays
     // visible until the wrapper is dropped.
+    //
+    // ⚠ The Unix `tempfile_in` fallback for filesystems without
+    // `O_TMPFILE` (NFS, some CIFS mounts, very old Linux) creates a
+    // named file and best-effort unlinks it; tempfile 3.x ignores
+    // the unlink error. We verify the unlink-private invariant
+    // explicitly via `nlink()` below.
     let file = match spill_dir {
       Some(dir) => tempfile::tempfile_in(dir),
       None => tempfile::tempfile(),
@@ -408,19 +455,54 @@ impl<T: Pod> SpillBytesMut<T> {
       dir: spill_dir.map(|d| d.to_path_buf()),
       source,
     })?;
-    file
-      .set_len(bytes as u64)
-      .map_err(|source| SpillError::TempfileGrow {
+    // Refuse to map a still-linked file. On filesystems where
+    // `tempfile`'s fast path failed to unlink, another same-UID
+    // process can still open and modify the file by path —
+    // violating the `unsafe` `map_mut` precondition that no
+    // concurrent writer exists.
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::MetadataExt;
+      let m = file.metadata().map_err(|source| SpillError::TempfileGrow {
         bytes: bytes as u64,
         source,
       })?;
+      if m.nlink() != 0 {
+        return Err(SpillError::TempfileNotUnlinked {
+          dir: spill_dir.map(|d| d.to_path_buf()),
+        });
+      }
+    }
+    // Reserve disk blocks before mapping. `set_len` alone produces
+    // a sparse file whose pages may not have backing storage; a
+    // write through the mmap that touches an unbacked page hits
+    // ENOSPC as `SIGBUS` (process crash) rather than as a typed
+    // I/O error. `fs4::FileExt::allocate` cross-platform-wraps
+    // `posix_fallocate(2)` (Linux/Android),
+    // `fcntl(F_PREALLOCATE)` (macOS), and
+    // `SetFileValidData`/`SetEndOfFile` (Windows). Either we
+    // succeed here with a fully-backed file or we surface
+    // `SpillError::TempfilePreallocate` to the caller.
+    {
+      use fs4::FileExt;
+      file
+        .allocate(bytes as u64)
+        .map_err(|source| SpillError::TempfilePreallocate {
+          bytes: bytes as u64,
+          source,
+        })?;
+    }
     // SAFETY: `file` is a freshly created, already-unlinked tempfile
-    // (see above). No other process can open it by path; no other
-    // thread holds the handle (we own it exclusively here, and only
-    // hand it out wrapped in `SpillBytesMut`/`Arc<MmapHandle>` which
-    // never expose `&mut File`). That satisfies
-    // `MmapOptions::map_mut`'s requirement that the underlying file
-    // not be modified concurrently.
+    // (verified above on Unix via `nlink() == 0`). No other process
+    // can open it by path; no other thread holds the handle (we own
+    // it exclusively here, and only hand it out wrapped in
+    // `SpillBytesMut`/`Arc<MmapHandle>` which never expose
+    // `&mut File`). That satisfies `MmapOptions::map_mut`'s
+    // requirement that the underlying file not be modified
+    // concurrently. Disk blocks are reserved by the
+    // `posix_fallocate` (Linux/Android) or `set_len` (other
+    // platforms) call above, so writes through the mmap will not
+    // SIGBUS on ENOSPC for the preallocated platforms.
     let map = unsafe {
       MmapOptions::new()
         .len(bytes)
@@ -626,6 +708,48 @@ impl<T: Pod> SpillBytes<T> {
 unsafe impl<T: Pod + Send + Sync> Send for SpillBytes<T> {}
 unsafe impl<T: Pod + Send + Sync> Sync for SpillBytes<T> {}
 
+/// `Deref` so `SpillBytes<T>` substitutes for `Arc<[T]>` /
+/// `&[T]` at most call sites: indexing (`buf[i]`), slicing
+/// (`&buf[..]`), `.iter()`, `.len()` (also defined directly on
+/// `SpillBytes`; the inherent method takes priority but the
+/// deref'd slice version is equivalent), and so on. Equivalent
+/// to `as_slice()` but ergonomic.
+impl<T: Pod> core::ops::Deref for SpillBytes<T> {
+  type Target = [T];
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  fn deref(&self) -> &[T] {
+    self.as_slice()
+  }
+}
+
+impl<T: Pod + core::fmt::Debug> core::fmt::Debug for SpillBytes<T> {
+  /// Length-tagged backend summary plus a bounded head (first 8
+  /// cells). Avoids formatting an mmap-backed multi-GB buffer in
+  /// full — `as_slice()`'s `Debug` would walk every element — while
+  /// keeping the small-grid test-debug output useful.
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    const HEAD: usize = 8;
+    let s = self.as_slice();
+    let head_n = s.len().min(HEAD);
+    f.debug_struct("SpillBytes")
+      .field("len", &self.len)
+      .field("backend", &if self.is_mmapped() { "mmap" } else { "heap" })
+      .field("head", &&s[..head_n])
+      .finish()
+  }
+}
+
+impl<T: Pod + core::fmt::Debug> core::fmt::Debug for SpillBytesMut<T> {
+  /// Same length-tagged summary as `SpillBytes`; full contents
+  /// elided for the same reason.
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("SpillBytesMut")
+      .field("len", &self.len)
+      .field("backend", &if self.is_mmapped() { "mmap" } else { "heap" })
+      .finish()
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -744,7 +868,7 @@ mod tests {
   fn size_overflow_returns_typed_error() {
     let opts = SpillOptions::default();
     let r: Result<SpillBytesMut<f64>, _> = SpillBytesMut::zeros(usize::MAX / 4, &opts);
-    let err = r.err().expect("must error on overflow");
+    let err = r.unwrap_err();
     assert!(
       matches!(err, SpillError::SizeOverflow { .. }),
       "got {err:?}"

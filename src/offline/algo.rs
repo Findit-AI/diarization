@@ -104,7 +104,42 @@ pub enum ShapeError {
   /// pyannote-argmax bit-exact path and is always valid.
   #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
   SmoothingEpsilonOutOfRange { value: Option<f32> },
+  /// `num_chunks * num_speakers * EMBEDDING_DIM` exceeds
+  /// [`MAX_OFFLINE_EMBEDDINGS_CELLS`]. The full f64 embeddings
+  /// `DMatrix` allocated by `diarize_offline` is heap-only (one
+  /// contiguous nalgebra allocation), so a multi-hour input that
+  /// passes the upstream spill-backed segmentation/embedding caps
+  /// can still OOM-abort here. Reject up front rather than letting
+  /// the matrix `zeros(...)` panic / abort.
+  ///
+  /// [`MAX_OFFLINE_EMBEDDINGS_CELLS`]: crate::offline::MAX_OFFLINE_EMBEDDINGS_CELLS
+  #[error(
+    "num_chunks * num_speakers * EMBEDDING_DIM ({got}) exceeds heap-only cap \
+     MAX_OFFLINE_EMBEDDINGS_CELLS ({max}); split the input or use a \
+     spill-backed matrix in a future refactor"
+  )]
+  EmbeddingsHeapTooLarge { got: usize, max: usize },
 }
+
+/// Hard upper bound on `num_chunks * num_speakers * EMBEDDING_DIM`
+/// for the **heap-allocated** f64 embeddings `DMatrix` that
+/// [`diarize_offline`] materializes from the spill-backed raw
+/// embeddings. nalgebra's `DMatrix` is one contiguous heap
+/// allocation; unlike the upstream segmentations/embeddings, this
+/// matrix cannot spill to mmap.
+///
+/// `4e7` cells × 8 B = 320 MB, sized to stay below the default
+/// 256 MiB spill threshold's downstream usage and bounded
+/// independently of the upstream spill caps. At pyannote
+/// community-1's 3-slot × 256-dim geometry that admits
+/// `num_chunks ≤ ~52000`, ~14 hours of audio at the 1 s step.
+/// Streaming or batch inputs above that should be split into
+/// shorter passes; a future refactor can replace this matrix
+/// with a row-accessor over the spill-backed raw embeddings.
+///
+/// Surfaces as
+/// [`crate::offline::algo::ShapeError::EmbeddingsHeapTooLarge`].
+pub const MAX_OFFLINE_EMBEDDINGS_CELLS: usize = 40_000_000;
 
 /// `const fn` predicate: `v` is finite and `>= 0` (f64). Used for
 /// `min_duration_off`, a non-negative seconds quantity passed
@@ -366,7 +401,12 @@ impl<'a> OfflineInput<'a> {
 #[derive(Debug, Clone)]
 pub struct OfflineOutput {
   hard_clusters: Arc<[ChunkAssignment]>,
-  discrete_diarization: Arc<[f32]>,
+  /// Spill-backed (heap-or-mmap), cheap-clone via the inner
+  /// `Arc`. Cloning the `OfflineOutput` clones this without
+  /// copying the underlying buffer; large multi-hour grids that
+  /// crossed `SpillOptions::threshold_bytes` during reconstruction
+  /// remain mmap-backed without extra memory pressure here.
+  discrete_diarization: crate::ops::spill::SpillBytes<f32>,
   num_clusters: usize,
   spans: Arc<[RttmSpan]>,
 }
@@ -375,7 +415,7 @@ impl OfflineOutput {
   /// Construct.
   pub fn new(
     hard_clusters: Arc<[ChunkAssignment]>,
-    discrete_diarization: Arc<[f32]>,
+    discrete_diarization: crate::ops::spill::SpillBytes<f32>,
     num_clusters: usize,
     spans: Arc<[RttmSpan]>,
   ) -> Self {
@@ -403,14 +443,19 @@ impl OfflineOutput {
   /// Cheap-clone handle to the frame-level binary diarization grid
   /// `(num_output_frames, num_clusters)`, flattened row-major
   /// `[t][k]`.
-  pub fn discrete_diarization(&self) -> Arc<[f32]> {
-    Arc::clone(&self.discrete_diarization)
+  ///
+  /// Returns [`crate::ops::spill::SpillBytes<f32>`]: heap-backed
+  /// for grids under `SpillOptions::threshold_bytes`, mmap-backed
+  /// above. Cloning is `Arc::clone`-cheap on either backend; both
+  /// `Send` and `Sync`.
+  pub fn discrete_diarization(&self) -> crate::ops::spill::SpillBytes<f32> {
+    self.discrete_diarization.clone()
   }
 
   /// Borrow the frame-level binary diarization grid without cloning
-  /// the `Arc`.
+  /// the underlying `SpillBytes` handle.
   pub fn discrete_diarization_slice(&self) -> &[f32] {
-    &self.discrete_diarization
+    self.discrete_diarization.as_slice()
   }
 
   /// Number of clusters in the output diarization grid.
@@ -583,6 +628,42 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
   // ── Stage 2: build full f64 embeddings DMatrix ─────────────────
   // shape (num_chunks * num_speakers, EMBEDDING_DIM).
+  //
+  // Heap-only: nalgebra's `DMatrix` is one contiguous heap
+  // allocation and cannot fall back to mmap. At pyannote
+  // community-1's 3-slot geometry × 256 dims × 8 B,
+  // `num_chunks * num_speakers * EMBEDDING_DIM` reaches the 256 MiB
+  // default spill threshold around 5.7 hours of audio and grows
+  // linearly past that. Without a gate, multi-hour streaming
+  // `finalize` calls feed through `diarize_offline` and OOM-abort
+  // here even though the upstream segmentations / embeddings
+  // tensors are spill-backed.
+  //
+  // Surface a typed error before the allocation. A future
+  // refactor can hand `assign_embeddings` a row accessor instead
+  // of materializing the full matrix; for now, callers that
+  // exceed this cap should split their input or accept the
+  // resource limit. Cap matches `MAX_RECONSTRUCT_OUTPUT_CELLS`'s
+  // intent (heap-bounded, more conservative than the spill cap):
+  // `4e7` cells × 8 B = 320 MB, with `num_chunks * num_speakers`
+  // implicit at ≤ `~156k` for 3-slot configs (~13 h of audio at
+  // 1 s step).
+  let embeddings_cells = num_chunks
+    .checked_mul(num_speakers)
+    .and_then(|n| n.checked_mul(EMBEDDING_DIM))
+    .ok_or(ShapeError::EmbeddingsHeapTooLarge {
+      got: usize::MAX,
+      max: MAX_OFFLINE_EMBEDDINGS_CELLS,
+    })?;
+  if embeddings_cells > MAX_OFFLINE_EMBEDDINGS_CELLS {
+    return Err(
+      ShapeError::EmbeddingsHeapTooLarge {
+        got: embeddings_cells,
+        max: MAX_OFFLINE_EMBEDDINGS_CELLS,
+      }
+      .into(),
+    );
+  }
   let mut embeddings = DMatrix::<f64>::zeros(num_chunks * num_speakers, EMBEDDING_DIM);
   for c in 0..num_chunks {
     for s in 0..num_speakers {
@@ -679,7 +760,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   // `diarize_offline` is a `Result`-returning public API — we must
   // surface the same conditions as `Error::Reconstruct`, not unwind.
   let spans = try_discrete_to_spans(
-    &discrete_diarization,
+    discrete_diarization.as_slice(),
     num_output_frames,
     num_clusters,
     frames_sw,

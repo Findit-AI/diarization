@@ -89,6 +89,24 @@ pub mod ops;
 #[cfg(not(feature = "_bench"))]
 pub(crate) mod ops;
 
+/// Spill-buffer configuration types reachable from public API
+/// surfaces (e.g. `OwnedPipelineOptions::with_spill_options`,
+/// `StreamingOfflineOptions::with_spill_options`).
+///
+/// The implementation lives in the crate-private `ops::spill`
+/// module; this module is the public re-export so downstream
+/// callers can name and construct the types they need.
+///
+/// Production deployments where `/tmp` is `tmpfs` (Docker default)
+/// **must** override [`SpillOptions::with_spill_dir`] to a real-disk
+/// path — without it, "spill to disk" reduces to "spill to RAM" and
+/// the OOM concern that motivates this whole subsystem is
+/// unaddressed. That override is only possible because these types
+/// are exposed here.
+pub mod spill {
+  pub use crate::ops::spill::{SpillBytes, SpillBytesMut, SpillError, SpillOptions};
+}
+
 pub mod plda;
 
 pub mod pipeline;
