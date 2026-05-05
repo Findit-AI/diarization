@@ -1,34 +1,44 @@
 //! ONNX Runtime execution providers — opt-in hardware acceleration.
 //!
-//! Each `*` cargo feature in `Cargo.toml` toggles the matching
+//! Each `ep-*` cargo feature in `Cargo.toml` toggles the matching
 //! ORT execution provider (EP). When the feature is on, the EP type
 //! is re-exported here so callers can construct a provider and pass
 //! it to [`crate::segment::SegmentModelOptions::with_providers`] or
 //! [`crate::embed::EmbedModelOptions::with_providers`] without taking
 //! a direct `ort` dependency.
 //!
+//! Names match `ort::ep::*` (e.g. `dia::ep::CoreML`, `dia::ep::CUDA`).
+//! The older `*ExecutionProvider`-suffixed aliases that lived in
+//! `ort::execution_providers` were deprecated upstream in
+//! ort 2.0.0-rc.12; we follow the new convention and do not re-export
+//! the deprecated aliases.
+//!
 //! ## Example: register a single provider
 //!
 //! ```ignore
 //! # // ignored: requires the `coreml` cargo feature + Apple host.
 //! use diarization::{
-//!   embed::{EmbedModel, EmbedModelOptions},
-//!   ep::CoreMLExecutionProvider,
+//!   ep::CoreML,
 //!   segment::{SegmentModel, SegmentModelOptions},
 //! };
 //!
 //! let seg_opts = SegmentModelOptions::default()
-//!   .with_providers(vec![CoreMLExecutionProvider::default().build()]);
+//!   .with_providers(vec![CoreML::default().build()]);
 //! let mut seg = SegmentModel::bundled_with_options(seg_opts)?;
-//!
-//! let emb_opts = EmbedModelOptions::default()
-//!   .with_providers(vec![CoreMLExecutionProvider::default().build()]);
-//! let mut emb = EmbedModel::from_file_with_options(
-//!   "models/wespeaker_resnet34_lm.onnx",
-//!   emb_opts,
-//! )?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! **Do not** copy that pattern for `EmbedModel`: ORT's CoreML EP
+//! mistranslates the WeSpeaker ResNet34-LM graph and emits NaN/Inf
+//! on most realistic inputs across every CoreML compute unit
+//! (`cpu` / `gpu` / `ane` / `all`), every model format
+//! (`NeuralNetwork` / `MLProgram`), and the static-shape knob.
+//! `EmbedModel::from_file` deliberately does NOT auto-register
+//! providers; if you call `with_providers([CoreML::default().build()])`
+//! on the embed options yourself you will get hard pipeline failures
+//! on most clips. CUDA / TensorRT / DirectML / ROCm / OpenVINO have
+//! NOT been parity-validated on this model — verify on your data
+//! before enabling.
 //!
 //! ## Example: ship a single binary that auto-picks GPU
 //!
@@ -37,8 +47,15 @@
 //! registers each as `MayUse` — the first one whose ops match runs
 //! and the rest stay dormant on CPU fallback.
 //!
+//! Note: [`auto_providers`] is what
+//! [`crate::segment::SegmentModel::bundled`] already calls; you
+//! normally never invoke it directly. It is `pub` for callers who
+//! want to build the same provider list and apply it through the
+//! `_with_options` paths (e.g. on `EmbedModel`, where the no-arg
+//! constructor stays on CPU by design).
+//!
 //! ```ignore
-//! # // ignored: depends on which `*` features are compiled in.
+//! # // ignored: depends on which `ep-*` features are compiled in.
 //! use diarization::ep::auto_providers;
 //! let seg_opts = diarization::segment::SegmentModelOptions::default()
 //!   .with_providers(auto_providers());
@@ -46,7 +63,7 @@
 //!
 //! ## Runtime requirements
 //!
-//! The `*` cargo features only enable the *bindings*. Each EP
+//! The `ep-*` cargo features only enable the *bindings*. Each EP
 //! still needs the matching native library on the host:
 //!
 //! - `coreml` — Apple Silicon / macOS, no extra install (ships in
@@ -74,77 +91,77 @@
 //! differently, and use different math libraries. The dia parity
 //! tests assert against pyannote's CPU reference; switching EPs may
 //! perturb DER by a small amount but should not regress the partition
-//! shape on realistic inputs. The CoreML EP, for instance, has been
-//! observed to flip a few span boundaries on short fixtures while
-//! preserving overall speaker counts.
+//! shape on realistic inputs *for models that the EP can compile
+//! correctly* — see the WeSpeaker / CoreML caveat above for an EP
+//! that does not satisfy that assumption.
 
-pub use ort::execution_providers::ExecutionProviderDispatch;
+pub use ort::ep::ExecutionProviderDispatch;
 
 #[cfg(feature = "coreml")]
 #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
-pub use ort::execution_providers::CoreMLExecutionProvider;
+pub use ort::ep::CoreML;
 
 #[cfg(feature = "cuda")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
-pub use ort::execution_providers::CUDAExecutionProvider;
+pub use ort::ep::CUDA;
 
 #[cfg(feature = "tensorrt")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tensorrt")))]
-pub use ort::execution_providers::TensorRTExecutionProvider;
+pub use ort::ep::TensorRT;
 
 #[cfg(feature = "directml")]
 #[cfg_attr(docsrs, doc(cfg(feature = "directml")))]
-pub use ort::execution_providers::DirectMLExecutionProvider;
+pub use ort::ep::DirectML;
 
 #[cfg(feature = "rocm")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rocm")))]
-pub use ort::execution_providers::ROCmExecutionProvider;
+pub use ort::ep::ROCm;
 
 #[cfg(feature = "migraphx")]
 #[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
-pub use ort::execution_providers::MIGraphXExecutionProvider;
+pub use ort::ep::MIGraphX;
 
 #[cfg(feature = "openvino")]
 #[cfg_attr(docsrs, doc(cfg(feature = "openvino")))]
-pub use ort::execution_providers::OpenVINOExecutionProvider;
+pub use ort::ep::OpenVINO;
 
 #[cfg(feature = "webgpu")]
 #[cfg_attr(docsrs, doc(cfg(feature = "webgpu")))]
-pub use ort::execution_providers::WebGPUExecutionProvider;
+pub use ort::ep::WebGPU;
 
 #[cfg(feature = "xnnpack")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xnnpack")))]
-pub use ort::execution_providers::XNNPACKExecutionProvider;
+pub use ort::ep::XNNPACK;
 
 #[cfg(feature = "onednn")]
 #[cfg_attr(docsrs, doc(cfg(feature = "onednn")))]
-pub use ort::execution_providers::OneDNNExecutionProvider;
+pub use ort::ep::OneDNN;
 
 #[cfg(feature = "cann")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cann")))]
-pub use ort::execution_providers::CANNExecutionProvider;
+pub use ort::ep::CANN;
 
 #[cfg(feature = "acl")]
 #[cfg_attr(docsrs, doc(cfg(feature = "acl")))]
-pub use ort::execution_providers::ACLExecutionProvider;
+pub use ort::ep::ACL;
 
 #[cfg(feature = "qnn")]
 #[cfg_attr(docsrs, doc(cfg(feature = "qnn")))]
-pub use ort::execution_providers::QNNExecutionProvider;
+pub use ort::ep::QNN;
 
 #[cfg(feature = "nnapi")]
 #[cfg_attr(docsrs, doc(cfg(feature = "nnapi")))]
-pub use ort::execution_providers::NNAPIExecutionProvider;
+pub use ort::ep::NNAPI;
 
 #[cfg(feature = "tvm")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tvm")))]
-pub use ort::execution_providers::TVMExecutionProvider;
+pub use ort::ep::TVM;
 
 #[cfg(feature = "azure")]
 #[cfg_attr(docsrs, doc(cfg(feature = "azure")))]
-pub use ort::execution_providers::AzureExecutionProvider;
+pub use ort::ep::Azure;
 
-/// Build a provider list from whichever `*` features are compiled in.
+/// Build a provider list from whichever `ep-*` features are compiled in.
 ///
 /// Order is "most-likely-to-accelerate first":
 /// `TensorRT → CUDA → CoreML → DirectML → ROCm → MIGraphX →
@@ -153,13 +170,13 @@ pub use ort::execution_providers::AzureExecutionProvider;
 /// so the first whose ops match accelerates and the rest stay
 /// dormant on CPU fallback.
 ///
-/// Returns an empty `Vec` if no `*` features are enabled, in which
+/// Returns an empty `Vec` if no `ep-*` features are enabled, in which
 /// case ORT runs on its default CPU dispatch.
 ///
 /// # Example
 ///
 /// ```ignore
-/// # // ignored: depends on which `*` features are compiled in.
+/// # // ignored: depends on which `ep-*` features are compiled in.
 /// use diarization::ep::auto_providers;
 ///
 /// let seg_opts = diarization::segment::SegmentModelOptions::default()
@@ -170,36 +187,36 @@ pub fn auto_providers() -> Vec<ExecutionProviderDispatch> {
   #[allow(unused_mut)]
   let mut out: Vec<ExecutionProviderDispatch> = Vec::new();
   #[cfg(feature = "tensorrt")]
-  out.push(TensorRTExecutionProvider::default().build());
+  out.push(TensorRT::default().build());
   #[cfg(feature = "cuda")]
-  out.push(CUDAExecutionProvider::default().build());
+  out.push(CUDA::default().build());
   #[cfg(feature = "coreml")]
-  out.push(CoreMLExecutionProvider::default().build());
+  out.push(CoreML::default().build());
   #[cfg(feature = "directml")]
-  out.push(DirectMLExecutionProvider::default().build());
+  out.push(DirectML::default().build());
   #[cfg(feature = "rocm")]
-  out.push(ROCmExecutionProvider::default().build());
+  out.push(ROCm::default().build());
   #[cfg(feature = "migraphx")]
-  out.push(MIGraphXExecutionProvider::default().build());
+  out.push(MIGraphX::default().build());
   #[cfg(feature = "openvino")]
-  out.push(OpenVINOExecutionProvider::default().build());
+  out.push(OpenVINO::default().build());
   #[cfg(feature = "webgpu")]
-  out.push(WebGPUExecutionProvider::default().build());
+  out.push(WebGPU::default().build());
   #[cfg(feature = "onednn")]
-  out.push(OneDNNExecutionProvider::default().build());
+  out.push(OneDNN::default().build());
   #[cfg(feature = "xnnpack")]
-  out.push(XNNPACKExecutionProvider::default().build());
+  out.push(XNNPACK::default().build());
   #[cfg(feature = "cann")]
-  out.push(CANNExecutionProvider::default().build());
+  out.push(CANN::default().build());
   #[cfg(feature = "qnn")]
-  out.push(QNNExecutionProvider::default().build());
+  out.push(QNN::default().build());
   #[cfg(feature = "acl")]
-  out.push(ACLExecutionProvider::default().build());
+  out.push(ACL::default().build());
   #[cfg(feature = "nnapi")]
-  out.push(NNAPIExecutionProvider::default().build());
+  out.push(NNAPI::default().build());
   #[cfg(feature = "tvm")]
-  out.push(TVMExecutionProvider::default().build());
+  out.push(TVM::default().build());
   #[cfg(feature = "azure")]
-  out.push(AzureExecutionProvider::default().build());
+  out.push(Azure::default().build());
   out
 }

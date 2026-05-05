@@ -13,7 +13,7 @@
 use anyhow::{Context, Result, bail};
 use diarization::{
   embed::{EmbedModel, EmbedModelOptions},
-  ep::CoreMLExecutionProvider,
+  ep::CoreML,
   plda::PldaTransform,
   segment::{SegmentModel, SegmentModelOptions},
   streaming::{StreamingOfflineOptions, StreamingOfflineDiarizer},
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
   };
   let static_shapes = std::env::var("DIA_COREML_STATIC_SHAPES").ok().as_deref() == Some("1");
   let coreml_provider = || {
-    let mut ep = ort::ep::CoreML::default();
+    let mut ep = CoreML::default();
     if let Some(u) = compute_units {
       ep = ep.with_compute_units(u);
     }
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
   let _ = (
     SegmentModelOptions::default(),
     EmbedModelOptions::default(),
-    CoreMLExecutionProvider::default(),
+    CoreML::default(),
   );
 
   let mut diarizer = StreamingOfflineDiarizer::new(StreamingOfflineOptions::default());

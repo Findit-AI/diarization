@@ -415,19 +415,31 @@ impl EmbedModel {
   /// explicitly:
   ///
   /// ```ignore
-  /// # // ignored: requires the `cuda` cargo feature + a CUDA host.
+  /// # // ignored: requires the `cuda` cargo feature + a CUDA host
+  /// # // AND prior parity validation on your model + EP combination
+  /// # // (see warning below).
   /// use diarization::{
   ///   embed::{EmbedModel, EmbedModelOptions},
-  ///   ep::CUDAExecutionProvider,
+  ///   ep::CUDA,
   /// };
   /// let opts = EmbedModelOptions::default()
-  ///   .with_providers(vec![CUDAExecutionProvider::default().build()]);
+  ///   .with_providers(vec![CUDA::default().build()]);
   /// let mut emb = EmbedModel::from_file_with_options(
   ///   "wespeaker_resnet34_lm.onnx",
   ///   opts,
   /// )?;
   /// # Ok::<(), Box<dyn std::error::Error>>(())
   /// ```
+  ///
+  /// **Do NOT pass `CoreML` here.** ORT's CoreML EP miscompiles the
+  /// WeSpeaker graph and produces NaN/Inf on most inputs across
+  /// every CoreML compute-unit / model-format / static-shape
+  /// combination — the `EmbedModel` finite-output validator will
+  /// abort the pipeline. The example above uses CUDA because it is
+  /// the most common request; CUDA / TensorRT / DirectML / ROCm /
+  /// OpenVINO are NOT parity-validated by dia on this model. Run
+  /// your own DER + finite-output check before committing an EP
+  /// override into production.
   ///
   /// `SegmentModel::bundled()` does auto-register `ep-*`-compiled
   /// providers because the segmentation graph is CoreML-safe — see

@@ -29,7 +29,7 @@ pub use model::{SegmentModel, SegmentModelOptions};
 
 #[cfg(feature = "ort")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
-pub use ort::execution_providers::ExecutionProviderDispatch;
+pub use ort::ep::ExecutionProviderDispatch;
 /// Re-exported ort types used by [`SegmentModelOptions`] builders.
 ///
 /// We re-export so callers can compose provider/optimization configurations

@@ -20,6 +20,20 @@ homepage = "https://github.com/al8n/diarization"
 documentation = "https://docs.rs/diarization"
 description = "Sans-I/O speaker diarization for streaming audio. Bundles the pyannote/segmentation-3.0 model and the speaker-diarization-community-1 PLDA weights — only the WeSpeaker embedding ONNX is BYO."
 readme = "README.md"
+# Keep large WeSpeaker artifacts out of the crate tarball: the
+# packed embed model is ~26 MB (above the crates.io 10 MB hard
+# limit), and the TorchScript variant is the same scale. Both are
+# committed to git so they can be served as GitHub release assets
+# / fetched via `scripts/download-embed-model.sh`, but neither
+# belongs in `cargo package`. The `bundled-segmentation` model
+# (~6 MB) IS included on purpose — it's the only ONNX dia
+# embeds via `include_bytes!`. Verify with `cargo package --list`.
+exclude = [
+  "models/wespeaker_resnet34_lm.onnx",
+  "models/wespeaker_resnet34_lm.onnx.data",
+  "models/wespeaker_resnet34_lm.pt",
+  "models/wespeaker_resnet34_lm_packed.onnx",
+]
 
 [features]
 default = ["ort", "bundled-segmentation"]

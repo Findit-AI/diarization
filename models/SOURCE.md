@@ -46,16 +46,27 @@ The expected SHA-256 lives in that script.
 ### Single-file vs external-data layout
 
 The shipped form is the **single-file** ONNX (~25.5 MiB, all weights
-inlined). It loads cleanly on every ORT execution provider including
-CoreML — Apple's CoreML EP optimizer fails to relocate external
+inlined). The single-file form sidesteps a *load-time* failure on
+ORT's CoreML EP — Apple's optimizer fails to relocate external
 initializers when the model uses the alternative external-data
-layout (a small `.onnx` header next to a large `.onnx.data` sidecar),
-so we deliberately ship the inlined form so default
-`SegmentModel::bundled()` / `EmbedModel::from_file()` Just Work with
-any compiled-in `ep-*` provider feature.
+layout (a small `.onnx` header next to a large `.onnx.data` sidecar)
+and aborts session creation with `model_path must not be empty`.
 
-If you have a model in external-data form (e.g. an upstream pyannote
-or HuggingFace mirror), repack it before use via:
+**This is purely about *loading*, not *running*.** Even with the
+single-file form, ORT's CoreML EP **mistranslates the WeSpeaker
+ResNet34-LM compute graph** and emits NaN/Inf on most realistic
+inputs (verified across every `ComputeUnits` setting, both
+`NeuralNetwork` and `MLProgram` model formats, and the
+static-shape knob; only short clips with simple acoustic content
+happen to evade it). The `EmbedModel` finite-output validator
+then aborts the pipeline. **dia therefore does NOT auto-register
+EPs on `EmbedModel::from_file` even when `--features coreml` is
+on**; the asymmetric default that *does* auto-register on
+`SegmentModel::bundled()` is documented at
+[`crate::segment::SegmentModel::bundled`].
+
+If you bring your own model in external-data form (e.g. from an
+upstream pyannote or HuggingFace mirror), repack it before use via:
 
 ```python
 import onnx
@@ -64,7 +75,9 @@ onnx.save(m, "wespeaker_resnet34_lm.onnx", save_as_external_data=False)
 ```
 
 — same f32 weights, no quantization, no graph transform; the only
-change is that ORT no longer follows an external pointer.
+change is that ORT no longer follows an external pointer. This
+makes the model loadable on CoreML; **it does NOT make it correct
+to run on CoreML**.
 
 ### `.pt` TorchScript variant
 

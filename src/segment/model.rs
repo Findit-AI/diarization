@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use ort::{
-  execution_providers::ExecutionProviderDispatch,
+  ep::ExecutionProviderDispatch,
   session::{
     Session as OrtSession,
     builder::{GraphOptimizationLevel, SessionBuilder},

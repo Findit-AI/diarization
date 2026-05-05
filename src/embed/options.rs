@@ -36,7 +36,7 @@ pub const SAMPLE_RATE_HZ: u32 = 16_000;
 // ── EmbedModelOptions ─────────────────────────────────────────────────────
 
 #[cfg(feature = "ort")]
-use ort::execution_providers::ExecutionProviderDispatch;
+use ort::ep::ExecutionProviderDispatch;
 #[cfg(feature = "ort")]
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 
