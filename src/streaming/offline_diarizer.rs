@@ -151,30 +151,27 @@ pub enum StreamingShapeError {
 
 /// Configuration for [`StreamingOfflineDiarizer`].
 ///
-/// Not `Copy`: [`OwnedPipelineOptions`] now holds a `SpillOptions`
-/// value (heap-owned `Option<PathBuf>`).
+/// The spill backend configuration lives on the inner
+/// [`OwnedPipelineOptions`]; there is no separate
+/// `StreamingOfflineOptions::spill_options` field. Single source
+/// of truth means [`Self::with_diarization`] correctly carries
+/// the caller's spill settings through.
+///
+/// Not `Copy`: [`OwnedPipelineOptions`] holds a `SpillOptions` value
+/// (heap-owned `Option<PathBuf>`).
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StreamingOfflineOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   diarization: OwnedPipelineOptions,
-  /// Spill backend configuration. Defaults to
-  /// [`SpillOptions::default`]. Passed by reference into
-  /// [`crate::aggregate::try_count_pyannote`] (per-range counts) and
-  /// the constructed [`OfflineInput`] / [`ReconstructInput`] so every
-  /// transitive [`crate::ops::spill::SpillBytesMut::zeros`] call honors
-  /// it — no process-global side-effects.
-  #[cfg_attr(feature = "serde", serde(default))]
-  spill_options: SpillOptions,
 }
 
 impl StreamingOfflineOptions {
-  /// Construct with `community-1` diarization defaults and the
-  /// default spill configuration.
+  /// Construct with `community-1` diarization defaults (which
+  /// include the default spill configuration).
   pub const fn new() -> Self {
     Self {
       diarization: OwnedPipelineOptions::new(),
-      spill_options: SpillOptions::new(),
     }
   }
 
@@ -183,14 +180,17 @@ impl StreamingOfflineOptions {
     &self.diarization
   }
 
-  /// Borrow the spill backend configuration.
+  /// Borrow the spill backend configuration. Delegates to the
+  /// inner [`OwnedPipelineOptions::spill_options`] — there is no
+  /// separate streaming-level field.
   pub const fn spill_options(&self) -> &SpillOptions {
-    &self.spill_options
+    self.diarization.spill_options()
   }
 
-  /// Builder: replace the diarization parameters.
+  /// Builder: replace the diarization parameters. Carries the
+  /// new options' spill configuration through automatically.
   ///
-  /// Not `const fn`: [`OwnedPipelineOptions`] now has a non-const
+  /// Not `const fn`: [`OwnedPipelineOptions`] has a non-const
   /// destructor through [`SpillOptions`]'s `PathBuf`.
   #[must_use]
   pub fn with_diarization(mut self, diarization: OwnedPipelineOptions) -> Self {
@@ -198,16 +198,20 @@ impl StreamingOfflineOptions {
     self
   }
 
-  /// Builder: replace the spill backend configuration.
+  /// Builder: replace the spill backend configuration on the inner
+  /// [`OwnedPipelineOptions`]. Equivalent to
+  /// `with_diarization(self.diarization().clone().with_spill_options(opts))`,
+  /// but without the intermediate clone.
   #[must_use]
   pub fn with_spill_options(mut self, opts: SpillOptions) -> Self {
-    self.spill_options = opts;
+    self.diarization.set_spill_options(opts);
     self
   }
 
-  /// Mutating: replace the spill backend configuration.
+  /// Mutating: replace the spill backend configuration on the inner
+  /// [`OwnedPipelineOptions`].
   pub fn set_spill_options(&mut self, opts: SpillOptions) -> &mut Self {
-    self.spill_options = opts;
+    self.diarization.set_spill_options(opts);
     self
   }
 }
@@ -413,8 +417,10 @@ impl StreamingOfflineDiarizer {
     // for hours would otherwise OOM the heap. See
     // `OwnedDiarizationPipeline::run` for the same pattern.
     let segs_len = num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
-    let mut segmentations =
-      crate::ops::spill::SpillBytesMut::<f64>::zeros(segs_len, &self.options.spill_options)?;
+    let mut segmentations = crate::ops::spill::SpillBytesMut::<f64>::zeros(
+      segs_len,
+      self.options.diarization.spill_options(),
+    )?;
     {
       let segs = segmentations.as_mut_slice();
 
@@ -451,8 +457,10 @@ impl StreamingOfflineDiarizer {
 
     // ── Stage 2: per-(chunk, slot) masked embedding ────────────────
     let emb_len = num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
-    let mut raw_embeddings =
-      crate::ops::spill::SpillBytesMut::<f32>::zeros(emb_len, &self.options.spill_options)?;
+    let mut raw_embeddings = crate::ops::spill::SpillBytesMut::<f32>::zeros(
+      emb_len,
+      self.options.diarization.spill_options(),
+    )?;
     {
       let segs = segmentations.as_mut_slice();
       let embs = raw_embeddings.as_mut_slice();
@@ -535,7 +543,7 @@ impl StreamingOfflineDiarizer {
       cfg.onset() as f64,
       chunks_sw_local,
       frames_sw_template,
-      &self.options.spill_options,
+      self.options.diarization.spill_options(),
     )?
     .into_parts();
 
@@ -593,10 +601,14 @@ impl StreamingOfflineDiarizer {
     // don't OOM the heap.
     let total_segs_len = total_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
     let total_emb_len = total_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
-    let mut all_segs =
-      crate::ops::spill::SpillBytesMut::<f64>::zeros(total_segs_len, &self.options.spill_options)?;
-    let mut all_emb =
-      crate::ops::spill::SpillBytesMut::<f32>::zeros(total_emb_len, &self.options.spill_options)?;
+    let mut all_segs = crate::ops::spill::SpillBytesMut::<f64>::zeros(
+      total_segs_len,
+      self.options.diarization.spill_options(),
+    )?;
+    let mut all_emb = crate::ops::spill::SpillBytesMut::<f32>::zeros(
+      total_emb_len,
+      self.options.diarization.spill_options(),
+    )?;
     {
       let segs = all_segs.as_mut_slice();
       let embs = all_emb.as_mut_slice();
@@ -616,7 +628,7 @@ impl StreamingOfflineDiarizer {
     let total_output_frames: usize = self.ranges.iter().map(|r| r.count.len()).sum();
     let mut all_count = crate::ops::spill::SpillBytesMut::<u8>::zeros(
       total_output_frames,
-      &self.options.spill_options,
+      self.options.diarization.spill_options(),
     )?;
     {
       let buf = all_count.as_mut_slice();
@@ -657,7 +669,7 @@ impl StreamingOfflineDiarizer {
     .with_max_iters(cfg.max_iters())
     .with_min_duration_off(cfg.min_duration_off())
     .with_smoothing_epsilon(cfg.smoothing_epsilon())
-    .with_spill_options(self.options.spill_options.clone());
+    .with_spill_options(self.options.diarization.spill_options().clone());
     let offline_out = diarize_offline(&input)?;
     let hard_clusters = offline_out.hard_clusters();
     let num_clusters = offline_out.num_clusters();
@@ -692,7 +704,7 @@ impl StreamingOfflineDiarizer {
         r.frames_sw_local,
       )
       .with_smoothing_epsilon(cfg.smoothing_epsilon())
-      .with_spill_options(self.options.spill_options.clone());
+      .with_spill_options(self.options.diarization.spill_options().clone());
       let discrete = reconstruct_grid(&recon_input)?;
 
       let max_cluster_local = hc_slice
@@ -752,5 +764,41 @@ impl StreamingOfflineDiarizer {
   /// since IDs are decided at `finalize`-time, not held as state.
   pub fn reset(&mut self) {
     self.ranges.clear();
+  }
+}
+
+#[cfg(test)]
+mod options_tests {
+  use super::*;
+
+  /// Regression: `StreamingOfflineOptions` must use ONE source of
+  /// truth for spill configuration. The previous design carried a
+  /// duplicate top-level field that `with_diarization` silently
+  /// ignored, so a caller building
+  /// `StreamingOfflineOptions::default().with_diarization(
+  ///   OwnedPipelineOptions::new().with_spill_options(custom))`
+  /// would get the streaming default instead of `custom`.
+  ///
+  /// This test pins the corrected plumbing in place: the streaming
+  /// view of `spill_options` must equal the inner diarization's
+  /// `spill_options`, regardless of which builder set the value.
+  #[test]
+  fn with_diarization_carries_spill_options_through() {
+    let custom = SpillOptions::new()
+      .with_threshold_bytes(7 * 1024 * 1024)
+      .with_spill_dir(Some("/var/tmp/dia-streaming".into()));
+
+    // Path A: configure spill on the inner OwnedPipelineOptions and
+    // pass it through `with_diarization`.
+    let owned = OwnedPipelineOptions::new().with_spill_options(custom.clone());
+    let streaming = StreamingOfflineOptions::default().with_diarization(owned);
+    assert_eq!(streaming.spill_options(), &custom);
+    assert_eq!(streaming.diarization().spill_options(), &custom);
+
+    // Path B: configure spill via the streaming-level builder. The
+    // value must land on the inner diarization (single source).
+    let streaming = StreamingOfflineOptions::default().with_spill_options(custom.clone());
+    assert_eq!(streaming.spill_options(), &custom);
+    assert_eq!(streaming.diarization().spill_options(), &custom);
   }
 }

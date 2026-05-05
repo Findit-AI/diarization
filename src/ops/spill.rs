@@ -301,8 +301,14 @@ struct MmapHandle {
   /// `PROT_READ`) because the syscall is unnecessary for Rust's
   /// type-level enforcement and adds a failure mode.
   map: MmapMut,
-  /// Unlinked tempfile owning the on-disk storage. Drop deletes it.
-  _file: tempfile::NamedTempFile,
+  /// Unlinked anonymous file owning the on-disk storage. Created
+  /// via `tempfile::tempfile[_in]`, which on Unix unlinks the file
+  /// from the directory immediately so no path is visible to other
+  /// processes; on Windows it uses `FILE_FLAG_DELETE_ON_CLOSE` with
+  /// share-deny set. Either way, no same-UID process can open the
+  /// file by path while we hold the handle, which is the precondition
+  /// the `unsafe` `MmapOptions::map_mut` call relies on.
+  _file: std::fs::File,
 }
 
 // ── SpillBytesMut: write-phase, unique ownership ──────────────────
@@ -330,13 +336,13 @@ enum SpillMutInner<T> {
   /// allocation to [`SpillBytes::Heap`] without a copy. We never
   /// clone the inner Arc, so `Arc::get_mut` always succeeds.
   Heap(Arc<[T]>),
-  /// `_file` owns the tempfile so its lifetime ≥ the mmap's. The
-  /// `tempfile::NamedTempFile::new` call returns an unlinked file;
-  /// closing it (on drop) reclaims disk space.
-  Mmap {
-    map: MmapMut,
-    _file: tempfile::NamedTempFile,
-  },
+  /// `_file` owns the unlinked tempfile so its lifetime ≥ the
+  /// mmap's. We use `tempfile::tempfile[_in]` which returns a
+  /// `std::fs::File` that has already been unlinked from the
+  /// directory (Unix) or opened with `FILE_FLAG_DELETE_ON_CLOSE`
+  /// (Windows); no path is visible to other processes while the
+  /// mapping is live. Dropping the file reclaims the disk space.
+  Mmap { map: MmapMut, _file: std::fs::File },
 }
 
 impl<T: Pod> SpillBytesMut<T> {
@@ -384,28 +390,41 @@ impl<T: Pod> SpillBytesMut<T> {
   }
 
   fn new_mmap(n: usize, bytes: usize, spill_dir: Option<&Path>) -> Result<Self, SpillError> {
+    // `tempfile::tempfile[_in]` returns a `std::fs::File` that is
+    // already unlinked from the directory on Unix (the link count
+    // hits zero before this call returns; the inode persists only
+    // because we still hold the open `File`). On Windows it uses
+    // `FILE_FLAG_DELETE_ON_CLOSE` with sharing denied. In both
+    // cases no other process can open the backing file by path
+    // while this `SpillBytesMut` is alive — that is the precondition
+    // the `unsafe` `map_mut` call below relies on, and it is what
+    // distinguishes us from `NamedTempFile`, whose pathname stays
+    // visible until the wrapper is dropped.
     let file = match spill_dir {
-      Some(dir) => tempfile::NamedTempFile::new_in(dir),
-      None => tempfile::NamedTempFile::new(),
+      Some(dir) => tempfile::tempfile_in(dir),
+      None => tempfile::tempfile(),
     }
     .map_err(|source| SpillError::TempfileCreation {
       dir: spill_dir.map(|d| d.to_path_buf()),
       source,
     })?;
     file
-      .as_file()
       .set_len(bytes as u64)
       .map_err(|source| SpillError::TempfileGrow {
         bytes: bytes as u64,
         source,
       })?;
-    // SAFETY: `file` is freshly created and exclusively owned by
-    // this `SpillBytesMut`. No other process or thread can mutate
-    // the file or the resulting mapping.
+    // SAFETY: `file` is a freshly created, already-unlinked tempfile
+    // (see above). No other process can open it by path; no other
+    // thread holds the handle (we own it exclusively here, and only
+    // hand it out wrapped in `SpillBytesMut`/`Arc<MmapHandle>` which
+    // never expose `&mut File`). That satisfies
+    // `MmapOptions::map_mut`'s requirement that the underlying file
+    // not be modified concurrently.
     let map = unsafe {
       MmapOptions::new()
         .len(bytes)
-        .map_mut(file.as_file())
+        .map_mut(&file)
         .map_err(|source| SpillError::MmapFailed { bytes, source })?
     };
     // Linux: hint the kernel to back the mapping with Transparent
@@ -497,7 +516,7 @@ impl<T: Pod> SpillBytesMut<T> {
   /// Zero-copy on both backends:
   /// - Heap: the underlying `Arc<[T]>` is moved out; refcount is
   ///   still 1 after the move, ready to be cloned by consumers.
-  /// - Mmap: the `MmapMut + NamedTempFile` pair is wrapped in a
+  /// - Mmap: the `MmapMut + std::fs::File` pair is wrapped in a
   ///   single `Arc<MmapHandle>`. No data is read or copied.
   pub fn freeze(self) -> SpillBytes<T> {
     let data = match self.inner {
@@ -515,7 +534,7 @@ impl<T: Pod> SpillBytesMut<T> {
 }
 
 // SAFETY: a `SpillBytesMut<T>` owns its backing storage uniquely
-// (refcount-1 `Arc<[T]>` or per-instance `MmapMut + NamedTempFile`).
+// (refcount-1 `Arc<[T]>` or per-instance `MmapMut + std::fs::File`).
 // Sending the owned handle across threads is safe; both `Arc<[T]>`
 // (with `T: Send`) and `MmapMut` are `Send`. We do NOT impl `Sync`:
 // `as_mut_slice` exposes `&mut [T]`, whose aliasing semantics
@@ -600,7 +619,7 @@ impl<T: Pod> SpillBytes<T> {
 // SAFETY: `SpillBytes<T>` only exposes `&[T]` (no mutation reaches
 // the buffer once frozen). The heap variant wraps `Arc<[T]>` which
 // is `Send + Sync` for `T: Send + Sync`. The mmap variant wraps
-// `Arc<MmapHandle>`, which contains `MmapMut + NamedTempFile`; both
+// `Arc<MmapHandle>`, which contains `MmapMut + std::fs::File`; both
 // are `Send + Sync` for read-only access (`memmapix` exposes the
 // same `Send + Sync` semantics as `memmap2`). For `T: Pod` (= plain
 // bytes, no interior pointers), `T: Send + Sync` always holds.

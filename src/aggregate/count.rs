@@ -677,7 +677,20 @@ pub fn try_count_pyannote(
   // reason. Verified by `aggregate::parity_tests` (bit-exact match
   // to pyannote's captured count tensor on all 6 fixtures, 0%
   // mismatch tolerance).
-  let mut chunk_count: Vec<f64> = vec![0.0; num_chunks * num_frames_per_chunk];
+  // Spill-back this scratch buffer too: it scales with audio length
+  // (`num_chunks * num_frames_per_chunk` cells), about 17 MB/hour at
+  // pyannote community-1 geometry. Crosses the 256 MiB default
+  // threshold around 12 h. Without spilling, a long-running
+  // `Result` API would still OOM-abort here even though the
+  // larger `aggregated` / `overlapping_count` buffers below are
+  // mmap-backed. Provably non-overflowing because
+  // `num_chunks * num_frames_per_chunk * num_speakers` was already
+  // checked against `segmentations.len()` above with `checked_mul`,
+  // and dropping a positive factor cannot increase the product.
+  let chunk_count_len = num_chunks * num_frames_per_chunk;
+  let mut chunk_count_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(chunk_count_len, spill_options)?;
+  let chunk_count = chunk_count_buf.as_mut_slice();
   for c in 0..num_chunks {
     let chunk_count_row =
       &mut chunk_count[c * num_frames_per_chunk..(c + 1) * num_frames_per_chunk];
