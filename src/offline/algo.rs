@@ -557,6 +557,36 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   if segmentations.len() != expected_seg_len {
     return Err(ShapeError::SegmentationsLenMismatch.into());
   }
+  // Mirror `reconstruct`'s count boundary checks at the offline
+  // entrypoint so a malformed count tensor (length mismatch, zero
+  // `num_output_frames`, or `count[t] > MAX_COUNT_PER_FRAME`
+  // sentinel/overflow) fails before stage 1 burns the
+  // `train_chunk_idx`/`train_speaker_idx` filter pass, the
+  // spill-backed `embeddings` and `post_plda` builds, and the entire
+  // `assign_embeddings` (AHC + VBx + Hungarian) chain. `reconstruct`
+  // itself already rejects these cheaply at the back end of the
+  // pipeline; without this early gate, a bad count alongside otherwise
+  // valid large tensors burns PLDA projection, AHC distance work, and
+  // spill disk space before surfacing the same typed error. Errors
+  // are routed through `Error::Reconstruct(reconstruct::Error::Shape)`
+  // so the surfaced variant is identical to the late path.
+  if num_output_frames == 0 {
+    return Err(
+      crate::reconstruct::Error::Shape(crate::reconstruct::ShapeError::ZeroNumOutputFrames).into(),
+    );
+  }
+  if count.len() != num_output_frames {
+    return Err(
+      crate::reconstruct::Error::Shape(crate::reconstruct::ShapeError::CountLenMismatch).into(),
+    );
+  }
+  for &c in count {
+    if c > crate::reconstruct::MAX_COUNT_PER_FRAME {
+      return Err(
+        crate::reconstruct::Error::Shape(crate::reconstruct::ShapeError::CountAboveMax).into(),
+      );
+    }
+  }
 
   // ── Stage 1: filter active (chunk, speaker) pairs ──────────────
   //

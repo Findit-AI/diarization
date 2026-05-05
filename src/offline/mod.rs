@@ -45,6 +45,9 @@ mod owned;
 #[cfg(test)]
 mod parity_tests;
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(all(test, feature = "ort"))]
 mod owned_smoke_tests;
 
