@@ -17,7 +17,6 @@
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
-use nalgebra::DMatrix;
 use npyz::npz::NpzArchive;
 
 use crate::cluster::ahc::ahc_init;
@@ -102,8 +101,9 @@ fn run_ahc_parity(fixture_dir: &str) {
   );
   let num_train = chunk_idx.len();
 
-  // Project the active embeddings into a (num_train, dim) matrix.
-  let mut train = DMatrix::<f64>::zeros(num_train, dim);
+  // Project the active embeddings into a row-major (num_train, dim)
+  // flat buffer matching `ahc_init`'s `&[f64]` contract.
+  let mut train: Vec<f64> = Vec::with_capacity(num_train * dim);
   for i in 0..num_train {
     let c = chunk_idx[i] as usize;
     let s = speaker_idx[i] as usize;
@@ -113,7 +113,7 @@ fn run_ahc_parity(fixture_dir: &str) {
     );
     let base = (c * num_speakers + s) * dim;
     for d in 0..dim {
-      train[(i, d)] = raw_flat[base + d] as f64;
+      train.push(raw_flat[base + d] as f64);
     }
   }
 
@@ -131,6 +131,8 @@ fn run_ahc_parity(fixture_dir: &str) {
   // Run the port.
   let got = ahc_init(
     &train,
+    num_train,
+    dim,
     threshold,
     &crate::ops::spill::SpillOptions::default(),
   )

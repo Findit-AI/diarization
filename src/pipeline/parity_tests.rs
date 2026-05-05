@@ -154,12 +154,19 @@ fn run_pipeline_parity(fixture_dir: &str) {
   let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
 
   // post_plda + phi + train_*idx (pre-filtered, pre-projected).
+  // The .npz array is row-major (numpy default); the new
+  // `AssignEmbeddingsInput::post_plda: &[f64]` contract is
+  // column-major (matching `nalgebra::DMatrix`'s VecStorage). Use
+  // `DMatrix::from_row_slice` to do the row→col layout conversion,
+  // then borrow the column-major underlying storage via
+  // `as_slice()`.
   let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
   assert_eq!(post_plda_shape.len(), 2);
   let num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
-  let post_plda = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
+  let post_plda_dm = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
+  let post_plda = post_plda_dm.as_slice();
 
   let (phi_flat, phi_shape) = read_npz_array::<f64>(&plda_path, "phi");
   assert_eq!(phi_shape, vec![plda_dim as u64]);
@@ -193,7 +200,8 @@ fn run_pipeline_parity(fixture_dir: &str) {
     num_speakers,
     &segmentations,
     num_frames,
-    &post_plda,
+    post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,

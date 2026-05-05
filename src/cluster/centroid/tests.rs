@@ -6,13 +6,41 @@
 use crate::cluster::centroid::{Error, SP_ALIVE_THRESHOLD, weighted_centroids};
 use nalgebra::{DMatrix, DVector};
 
+/// Test helper: convert a column-major `DMatrix<f64>` to a row-major
+/// `(Vec<f64>, num_rows, num_cols)` triple matching the new
+/// `weighted_centroids` signature. Old tests that constructed `DMatrix`
+/// for convenience can use this adapter rather than being rewritten in
+/// row-major flat form.
+fn dm_to_row_major(m: &DMatrix<f64>) -> (Vec<f64>, usize, usize) {
+  let (n, d) = m.shape();
+  let mut out = Vec::with_capacity(n * d);
+  for r in 0..n {
+    for c in 0..d {
+      out.push(m[(r, c)]);
+    }
+  }
+  (out, n, d)
+}
+
+/// Convenience wrapper: `weighted_centroids` from a `&DMatrix<f64>`
+/// embedding matrix for tests.
+fn weighted_centroids_dm(
+  q: &DMatrix<f64>,
+  sp: &DVector<f64>,
+  emb: &DMatrix<f64>,
+  sp_threshold: f64,
+) -> Result<DMatrix<f64>, Error> {
+  let (data, n, d) = dm_to_row_major(emb);
+  weighted_centroids(q, sp, &data, n, d, sp_threshold)
+}
+
 #[test]
 fn rejects_empty_q() {
   let q = DMatrix::<f64>::zeros(0, 2);
   let sp = DVector::<f64>::from_vec(vec![1.0, 0.0]);
   let emb = DMatrix::<f64>::zeros(0, 4);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
 }
@@ -23,7 +51,7 @@ fn rejects_sp_q_dim_mismatch() {
   let sp = DVector::<f64>::from_vec(vec![1.0]); // length 1, not 2
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
 }
@@ -34,7 +62,7 @@ fn rejects_q_emb_row_mismatch() {
   let sp = DVector::<f64>::from_vec(vec![1.0, 1.0]);
   let emb = DMatrix::<f64>::from_element(4, 4, 1.0); // 4 rows, q has 3
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
 }
@@ -48,7 +76,7 @@ fn rejects_no_surviving_clusters() {
   let sp = DVector::<f64>::from_vec(vec![1.0e-12, 1.0e-13]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
 }
@@ -67,7 +95,7 @@ fn rejects_sp_in_simd_guard_band_above_threshold() {
   let sp = DVector::<f64>::from_vec(vec![1.5e-7, 0.99]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   let err =
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
   assert!(
     matches!(err, Error::AmbiguousAliveCluster { cluster: 0, .. }),
     "got unexpected error: {err:?}"
@@ -81,7 +109,7 @@ fn rejects_sp_in_simd_guard_band_below_threshold() {
   let sp = DVector::<f64>::from_vec(vec![0.99, 7.0e-8]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   let err =
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
   assert!(
     matches!(err, Error::AmbiguousAliveCluster { cluster: 1, .. }),
     "got unexpected error: {err:?}"
@@ -98,7 +126,7 @@ fn accepts_sp_clearly_alive_above_2x_threshold() {
   let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![5.0e-7, 1.0e-14]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+  weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
     .expect("clearly-alive 5e-7 must not fire the guard");
 }
 
@@ -109,7 +137,7 @@ fn accepts_sp_clearly_squashed_below_half_threshold() {
   let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![0.99, 1.0e-8]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+  weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
     .expect("clearly-squashed 1e-8 must not fire the guard");
 }
 
@@ -119,7 +147,7 @@ fn accepts_sp_at_band_boundary_2x_threshold() {
   let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![2.0e-7, 1.0e-14]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+  weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
     .expect("boundary 2e-7 must not fire the guard");
 }
 
@@ -129,7 +157,7 @@ fn accepts_sp_at_band_boundary_half_threshold() {
   let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![0.99, 5.0e-8]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+  weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
     .expect("boundary 5e-8 must not fire the guard");
 }
 
@@ -140,7 +168,7 @@ fn rejects_sp_exactly_at_threshold() {
   let sp = DVector::<f64>::from_vec(vec![SP_ALIVE_THRESHOLD, 0.99]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   let err =
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect_err("guard band must reject");
   assert!(
     matches!(err, Error::AmbiguousAliveCluster { cluster: 0, .. }),
     "got unexpected error: {err:?}"
@@ -155,7 +183,7 @@ fn accepts_sp_well_outside_guard_band() {
   let q = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![0.85, 1.76e-14]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
+  let c = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD)
     .expect("realistic captured-fixture sp must pass");
   assert_eq!(c.shape(), (1, 2));
 }
@@ -167,7 +195,7 @@ fn rejects_non_finite_q() {
   let sp = DVector::<f64>::from_vec(vec![1.0, 0.0]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::NonFinite(_))
   ));
 }
@@ -178,7 +206,7 @@ fn rejects_non_finite_sp() {
   let sp = DVector::<f64>::from_vec(vec![1.0, f64::INFINITY]);
   let emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::NonFinite(_))
   ));
 }
@@ -190,7 +218,7 @@ fn rejects_non_finite_embeddings() {
   let mut emb = DMatrix::<f64>::from_element(3, 4, 1.0);
   emb[(2, 1)] = f64::NEG_INFINITY;
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::NonFinite(_))
   ));
 }
@@ -208,7 +236,7 @@ fn single_alive_cluster_uniform_q_returns_mean() {
       1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
     ],
   );
-  let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
+  let c = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
   // Expected mean of each column: (1+4+7+10)/4=5.5, (2+5+8+11)/4=6.5, (3+6+9+12)/4=7.5
   assert_eq!(c.shape(), (1, 3));
   assert!((c[(0, 0)] - 5.5).abs() < 1e-12);
@@ -226,7 +254,7 @@ fn filter_drops_dead_clusters() {
   let q = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
   let sp = DVector::<f64>::from_vec(vec![0.6, 1.0e-10, 0.4]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-  let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
+  let c = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
   assert_eq!(c.shape(), (2, 2));
   // Surviving cluster 0 (alive_idx 0) → row 0 of emb.
   assert!((c[(0, 0)] - 1.0).abs() < 1e-12);
@@ -243,7 +271,7 @@ fn weighted_mean_normalizes_by_total_weight() {
   let q = DMatrix::<f64>::from_row_slice(3, 1, &[0.6, 0.3, 0.1]);
   let sp = DVector::<f64>::from_vec(vec![1.0]);
   let emb = DMatrix::<f64>::from_row_slice(3, 2, &[10.0, 20.0, 100.0, 200.0, 1000.0, 2000.0]);
-  let c = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
+  let c = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("ok");
   // weighted sum: 0.6*10 + 0.3*100 + 0.1*1000 = 6 + 30 + 100 = 136
   // weight sum = 1.0, so centroid[0] = 136
   assert!((c[(0, 0)] - 136.0).abs() < 1e-12);
@@ -259,7 +287,7 @@ fn zero_total_weight_in_alive_cluster_errors() {
   let sp = DVector::<f64>::from_vec(vec![0.5]);
   let emb = DMatrix::<f64>::from_element(3, 2, 1.0);
   assert!(matches!(
-    weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
+    weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD),
     Err(Error::Shape(_))
   ));
 }
@@ -271,8 +299,8 @@ fn deterministic_on_repeated_calls() {
   });
   let sp = DVector::<f64>::from_vec(vec![0.4, 0.4, 0.2]);
   let emb = DMatrix::<f64>::from_fn(8, 5, |i, j| ((i + 2 * j) as f64 * 0.1).cos());
-  let a = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("a");
-  let b = weighted_centroids(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("b");
+  let a = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("a");
+  let b = weighted_centroids_dm(&q, &sp, &emb, SP_ALIVE_THRESHOLD).expect("b");
   for r in 0..a.nrows() {
     for c in 0..a.ncols() {
       assert_eq!(a[(r, c)], b[(r, c)]);

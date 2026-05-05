@@ -89,19 +89,22 @@ fn weighted_centroids_match_pyannote_clustering_centroids() {
   assert_eq!(chunk_idx.len(), num_train);
   assert_eq!(speaker_idx.len(), num_train);
 
-  let mut train = DMatrix::<f64>::zeros(num_train, embed_dim);
+  // Build a row-major `(num_train, embed_dim)` flat buffer matching
+  // `weighted_centroids`'s `&[f64]` contract.
+  let mut train: Vec<f64> = Vec::with_capacity(num_train * embed_dim);
   for i in 0..num_train {
     let c = chunk_idx[i] as usize;
     let s = speaker_idx[i] as usize;
     assert!(c < num_chunks && s < num_speakers);
     let base = (c * num_speakers + s) * embed_dim;
     for d in 0..embed_dim {
-      train[(i, d)] = raw_flat[base + d] as f64;
+      train.push(raw_flat[base + d] as f64);
     }
   }
 
   // Run + compare to clustering.npz['centroids'].
-  let got = weighted_centroids(&q, &sp, &train, SP_ALIVE_THRESHOLD).expect("weighted_centroids");
+  let got = weighted_centroids(&q, &sp, &train, num_train, embed_dim, SP_ALIVE_THRESHOLD)
+    .expect("weighted_centroids");
 
   let cluster_path = fixture("tests/parity/fixtures/01_dialogue/clustering.npz");
   let (want_flat, want_shape) = read_npz_array::<f64>(&cluster_path, "centroids");

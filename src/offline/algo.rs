@@ -10,7 +10,7 @@ use crate::{
   plda::{PldaTransform, RawEmbedding},
   reconstruct::{ReconstructInput, RttmSpan, SlidingWindow, reconstruct, try_discrete_to_spans},
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
 /// Diarizer error type (re-exports the pipeline error since that's
 /// where most failures surface in offline mode).
@@ -106,31 +106,33 @@ pub enum ShapeError {
   SmoothingEpsilonOutOfRange { value: Option<f32> },
 }
 
-// ── Heap-bound matrix cluster (no cap, deliberate) ────────────────
+// ── Memory budget for `diarize_offline` ───────────────────────────
 //
-// `diarize_offline` allocates several heap-only `nalgebra::DMatrix`
-// values whose footprint scales with input length:
-//   * `embeddings`           — `(num_chunks * num_speakers, embed_dim)` f64
-//   * `post_plda`            — `(num_train, plda_dim)` f64
-//   * `train_embeddings`     — same `(num_train, embed_dim)` shape, in
-//     `assign_embeddings`
-//   * VBx state (rho, gamma, log_p, etc.) — also `O(num_train *
-//     plda_dim)` f64 working sets in `cluster_vbx`
-//   * AHC pdist condensed — `n*(n-1)/2` f64; this one IS spill-backed
-//     via `SpillBytesMut`
-//   * `qinit` — `(num_train, num_init)` f64, gated by the existing
-//     `MAX_QINIT_CELLS` check in `pipeline::algo`
+// The matrices that scale with input length are now all spill-backed
+// through [`crate::ops::spill::SpillBytesMut`], so multi-hour inputs
+// no longer allocate hundreds of MB of contiguous heap:
+//   * `embeddings`           — `(num_chunks * num_speakers, embed_dim)`
+//     f64, row-major flat → `SpillBytes<f64>` (built below)
+//   * `post_plda`            — `(num_train, plda_dim)` f64, column-major
+//     flat → `SpillBytes<f64>` (built below)
+//   * `train_embeddings`     — `(num_train, embed_dim)` f64, row-major
+//     flat → `SpillBytes<f64>` (built inside `assign_embeddings`)
+//   * AHC pdist condensed    — `n*(n-1)/2` f64 → `SpillBytesMut`
+//   * `discrete_diarization` — `(num_output_frames, num_alive)` f32 →
+//     `SpillBytes<f32>` (built inside `reconstruct`)
 //
-// At pyannote community-1's 3-slot × 256-dim geometry with `num_train`
-// in the thousands, the cumulative live heap can comfortably reach
-// hundreds of MB on multi-hour inputs. We deliberately do **not**
-// surface a single-matrix cap here: a partial cap that admits 14 h
-// inputs while another matrix in the same call OOMs at 7 h is more
-// misleading than no cap. Callers that need a tight heap budget
-// should either (a) split very long inputs into shorter passes
-// before calling `diarize_offline`, or (b) wait for the planned
-// row-accessor / spill-backed-DMatrix refactor that routes these
-// matrices through `SpillBytesMut`.
+// VBx internal working matrices (`rho`, `gamma`, `log_p`, `new_gamma`,
+// `inv_l`, `alpha`, `rho_alpha_t`) remain heap-allocated `nalgebra::
+// DMatrix` values. These are bounded by `pipeline::MAX_AHC_TRAIN` and
+// `pipeline::MAX_QINIT_CELLS`: at the cap the working set is
+// `O(num_train * plda_dim) + O(num_train * num_init)` ≤ ~50 MB, which
+// is independent of input length and well below any sane heap budget.
+// They sit on the EM hot path with iteration-level reads + writes and
+// would lose 20-50× performance if backed by paged mmap, so spilling
+// them is intentionally not done.
+//
+// `qinit` is also heap-allocated but gated by the same `MAX_QINIT_CELLS`
+// check in `pipeline::algo` before VBx is invoked.
 
 /// `const fn` predicate: `v` is finite and `>= 0` (f64). Used for
 /// `min_duration_off`, a non-negative seconds quantity passed
@@ -650,22 +652,37 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   let embeddings = embeddings_buf.freeze();
 
   // ── Stage 3: PLDA project active embeddings ────────────────────
+  //
+  // Spill-backed, **column-major** layout matching `nalgebra::DMatrix`'s
+  // storage convention: `data[d * num_train + i]` for row `i`, column
+  // `d`. Downstream `assign_embeddings` reconstructs a
+  // `nalgebra::DMatrixView` over this slice for the VBx GEMM call,
+  // so the column-major layout is mandatory for bit-equal numerics.
   let plda_dim = plda.phi().len();
-  let mut post_plda = DMatrix::<f64>::zeros(num_train, plda_dim);
-  for (i, (&c, &s)) in train_chunk_idx
-    .iter()
-    .zip(train_speaker_idx.iter())
-    .enumerate()
+  let post_plda_len = num_train
+    .checked_mul(plda_dim)
+    .ok_or(ShapeError::RawEmbeddingsOverflow)?;
+  let mut post_plda_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(post_plda_len, &input.spill_options)?;
   {
-    let base = (c * num_speakers + s) * EMBEDDING_DIM;
-    let mut arr = [0.0_f32; EMBEDDING_DIM];
-    arr.copy_from_slice(&raw_embeddings[base..base + EMBEDDING_DIM]);
-    let raw = RawEmbedding::from_raw_array(arr)?;
-    let projected = plda.project(&raw)?;
-    for (d, v) in projected.iter().enumerate() {
-      post_plda[(i, d)] = *v;
+    let storage = post_plda_buf.as_mut_slice();
+    for (i, (&c, &s)) in train_chunk_idx
+      .iter()
+      .zip(train_speaker_idx.iter())
+      .enumerate()
+    {
+      let base = (c * num_speakers + s) * EMBEDDING_DIM;
+      let mut arr = [0.0_f32; EMBEDDING_DIM];
+      arr.copy_from_slice(&raw_embeddings[base..base + EMBEDDING_DIM]);
+      let raw = RawEmbedding::from_raw_array(arr)?;
+      let projected = plda.project(&raw)?;
+      for (d, v) in projected.iter().enumerate() {
+        // Column-major write: column `d`, row `i`.
+        storage[d * num_train + i] = *v;
+      }
     }
   }
+  let post_plda = post_plda_buf.freeze();
   let phi = DVector::<f64>::from_iterator(plda_dim, plda.phi().iter().copied());
 
   // ── Stage 4: assign_embeddings (AHC + VBx + centroid + Hungarian) ─
@@ -676,7 +693,8 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
     num_speakers,
     segmentations,
     num_frames_per_chunk,
-    &post_plda,
+    post_plda.as_slice(),
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,

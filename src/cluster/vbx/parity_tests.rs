@@ -99,7 +99,7 @@ fn vbx_iterate_matches_pyannote_q_final_pi_elbo() {
   let max_iters = max_iters_flat[0] as usize;
 
   // ── Run ────────────────────────────────────────────────────────
-  let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
 
   // The captured run converged in 16 of 20 iterations — the
   // pyannote-equivalent should hit the convergence branch, not
@@ -277,7 +277,7 @@ fn vbx_pi_has_safe_margin_from_sp_alive_threshold() {
     let fb = fb_flat[0];
     let max_iters = max_iters_flat[0] as usize;
 
-    let out = vbx_iterate(&x, &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
+    let out = vbx_iterate(x.as_view(), &phi, &qinit, fa, fb, max_iters).expect("vbx_iterate");
 
     for sj in 0..out.pi().len() {
       let p = out.pi()[sj];

@@ -46,7 +46,9 @@ pub const SP_ALIVE_THRESHOLD: f64 = 1.0e-7;
 pub fn weighted_centroids(
   q: &DMatrix<f64>,
   sp: &DVector<f64>,
-  embeddings: &DMatrix<f64>,
+  embeddings: &[f64],
+  num_train_embeddings: usize,
+  embed_dim: usize,
   sp_threshold: f64,
 ) -> Result<DMatrix<f64>, Error> {
   use crate::cluster::centroid::error::{NonFiniteField, ShapeError};
@@ -60,12 +62,17 @@ pub fn weighted_centroids(
   if sp.len() != num_init {
     return Err(ShapeError::SpQClusterMismatch.into());
   }
-  if embeddings.nrows() != num_train {
+  if num_train_embeddings != num_train {
     return Err(ShapeError::EmbeddingsQRowMismatch.into());
   }
-  let embed_dim = embeddings.ncols();
   if embed_dim == 0 {
     return Err(ShapeError::ZeroEmbeddingDim.into());
+  }
+  let expected_emb_len = num_train
+    .checked_mul(embed_dim)
+    .ok_or(ShapeError::EmbeddingsQRowMismatch)?;
+  if embeddings.len() != expected_emb_len {
+    return Err(ShapeError::EmbeddingsQRowMismatch.into());
   }
   if !sp_threshold.is_finite() {
     return Err(ShapeError::NonFiniteSpThreshold.into());
@@ -81,7 +88,7 @@ pub fn weighted_centroids(
       return Err(NonFiniteField::Sp.into());
     }
   }
-  for v in embeddings.iter() {
+  for &v in embeddings {
     if !v.is_finite() {
       return Err(NonFiniteField::Embeddings.into());
     }
@@ -134,12 +141,9 @@ pub fn weighted_centroids(
   // accumulation — wasted work on bad input is bounded by the input
   // shape and the error is the same either way.
   let num_alive = alive.len();
-  let mut embed_buf: Vec<f64> = Vec::with_capacity(num_train * embed_dim);
-  for t in 0..num_train {
-    for d in 0..embed_dim {
-      embed_buf.push(embeddings[(t, d)]);
-    }
-  }
+  // `embeddings` is now row-major flat input (`row * embed_dim + d`),
+  // so we can read rows directly as contiguous slices — the previous
+  // copy-into-row-major-scratch pass is unnecessary.
   let mut centroid_buf: Vec<f64> = vec![0.0; num_alive * embed_dim];
   let mut w_totals: Vec<f64> = vec![0.0; num_alive];
   // SIMD AXPY: scalar and NEON produce bit-identical results
@@ -153,7 +157,7 @@ pub fn weighted_centroids(
     for t in 0..num_train {
       let w = q[(t, k)];
       w_totals[alive_idx] += w;
-      let emb_slice = &embed_buf[t * embed_dim..(t + 1) * embed_dim];
+      let emb_slice = &embeddings[t * embed_dim..(t + 1) * embed_dim];
       crate::ops::axpy(centroid_slice, w, emb_slice);
     }
   }

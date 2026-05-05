@@ -7,11 +7,36 @@
 use crate::cluster::ahc::{Error, ahc_init};
 use nalgebra::DMatrix;
 
+/// Test helper: convert a column-major `DMatrix<f64>` to a row-major
+/// `(Vec<f64>, n, d)` triple matching the new `ahc_init` signature.
+/// Old tests that constructed `DMatrix` for convenience can use this
+/// adapter instead of being rewritten in row-major flat form.
+fn dm_to_row_major(m: &DMatrix<f64>) -> (Vec<f64>, usize, usize) {
+  let (n, d) = m.shape();
+  let mut out = Vec::with_capacity(n * d);
+  for r in 0..n {
+    for c in 0..d {
+      out.push(m[(r, c)]);
+    }
+  }
+  (out, n, d)
+}
+
+/// Convenience wrapper: `ahc_init` from a `&DMatrix<f64>` for tests.
+fn ahc_init_dm(
+  m: &DMatrix<f64>,
+  threshold: f64,
+  spill_options: &crate::ops::spill::SpillOptions,
+) -> Result<Vec<usize>, Error> {
+  let (data, n, d) = dm_to_row_major(m);
+  ahc_init(&data, n, d, threshold, spill_options)
+}
+
 #[test]
 fn rejects_empty_embeddings() {
   let m = DMatrix::<f64>::zeros(0, 4);
   assert!(matches!(
-    ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
 }
@@ -20,7 +45,7 @@ fn rejects_empty_embeddings() {
 fn rejects_zero_dimension() {
   let m = DMatrix::<f64>::zeros(3, 0);
   assert!(matches!(
-    ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
 }
@@ -29,11 +54,11 @@ fn rejects_zero_dimension() {
 fn rejects_non_positive_threshold() {
   let m = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    ahc_init(&m, 0.0, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.0, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
   assert!(matches!(
-    ahc_init(&m, -0.1, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, -0.1, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
 }
@@ -42,11 +67,11 @@ fn rejects_non_positive_threshold() {
 fn rejects_non_finite_threshold() {
   let m = DMatrix::<f64>::from_element(3, 4, 1.0);
   assert!(matches!(
-    ahc_init(&m, f64::NAN, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, f64::NAN, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
   assert!(matches!(
-    ahc_init(
+    ahc_init_dm(
       &m,
       f64::INFINITY,
       &crate::ops::spill::SpillOptions::default()
@@ -60,7 +85,7 @@ fn rejects_nan_in_embedding() {
   let mut m = DMatrix::<f64>::from_element(3, 4, 1.0);
   m[(1, 2)] = f64::NAN;
   assert!(matches!(
-    ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
     Err(Error::NonFinite(_))
   ));
 }
@@ -70,7 +95,7 @@ fn rejects_inf_in_embedding() {
   let mut m = DMatrix::<f64>::from_element(3, 4, 1.0);
   m[(0, 0)] = f64::INFINITY;
   assert!(matches!(
-    ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
     Err(Error::NonFinite(_))
   ));
 }
@@ -82,7 +107,7 @@ fn rejects_zero_norm_row() {
     m[(1, c)] = 0.0;
   }
   assert!(matches!(
-    ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
+    ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()),
     Err(Error::Shape(_))
   ));
 }
@@ -102,7 +127,7 @@ fn rejects_finite_row_with_overflowing_norm() {
   for c in 0..4 {
     m[(1, c)] = big;
   }
-  let r = ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default());
+  let r = ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default());
   assert!(
     matches!(r, Err(Error::Shape(ShapeError::RowNormOverflow))),
     "got {r:?}"
@@ -113,7 +138,7 @@ fn rejects_finite_row_with_overflowing_norm() {
 #[test]
 fn single_row_returns_single_cluster() {
   let m = DMatrix::<f64>::from_row_slice(1, 3, &[1.0, 0.0, 0.0]);
-  let labels = ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels = ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
   assert_eq!(labels, vec![0]);
 }
 
@@ -131,7 +156,7 @@ fn single_row_returns_single_cluster() {
 #[test]
 fn merges_close_pair_separates_far_row() {
   let m = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 100.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
-  let labels = ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels = ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
   assert_eq!(labels, vec![0, 0, 1]);
 }
 
@@ -147,7 +172,8 @@ fn all_identical_normed_rows_collapse_to_one_cluster() {
       3.0, 0.0, 0.5, 0.0,
     ],
   );
-  let labels = ahc_init(&m, 0.001, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels =
+    ahc_init_dm(&m, 0.001, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
   assert_eq!(labels, vec![0, 0, 0, 0]);
 }
 
@@ -156,7 +182,7 @@ fn all_identical_normed_rows_collapse_to_one_cluster() {
 fn tiny_threshold_keeps_every_row_isolated() {
   // Three orthogonal directions; pairwise distance after L2 norm ≈ √2 ≈ 1.414.
   let m = DMatrix::<f64>::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
-  let labels = ahc_init(&m, 0.1, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels = ahc_init_dm(&m, 0.1, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
   // Encounter-order labels — each leaf is its own cluster, labelled in
   // its first-encountered order.
   assert_eq!(labels, vec![0, 1, 2]);
@@ -181,7 +207,7 @@ fn labels_are_encounter_order_contiguous() {
       1.0, 1.0, 1.0, // row 5: singleton
     ],
   );
-  let labels = ahc_init(&m, 0.1, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels = ahc_init_dm(&m, 0.1, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
   // Encounter order of labels: row 0 → 0, row 1 → 1, row 2 → 2,
   // row 3 → 0 (same cluster as row 0), row 4 → 1, row 5 → 3.
   assert_eq!(labels, vec![0, 1, 2, 0, 1, 3]);
@@ -244,7 +270,7 @@ fn centroid_linkage_inversion_matches_scipy() {
     ],
   );
 
-  let labels = ahc_init(&m, 0.6, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
+  let labels = ahc_init_dm(&m, 0.6, &crate::ops::spill::SpillOptions::default()).expect("ahc_init");
 
   // Scipy on this dendrogram:
   //   step 0 (merge 0, 1): d=0.65 > 0.6
@@ -263,8 +289,8 @@ fn centroid_linkage_inversion_matches_scipy() {
 #[test]
 fn deterministic_on_repeated_calls() {
   let m = DMatrix::<f64>::from_fn(8, 4, |i, j| ((i * 7 + j * 13) as f64 * 0.1).sin() + 1.0);
-  let a = ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("a");
-  let b = ahc_init(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("b");
+  let a = ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("a");
+  let b = ahc_init_dm(&m, 0.5, &crate::ops::spill::SpillOptions::default()).expect("b");
   assert_eq!(a, b);
 }
 

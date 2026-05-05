@@ -21,7 +21,6 @@ use std::collections::HashMap;
 
 use crate::cluster::ahc::error::Error;
 use kodama::{Method, Step, linkage};
-use nalgebra::DMatrix;
 
 /// Run pyannote's AHC initialization.
 ///
@@ -51,17 +50,27 @@ use nalgebra::DMatrix;
 /// drive `diarization::cluster::ahc::ahc_init` uniformly without the special case
 /// leaking into them.
 pub fn ahc_init(
-  embeddings: &DMatrix<f64>,
+  embeddings: &[f64],
+  n: usize,
+  d: usize,
   threshold: f64,
   spill_options: &crate::ops::spill::SpillOptions,
 ) -> Result<Vec<usize>, Error> {
   use crate::cluster::ahc::error::{NonFiniteField, ShapeError};
-  let (n, d) = embeddings.shape();
+  // Row-major flat layout: `embeddings[r * d + c]`. Caller (the
+  // pipeline) builds this directly from a spill-backed
+  // `SpillBytesMut<f64>` so the input is `&[f64]` rather than
+  // `&DMatrix<f64>` (which would require a heap-only nalgebra
+  // allocation).
   if n == 0 {
     return Err(ShapeError::EmptyEmbeddings.into());
   }
   if d == 0 {
     return Err(ShapeError::ZeroEmbeddingDim.into());
+  }
+  let expected_len = n.checked_mul(d).ok_or(ShapeError::EmptyEmbeddings)?;
+  if embeddings.len() != expected_len {
+    return Err(ShapeError::EmptyEmbeddings.into());
   }
   if !threshold.is_finite() || threshold <= 0.0 {
     return Err(ShapeError::InvalidThreshold.into());
@@ -78,9 +87,9 @@ pub fn ahc_init(
   // no error. Same threat shape as the SegmentModel/EmbedModel
   // non-finite-output guards.
   for r in 0..n {
+    let row = &embeddings[r * d..(r + 1) * d];
     let mut sq = 0.0;
-    for c in 0..d {
-      let v = embeddings[(r, c)];
+    for &v in row {
       if !v.is_finite() {
         return Err(NonFiniteField::Embeddings.into());
       }
@@ -98,7 +107,7 @@ pub fn ahc_init(
     return Ok(vec![0]);
   }
 
-  let normed_row_major = l2_normalize_to_row_major(embeddings);
+  let normed_row_major = l2_normalize_to_row_major(embeddings, n, d);
   // Scalar pdist on every architecture. AHC is the one place in the
   // cluster_vbx pipeline where SIMD determinism actually matters:
   // the dendrogram cut is a hard `<= threshold` decision, so a pair
@@ -142,13 +151,12 @@ pub fn ahc_init(
 /// Caller has already rejected zero-norm rows AND non-finite squared
 /// norms (overflow). Both invariants are debug-asserted here as a
 /// defense-in-depth check; production passes through unchanged.
-fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
-  let (n, d) = m.shape();
+fn l2_normalize_to_row_major(m: &[f64], n: usize, d: usize) -> Vec<f64> {
   let mut out = Vec::with_capacity(n * d);
   for r in 0..n {
+    let row = &m[r * d..(r + 1) * d];
     let mut sq = 0.0;
-    for c in 0..d {
-      let v = m[(r, c)];
+    for &v in row {
       sq += v * v;
     }
     debug_assert!(
@@ -157,8 +165,8 @@ fn l2_normalize_to_row_major(m: &DMatrix<f64>) -> Vec<f64> {
        squared norms (row {r}: sq = {sq})"
     );
     let inv_norm = sq.sqrt().recip();
-    for c in 0..d {
-      out.push(m[(r, c)] * inv_norm);
+    for &v in row {
+      out.push(v * inv_norm);
     }
   }
   out

@@ -28,6 +28,12 @@ pub enum Error {
   /// Propagated from `diarization::plda`.
   #[error("pipeline: plda: {0}")]
   Plda(#[from] crate::plda::Error),
+  /// Propagated from `crate::ops::spill::SpillBytesMut::zeros` when
+  /// a spill-backed scratch buffer cannot be allocated. The
+  /// `train_embeddings` row-major buffer in `assign_embeddings` and
+  /// any future spill-backed matrices route through here.
+  #[error("pipeline: spill: {0}")]
+  Spill(#[from] crate::ops::spill::SpillError),
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].

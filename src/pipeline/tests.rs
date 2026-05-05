@@ -1,7 +1,7 @@
 //! Model-free unit tests for `diarization::pipeline`.
 
 use crate::pipeline::{AssignEmbeddingsInput, assign_embeddings};
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
 /// Pyannote one-cluster fast path (`clustering.py:588-594`): when
 /// fewer than 2 active training embeddings survive `filter_embeddings`,
@@ -20,7 +20,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
 
   // num_train = 1: only one active embedding survives filter_embeddings.
-  let post_plda = DMatrix::<f64>::from_element(1, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 1 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let train_chunk_idx = vec![0usize];
   let train_speaker_idx = vec![0usize];
@@ -32,6 +32,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_lt_2() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
@@ -66,7 +67,7 @@ fn rejects_overflowing_chunks_times_speakers() {
   // `embeddings.nrows() != checked_mul(...)?`.
   let embeddings: Vec<f64> = vec![0.5; 4 * embed_dim];
   let segmentations = vec![0.5; 4 * num_frames];
-  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 2 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let train_chunk_idx = vec![0usize, 1];
   let train_speaker_idx = vec![0usize, 1];
@@ -78,6 +79,7 @@ fn rejects_overflowing_chunks_times_speakers() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
@@ -98,7 +100,7 @@ fn rejects_overflowing_chunks_times_frames_times_speakers() {
   let plda_dim = 4;
   let embeddings: Vec<f64> = vec![0.5; 4 * embed_dim];
   let segmentations = vec![0.5; 4]; // tiny; never matches the overflowed product
-  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 2 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let train_chunk_idx = vec![0usize, 1];
   let train_speaker_idx = vec![0usize, 1];
@@ -110,6 +112,7 @@ fn rejects_overflowing_chunks_times_frames_times_speakers() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
@@ -130,11 +133,12 @@ fn rejects_zero_column_post_plda() {
   let num_chunks = 3;
   let num_speakers = 3;
   let embed_dim = 4;
+  let plda_dim = 0;
   let num_frames = 8;
   let embeddings: Vec<f64> = vec![0.5; num_chunks * num_speakers * embed_dim];
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
-  // post_plda has zero columns (PLDA dim = 0).
-  let post_plda = DMatrix::<f64>::zeros(2, 0);
+  // post_plda has zero columns (PLDA dim = 0). Length = 2 * 0 = 0.
+  let post_plda: Vec<f64> = Vec::new();
   let phi = DVector::<f64>::zeros(0);
   let train_chunk_idx = vec![0usize, 1];
   let train_speaker_idx = vec![0usize, 1];
@@ -146,6 +150,7 @@ fn rejects_zero_column_post_plda() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,
@@ -170,7 +175,8 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
   let num_frames = 8;
   let embeddings: Vec<f64> = vec![0.5; num_chunks * num_speakers * embed_dim];
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
-  let post_plda = DMatrix::<f64>::zeros(0, plda_dim);
+  // num_train = 0 ⇒ post_plda length = 0 * plda_dim = 0.
+  let post_plda: Vec<f64> = Vec::new();
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let input = AssignEmbeddingsInput::new(
     &embeddings,
@@ -180,6 +186,7 @@ fn assign_embeddings_returns_one_cluster_when_num_train_zero() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &[],
     &[],
@@ -209,7 +216,7 @@ fn rejects_nan_in_non_train_embedding_row() {
   // Row-major: row 7, col 1 → flat index `7 * embed_dim + 1`.
   embeddings[7 * embed_dim + 1] = f64::NAN;
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
-  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 2 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let input = AssignEmbeddingsInput::new(
     &embeddings,
@@ -219,6 +226,7 @@ fn rejects_nan_in_non_train_embedding_row() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &[0usize, 1],
     &[0usize, 1],
@@ -258,7 +266,7 @@ fn rejects_finite_row_with_overflowing_norm() {
     embeddings[8 * embed_dim + c] = huge;
   }
   let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
-  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 2 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let input = AssignEmbeddingsInput::new(
     &embeddings,
@@ -268,6 +276,7 @@ fn rejects_finite_row_with_overflowing_norm() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &[0usize, 1],
     &[0usize, 1],
@@ -311,7 +320,7 @@ fn rejects_nan_in_segmentations() {
   let embeddings: Vec<f64> = vec![0.5; num_chunks * num_speakers * embed_dim];
   let mut segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
   segmentations[10] = f64::INFINITY;
-  let post_plda = DMatrix::<f64>::from_element(2, plda_dim, 0.1);
+  let post_plda: Vec<f64> = vec![0.1; 2 * plda_dim];
   let phi = DVector::<f64>::from_element(plda_dim, 1.0);
   let input = AssignEmbeddingsInput::new(
     &embeddings,
@@ -321,6 +330,7 @@ fn rejects_nan_in_segmentations() {
     &segmentations,
     num_frames,
     &post_plda,
+    plda_dim,
     &phi,
     &[0usize, 1],
     &[0usize, 1],
@@ -349,7 +359,7 @@ mod hyperparameter_validation_before_fast_path {
   fn input_with_zero_train<'a>(
     embeddings: &'a [f64],
     segmentations: &'a [f64],
-    post_plda: &'a DMatrix<f64>,
+    post_plda: &'a [f64],
     phi: &'a DVector<f64>,
   ) -> AssignEmbeddingsInput<'a> {
     // Zero-length train indices => num_train == 0 => fast path active.
@@ -361,6 +371,7 @@ mod hyperparameter_validation_before_fast_path {
       segmentations,
       8, // num_frames
       post_plda,
+      4, // plda_dim
       phi,
       &[],
       &[],
@@ -371,7 +382,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_inf_threshold_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi)
       .with_threshold(f64::INFINITY);
@@ -389,7 +400,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_zero_threshold_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input =
       input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_threshold(0.0);
@@ -407,7 +418,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_nan_fa_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input =
       input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_fa(f64::NAN);
@@ -422,7 +433,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_negative_fb_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_fb(-0.5);
     let r = assign_embeddings(&input);
@@ -436,7 +447,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_zero_max_iters_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input =
       input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi).with_max_iters(0);
@@ -454,7 +465,7 @@ mod hyperparameter_validation_before_fast_path {
   fn rejects_max_iters_above_cap_even_on_fast_path() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi)
       .with_max_iters(crate::cluster::vbx::MAX_ITERS_CAP + 1);
@@ -476,7 +487,7 @@ mod hyperparameter_validation_before_fast_path {
   fn fast_path_succeeds_with_valid_options() {
     let embeddings: Vec<f64> = vec![0.5; 4 * 3 * 4];
     let segmentations = vec![0.5; 4 * 8 * 3];
-    let post_plda = DMatrix::<f64>::from_element(0, 4, 0.0);
+    let post_plda: Vec<f64> = Vec::new();
     let phi = DVector::<f64>::from_element(4, 1.0);
     let input = input_with_zero_train(&embeddings, &segmentations, &post_plda, &phi);
     let r = assign_embeddings(&input).expect("fast path with defaults must succeed");
@@ -513,7 +524,7 @@ mod ahc_train_cap_tests {
 
     let emb: Vec<f64> = vec![0.5; num_chunks * num_speakers * embed_dim];
     let segmentations = vec![0.5; num_chunks * num_frames * num_speakers];
-    let post_plda = DMatrix::<f64>::from_element(num_train, plda_dim, 0.1);
+    let post_plda: Vec<f64> = vec![0.1; num_train * plda_dim];
     let phi = DVector::<f64>::from_element(plda_dim, 1.0);
     let mut train_chunk_idx = Vec::with_capacity(num_train);
     let mut train_speaker_idx = Vec::with_capacity(num_train);
@@ -534,6 +545,7 @@ mod ahc_train_cap_tests {
       &segmentations,
       num_frames,
       &post_plda,
+      plda_dim,
       &phi,
       &train_chunk_idx,
       &train_speaker_idx,

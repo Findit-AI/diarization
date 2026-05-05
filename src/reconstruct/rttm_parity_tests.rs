@@ -91,7 +91,8 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
   let num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
-  let post_plda = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
+  let post_plda_dm = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
+  let post_plda = post_plda_dm.as_slice();
   let (phi_flat, _) = read_npz_array::<f64>(&plda_path, "phi");
   let phi = DVector::<f64>::from_vec(phi_flat);
   let (chunk_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_chunk_idx");
@@ -112,7 +113,8 @@ fn run_rttm_parity(fixture_dir: &str, uri: &str) {
     num_speakers,
     &segmentations,
     num_frames_per_chunk,
-    &post_plda,
+    post_plda,
+    plda_dim,
     &phi,
     &train_chunk_idx,
     &train_speaker_idx,

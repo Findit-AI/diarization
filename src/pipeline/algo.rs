@@ -90,7 +90,19 @@ pub struct AssignEmbeddingsInput<'a> {
   num_speakers: usize,
   segmentations: &'a [f64],
   num_frames: usize,
-  post_plda: &'a DMatrix<f64>,
+  /// Post-PLDA features for the active training subset, **column-
+  /// major** flat layout matching nalgebra's `DMatrix` storage:
+  /// `data[d * num_train + i]` for entry at row `i`, column `d`.
+  /// Length must equal `num_train * plda_dim`.
+  ///
+  /// Backed by anything that exposes `&[f64]` — heap `Vec<f64>` or
+  /// spill-backed `SpillBytes<f64>`. Internally reconstructed as a
+  /// `nalgebra::DMatrixView` for the VBx GEMM call site, so the
+  /// nalgebra column-major layout convention is mandatory.
+  post_plda: &'a [f64],
+  /// Per-row dimensionality of [`Self::post_plda`] (i.e. PLDA
+  /// projected feature width).
+  plda_dim: usize,
   phi: &'a DVector<f64>,
   train_chunk_idx: &'a [usize],
   train_speaker_idx: &'a [usize],
@@ -132,7 +144,8 @@ impl<'a> AssignEmbeddingsInput<'a> {
     num_speakers: usize,
     segmentations: &'a [f64],
     num_frames: usize,
-    post_plda: &'a DMatrix<f64>,
+    post_plda: &'a [f64],
+    plda_dim: usize,
     phi: &'a DVector<f64>,
     train_chunk_idx: &'a [usize],
     train_speaker_idx: &'a [usize],
@@ -145,6 +158,7 @@ impl<'a> AssignEmbeddingsInput<'a> {
       segmentations,
       num_frames,
       post_plda,
+      plda_dim,
       phi,
       train_chunk_idx,
       train_speaker_idx,
@@ -220,9 +234,14 @@ impl<'a> AssignEmbeddingsInput<'a> {
   pub const fn num_frames(&self) -> usize {
     self.num_frames
   }
-  /// Post-PLDA features for the active training subset.
-  pub const fn post_plda(&self) -> &'a DMatrix<f64> {
+  /// Post-PLDA features for the active training subset (column-major
+  /// flat slice; length `num_train * plda_dim`).
+  pub const fn post_plda(&self) -> &'a [f64] {
     self.post_plda
+  }
+  /// Per-row dimensionality of [`Self::post_plda`].
+  pub const fn plda_dim(&self) -> usize {
+    self.plda_dim
   }
   /// PLDA eigenvalue diagonal.
   pub const fn phi(&self) -> &'a DVector<f64> {
@@ -306,6 +325,7 @@ pub fn assign_embeddings(
     segmentations,
     num_frames,
     post_plda,
+    plda_dim,
     phi,
     train_chunk_idx,
     train_speaker_idx,
@@ -355,10 +375,6 @@ pub fn assign_embeddings(
     return Err(ShapeError::TrainIndexLenMismatch.into());
   }
   let num_train = train_chunk_idx.len();
-  if post_plda.nrows() != num_train {
-    return Err(ShapeError::PostPldaRowMismatch.into());
-  }
-  let plda_dim = post_plda.ncols();
   if plda_dim == 0 {
     // Zero-column post_plda would let VBx iterate on no PLDA evidence
     // — `inv_l`, `alpha`, `log_p` all degenerate to empty/zero. The
@@ -367,6 +383,12 @@ pub fn assign_embeddings(
     // drift in PLDA capture or downstream feeding the wrong array
     // would silently yield wrong diarization.
     return Err(ShapeError::ZeroPldaDim.into());
+  }
+  let expected_post_plda_len = num_train
+    .checked_mul(plda_dim)
+    .ok_or(ShapeError::PostPldaRowMismatch)?;
+  if post_plda.len() != expected_post_plda_len {
+    return Err(ShapeError::PostPldaRowMismatch.into());
   }
   if phi.len() != plda_dim {
     return Err(ShapeError::PhiPldaDimMismatch.into());
@@ -488,22 +510,37 @@ pub fn assign_embeddings(
 
   // ── Stage 2: AHC on active embeddings ──────────────────────────
   // Project the rows of `embeddings` selected by `(chunk_idx,
-  // speaker_idx)` into a contiguous `(num_train, embed_dim)` matrix.
-  // `embeddings` is row-major flat (`row * embed_dim + d`); the
-  // built `train_embeddings` is still a column-major `DMatrix`
-  // because `ahc_init` and `weighted_centroids` consume it that
-  // way (a follow-up will spill-back this matrix too).
-  let mut train_embeddings = DMatrix::<f64>::zeros(num_train, embed_dim);
-  for i in 0..num_train {
-    let c = train_chunk_idx[i];
-    let s = train_speaker_idx[i];
-    let row = c * num_speakers + s;
-    let src = &embeddings[row * embed_dim..(row + 1) * embed_dim];
-    for (d, &v) in src.iter().enumerate() {
-      train_embeddings[(i, d)] = v;
+  // speaker_idx)` into a contiguous `(num_train, embed_dim)` flat
+  // buffer, **row-major** (matching the `embeddings` layout). The
+  // buffer is spill-backed via `SpillBytesMut<f64>` so multi-hour
+  // / large-`num_train` inputs don't OOM-abort here even though
+  // the previous nalgebra `DMatrix` allocation was heap-only.
+  // `ahc_init` and `weighted_centroids` consume the row-major
+  // `&[f64]` directly — no `DMatrix` materialization.
+  let train_emb_len = num_train
+    .checked_mul(embed_dim)
+    .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
+  let mut train_embeddings_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(train_emb_len, &input.spill_options)?;
+  {
+    let dst = train_embeddings_buf.as_mut_slice();
+    for i in 0..num_train {
+      let c = train_chunk_idx[i];
+      let s = train_speaker_idx[i];
+      let row = c * num_speakers + s;
+      let src = &embeddings[row * embed_dim..(row + 1) * embed_dim];
+      let row_dst = &mut dst[i * embed_dim..(i + 1) * embed_dim];
+      row_dst.copy_from_slice(src);
     }
   }
-  let ahc_clusters = ahc_init(&train_embeddings, threshold, &input.spill_options)?;
+  let train_embeddings = train_embeddings_buf.freeze();
+  let ahc_clusters = ahc_init(
+    train_embeddings.as_slice(),
+    num_train,
+    embed_dim,
+    threshold,
+    &input.spill_options,
+  )?;
 
   // ── Stage 3 (caller-supplied): post_plda is the VBx feature matrix.
   // ── Stage 4: VBx ──────────────────────────────────────────────
@@ -529,7 +566,15 @@ pub fn assign_embeddings(
     );
   }
   let qinit = build_qinit(&ahc_clusters, num_init);
-  let vbx_out = vbx_iterate(post_plda, phi, &qinit, fa, fb, max_iters)?;
+  // Reconstruct a column-major nalgebra view over the spill-backed
+  // `post_plda` slice for VBx's GEMM call sites. The slice layout
+  // matches `nalgebra::DMatrix`'s storage convention
+  // (`data[d * num_train + i]`), so this is a zero-copy view —
+  // `gamma.transpose() * &rho` inside `vbx_iterate` will dispatch
+  // through the same matrixmultiply backend with bit-identical
+  // numerics.
+  let post_plda_view = nalgebra::DMatrixView::from_slice(post_plda, num_train, plda_dim);
+  let vbx_out = vbx_iterate(post_plda_view, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason() == StopReason::MaxIterationsReached {
     // Pyannote silently accepts max_iters reached — it's the common
     // case in real data (16 of 20 captured iters converged but pyannote
@@ -541,7 +586,9 @@ pub fn assign_embeddings(
   let centroids = weighted_centroids(
     vbx_out.gamma(),
     vbx_out.pi(),
-    &train_embeddings,
+    train_embeddings.as_slice(),
+    num_train,
+    embed_dim,
     SP_ALIVE_THRESHOLD,
   )?;
   let num_alive = centroids.nrows();

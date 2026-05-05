@@ -62,7 +62,7 @@ fn vbx_rejects_phi_with_non_positive_entry() {
   let mut phi = DVector::<f64>::from_element(4, 1.0);
   phi[2] = -0.5;
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(result, Err(Error::NonPositivePhi(_, 2))),
     "got {result:?}"
@@ -74,7 +74,7 @@ fn vbx_rejects_shape_mismatch_x_vs_qinit() {
   let x = DMatrix::<f64>::zeros(5, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(6, 2, 0.5); // T=6 ≠ 5
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -83,7 +83,7 @@ fn vbx_rejects_shape_mismatch_phi_vs_x() {
   let x = DMatrix::<f64>::zeros(5, 4); // D=4
   let phi = DVector::<f64>::from_element(3, 1.0); // D=3 ≠ 4
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -92,7 +92,7 @@ fn vbx_rejects_qinit_with_zero_clusters() {
   let x = DMatrix::<f64>::zeros(5, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::zeros(5, 0);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -113,7 +113,7 @@ fn vbx_elbo_is_monotonically_non_decreasing() {
   }
   let phi = DVector::<f64>::from_element(d, 2.0);
   let qinit = deterministic_qinit(t, s);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
   for w in out.elbo_trajectory().windows(2) {
     // Allow tiny float wobble at convergence (≤ 1e-6) before the
     // epsilon-based stop fires.
@@ -141,7 +141,7 @@ fn vbx_gamma_rows_sum_to_one() {
   }
   let phi = DVector::<f64>::from_element(d, 1.5);
   let qinit = deterministic_qinit(t, s);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.1, 0.5, 10).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.1, 0.5, 10).expect("vbx_iterate");
   for r in 0..t {
     let row_sum: f64 = (0..s).map(|c| out.gamma()[(r, c)]).sum();
     assert!(
@@ -160,7 +160,7 @@ fn vbx_pi_sums_to_one() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i * 3 + j) as f64).cos());
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20).expect("vbx_iterate");
   let pi_sum: f64 = out.pi().iter().sum();
   assert!((pi_sum - 1.0).abs() < 1e-12, "pi sums to {pi_sum}");
 }
@@ -177,7 +177,7 @@ fn vbx_rejects_zero_feature_dim() {
   let x = DMatrix::<f64>::zeros(t, 0);
   let phi = DVector::<f64>::zeros(0);
   let qinit = deterministic_qinit(t, s);
-  let r = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 5);
+  let r = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 5);
   assert!(
     matches!(
       r,
@@ -199,8 +199,8 @@ fn vbx_is_deterministic() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| (i + 2 * j) as f64 * 0.1);
   let phi = DVector::<f64>::from_element(d, 2.0);
   let qinit = deterministic_qinit(t, s);
-  let a = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("a");
-  let b = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("b");
+  let a = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 10).expect("a");
+  let b = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 10).expect("b");
   assert_eq!(a.elbo_trajectory(), b.elbo_trajectory());
   for r in 0..t {
     for c in 0..s {
@@ -230,7 +230,7 @@ fn vbx_rejects_qinit_with_nan_entry() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(2, 1)] = f64::NAN;
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(
       result,
@@ -250,7 +250,7 @@ fn vbx_rejects_qinit_with_inf_entry() {
   let phi = DVector::<f64>::from_element(4, 1.0);
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(0, 0)] = f64::INFINITY;
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(
       result,
@@ -274,7 +274,7 @@ fn vbx_rejects_qinit_with_negative_entry() {
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(0, 0)] = -0.1;
   qinit[(0, 1)] = 1.1;
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -287,7 +287,7 @@ fn vbx_rejects_qinit_with_unnormalized_row() {
   // Row 3 has entries [0.5, 0.4] — sum = 0.9, fails the 1e-9 tolerance.
   let mut qinit = DMatrix::<f64>::from_element(t, s, 0.5);
   qinit[(3, 1)] = 0.4;
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -298,7 +298,7 @@ fn vbx_rejects_zero_fa() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.0, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.0, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -309,7 +309,7 @@ fn vbx_rejects_negative_fa() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, -0.1, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, -0.1, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -320,7 +320,7 @@ fn vbx_rejects_nan_fa() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, f64::NAN, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, f64::NAN, 0.8, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -331,7 +331,7 @@ fn vbx_rejects_zero_fb() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.0, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.0, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -342,7 +342,7 @@ fn vbx_rejects_inf_fb() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, f64::INFINITY, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, f64::INFINITY, 20);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -358,7 +358,7 @@ fn vbx_rejects_max_iters_zero() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 0);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -373,7 +373,7 @@ fn vbx_rejects_max_iters_above_cap() {
   let x = DMatrix::<f64>::zeros(t, 4);
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP + 1);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP + 1);
   assert!(matches!(result, Err(Error::Shape(_))), "got {result:?}");
 }
 
@@ -388,7 +388,7 @@ fn vbx_accepts_max_iters_at_cap() {
   let qinit = deterministic_qinit(t, s);
   // The actual loop will converge well before MAX_ITERS_CAP; we only
   // verify the boundary check accepts it.
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, MAX_ITERS_CAP);
   assert!(result.is_ok(), "got {result:?}");
 }
 
@@ -404,7 +404,7 @@ fn vbx_rejects_max_iters_zero_with_non_uniform_qinit() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.3);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 0);
   assert!(
     matches!(result, Err(Error::Shape(_))),
     "non-uniform qinit + max_iters=0 must reject (would otherwise \
@@ -432,8 +432,8 @@ fn vbx_accepts_qinit_with_alternating_column_assignment() {
       qinit[(tt, 1)] = 0.95;
     }
   }
-  let _out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("alternating real columns must pass");
+  let _out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 10)
+    .expect("alternating real columns must pass");
 }
 
 /// S=1 is a degenerate case (single speaker) — `qinit` is forced to
@@ -446,8 +446,8 @@ fn vbx_accepts_single_speaker_qinit() {
   let x = DMatrix::<f64>::from_fn(t, d, |i, j| ((i + j) as f64) * 0.1);
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = DMatrix::<f64>::from_element(t, s, 1.0);
-  let out =
-    vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 10).expect("S=1 single-speaker qinit must pass");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 10)
+    .expect("S=1 single-speaker qinit must pass");
   // With S=1 there is only one cluster; pi[0] should be 1.0.
   assert!((out.pi()[0] - 1.0).abs() < 1e-12, "pi[0] = {}", out.pi()[0]);
 }
@@ -468,7 +468,7 @@ fn vbx_rejects_phi_with_pos_inf() {
   let mut phi = DVector::<f64>::from_element(4, 1.0);
   phi[1] = f64::INFINITY;
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(result, Err(Error::NonPositivePhi(p, 1)) if p.is_infinite() && p > 0.0),
     "got {result:?}"
@@ -481,7 +481,7 @@ fn vbx_rejects_phi_with_nan() {
   let mut phi = DVector::<f64>::from_element(4, 1.0);
   phi[3] = f64::NAN;
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(result, Err(Error::NonPositivePhi(p, 3)) if p.is_nan()),
     "got {result:?}"
@@ -494,7 +494,7 @@ fn vbx_rejects_x_with_nan() {
   x[(2, 1)] = f64::NAN;
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(
       result,
@@ -512,7 +512,7 @@ fn vbx_rejects_x_with_pos_inf() {
   x[(0, 0)] = f64::INFINITY;
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(
       result,
@@ -530,7 +530,7 @@ fn vbx_rejects_x_with_neg_inf() {
   x[(4, 3)] = f64::NEG_INFINITY;
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 20);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 20);
   assert!(
     matches!(
       result,
@@ -551,7 +551,7 @@ fn vbx_rejects_invalid_x_even_with_max_iters_zero() {
   x[(2, 2)] = f64::NAN;
   let phi = DVector::<f64>::from_element(4, 1.0);
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 0);
   assert!(
     matches!(
       result,
@@ -569,7 +569,7 @@ fn vbx_rejects_invalid_phi_even_with_max_iters_zero() {
   let mut phi = DVector::<f64>::from_element(4, 1.0);
   phi[2] = f64::INFINITY;
   let qinit = DMatrix::<f64>::from_element(5, 2, 0.5);
-  let result = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 0);
+  let result = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 0);
   assert!(
     matches!(result, Err(Error::NonPositivePhi(p, 2)) if p.is_infinite()),
     "boundary validation must run even at max_iters=0; got {result:?}"
@@ -713,7 +713,7 @@ fn vbx_reports_max_iterations_reached_when_cap_is_one() {
   }
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 1).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 1).expect("vbx_iterate");
   assert_eq!(
     out.stop_reason(),
     StopReason::MaxIterationsReached,
@@ -739,7 +739,7 @@ fn vbx_reports_converged_on_easy_input() {
   }
   let phi = DVector::<f64>::from_element(d, 1.0);
   let qinit = deterministic_qinit(t, s);
-  let out = vbx_iterate(&x, &phi, &qinit, 0.07, 0.8, 50).expect("vbx_iterate");
+  let out = vbx_iterate(x.as_view(), &phi, &qinit, 0.07, 0.8, 50).expect("vbx_iterate");
   assert_eq!(
     out.stop_reason(),
     StopReason::Converged,

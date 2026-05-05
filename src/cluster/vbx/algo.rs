@@ -216,7 +216,7 @@ pub(super) fn logsumexp_rows(m: &DMatrix<f64>) -> DVector<f64> {
 /// a softmaxed initializer that is unit-normalized to within float
 /// roundoff, and the captured rows are within `~1e-15` of 1.0.
 pub fn vbx_iterate(
-  x: &DMatrix<f64>,
+  x: nalgebra::DMatrixView<'_, f64>,
   phi: &DVector<f64>,
   qinit: &DMatrix<f64>,
   fa: f64,
