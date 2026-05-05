@@ -780,12 +780,11 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
   let discrete_diarization = reconstruct(&recon_input)?;
 
   // ── Stage 6: discrete diarization → RTTM spans ─────────────────
-  // Use the FALLIBLE variant: round-15/16/17 added typed validation
-  // (`MinDurationOffOutOfRange`, `InvalidFramesTiming`,
-  // `GridNonBinaryCell`) to `try_discrete_to_spans`. The infallible
-  // `discrete_to_spans` panics on those preconditions, but
-  // `diarize_offline` is a `Result`-returning public API — we must
-  // surface the same conditions as `Error::Reconstruct`, not unwind.
+  // Use the FALLIBLE variant: `try_discrete_to_spans` returns typed
+  // errors (`MinDurationOffOutOfRange`, `InvalidFramesTiming`,
+  // `GridNonBinaryCell`) on bad inputs; the infallible
+  // `discrete_to_spans` panics on those preconditions, which would
+  // unwind across this `Result`-returning public API.
   let spans = try_discrete_to_spans(
     discrete_diarization.as_slice(),
     num_output_frames,
@@ -811,7 +810,7 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
 #[cfg(test)]
 mod reconstruction_knob_validation_tests {
-  //! Round-14 fix: `diarize_offline` must reject NaN/±inf/negative
+  //! `diarize_offline` must reject NaN/±inf/negative
   //! `min_duration_off` and `Some(NaN/±inf)`/`Some(<0)`
   //! `smoothing_epsilon`. The setters panic on these, but a caller
   //! can field-construct (or future-serde-bypass) an `OfflineInput`

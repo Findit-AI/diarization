@@ -2,10 +2,10 @@
 //! kaldi-compatible fbank + sliding-window mean for variable-length clips.
 //!
 //! See the crate-level docs and `docs/superpowers/specs/` for the design.
-//! Layered API (spec §2.3):
-//! - High-level: `EmbedModel::embed`, `embed_weighted`, `embed_masked` (added in phase 5)
+//! Layered API:
+//! - High-level: `EmbedModel::embed`, `embed_weighted`, `embed_masked`
 //! - Low-level: `compute_fbank`, `EmbedModel::embed_features`,
-//!   `EmbedModel::embed_features_batch` (added in phase 5)
+//!   `EmbedModel::embed_features_batch`
 
 // `embedder` and `model` need to compile under either backend feature.
 // `EmbedModel::from_torchscript_file` lives inside `model.rs` gated on

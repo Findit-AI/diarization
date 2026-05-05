@@ -1001,8 +1001,7 @@ mod tests {
     }
   }
 
-  /// `f32` masks (round-26's reconstruct cells are f32). Confirm
-  /// the type works.
+  /// `f32` cells (the reconstruct grid is f32). Confirm the type works.
   #[test]
   fn f32_roundtrip() {
     let opts = SpillOptions::default();

@@ -347,11 +347,11 @@ fn rejects_nan_in_segmentations() {
   );
 }
 
-/// Round-17 [medium]: hyperparameter validation must run BEFORE the
-/// `num_train < 2` fast path. Otherwise an invalid `threshold` /
-/// `fa` / `fb` / `max_iters` returns `Ok(_)` on sparse / silent
-/// input and only fails once enough speech accumulates — making
-/// option validation data-dependent.
+/// Hyperparameter validation must run BEFORE the `num_train < 2`
+/// fast path. Otherwise an invalid `threshold` / `fa` / `fb` /
+/// `max_iters` returns `Ok(_)` on sparse / silent input and only
+/// fails once enough speech accumulates — making option validation
+/// data-dependent.
 mod hyperparameter_validation_before_fast_path {
   use super::*;
   use crate::pipeline::error::ShapeError;
@@ -498,13 +498,12 @@ mod hyperparameter_validation_before_fast_path {
   }
 }
 
-/// Round-26 [high]: pre-AHC `num_train` cap rejects pathologically
-/// large inputs upfront so AHC's `O(num_train² · embed_dim)`
-/// distance work cannot run unbounded. The cap is sized at
-/// `MAX_AHC_TRAIN = 32_000` (~3× the documented 1-hour intended
-/// scale of ~10k active pairs); production loads pass through, but
-/// adversarial inputs an order of magnitude past intended scale are
-/// rejected with a typed error.
+/// Pre-AHC `num_train` cap rejects pathologically large inputs
+/// upfront so AHC's `O(num_train² · embed_dim)` distance work cannot
+/// run unbounded. The cap is sized at `MAX_AHC_TRAIN = 32_000`
+/// (~3× the documented 1-hour intended scale of ~10k active pairs);
+/// production loads pass through, but inputs an order of magnitude
+/// past intended scale are rejected with a typed error.
 #[cfg(test)]
 mod ahc_train_cap_tests {
   use super::*;
@@ -562,13 +561,13 @@ mod ahc_train_cap_tests {
   }
 }
 
-/// Codex F3 regression: a NaN/`±inf` in `post_plda` must surface as
+/// A NaN/`±inf` in `post_plda` must surface as
 /// `NonFiniteField::PostPlda` *before* `assign_embeddings` allocates
 /// `train_embeddings`, builds the L2-normalized AHC matrix, computes
-/// the O(num_train²) condensed pdist, or runs linkage. Previously the
-/// non-finite value was caught only inside `vbx_iterate`, after all
-/// of that work — the early gate keeps the failure mode bounded
-/// regardless of input scale.
+/// the O(num_train²) condensed pdist, or runs linkage — the early
+/// gate keeps the failure mode bounded regardless of input scale.
+/// Without it, `vbx_iterate` would catch the non-finite value only
+/// after all of that work.
 #[cfg(test)]
 mod post_plda_finiteness_early_gate {
   use super::*;

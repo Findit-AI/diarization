@@ -659,7 +659,7 @@ fn try_discrete_to_spans_rejects_negative_grid_cell() {
   );
 }
 
-/// Round-17 [medium]: smoothing must use lexicographic
+/// smoothing must use lexicographic
 /// `(eff desc, raw desc, index asc)` so the exact-eps boundary still
 /// follows the documented "raw fallback when gap >= eps" rule. With
 /// prev cluster 0 at activation 0.0, cluster 1 at 1.0, and `eps =
@@ -706,7 +706,7 @@ fn reconstruct_smoothing_resolves_exact_eps_boundary_to_higher_raw() {
   assert_eq!(grid[3], 1.0, "frame 1 cluster 1 must be selected");
 }
 
-/// Round-17 [medium]: derived timestamps must be finite. Adversarial
+/// derived timestamps must be finite. Adversarial
 /// timing like `start = f64::MAX, duration = f64::MAX` passes the
 /// raw-field finite + positive checks but overflows
 /// `start + duration/2` to `±inf`. The post-validation check on
@@ -723,7 +723,7 @@ fn try_discrete_to_spans_rejects_timing_overflow_in_derived_centers() {
   );
 }
 
-/// Round-18 [high]: `reconstruct` must reject finite-but-adversarial
+/// `reconstruct` must reject finite-but-adversarial
 /// `chunks_sw` / `frames_sw` timing whose DERIVED values overflow.
 /// `chunks_sw.start = f64::MAX` + non-zero `chunks_sw.step` makes
 /// `chunk_start_time` (which the chunk-to-frame loop computes) blow
@@ -754,7 +754,7 @@ fn reconstruct_rejects_chunks_sw_start_at_f64_max() {
   assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
 }
 
-/// Round-26 [high]: `reconstruct` must reject grid allocations that
+/// `reconstruct` must reject grid allocations that
 /// would OOM-abort the `Result`-returning API. A direct caller with
 /// a modest count buffer + `num_output_frames` in the millions +
 /// hard cluster id near 1023 could otherwise allocate multi-GB
@@ -815,7 +815,7 @@ fn reconstruct_rejects_grid_size_above_max() {
   );
 }
 
-/// Round-25 [medium]: `reconstruct` must reject `num_output_frames`
+/// `reconstruct` must reject `num_output_frames`
 /// smaller than `last_start_frame + num_frames_per_chunk`. Same
 /// truncation pattern as `try_hamming_aggregate`. Without this the
 /// inner-loop `out_f >= num_output_frames` skip silently drops
@@ -855,7 +855,7 @@ fn reconstruct_rejects_undersized_num_output_frames() {
   );
 }
 
-/// Round-22 [medium]: `try_discrete_to_spans` must reject empty
+/// `try_discrete_to_spans` must reject empty
 /// grids and huge `num_clusters`. Without these, `num_frames *
 /// num_clusters == 0` makes any `num_clusters` pass the length
 /// check, and the per-cluster loop burns CPU producing no spans.
@@ -889,7 +889,7 @@ fn try_discrete_to_spans_rejects_num_clusters_above_cap() {
   );
 }
 
-/// Round-19 [high]: derived-timing guard must validate the FIRST
+/// derived-timing guard must validate the FIRST
 /// chunk too, not only the last. With a very negative
 /// `chunks_sw.start = -1e200` and a large positive `chunks_sw.step
 /// = 1e198`, the LAST chunk normalized coordinate is comfortably
@@ -947,7 +947,7 @@ fn reconstruct_rejects_chunks_sw_step_at_f64_max() {
   assert!(matches!(r, Err(Error::Timing(_))), "got {r:?}");
 }
 
-/// Round-16 [high]: smoothing comparator must be transitive.
+/// smoothing comparator must be transitive.
 /// Counterexample from the review: `eps = 0.1`, activations
 /// `[0.0, 0.06, 0.12]`, no previously-selected clusters. The old
 /// pairwise comparator was non-transitive (0<1, 2<0, 1==2). The new

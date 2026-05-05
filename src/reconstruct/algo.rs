@@ -585,7 +585,7 @@ pub fn reconstruct(
   // is `bool` (1 B), so `cs_size > MAX_RECONSTRUCT_GRID_CELLS` would
   // allocate >800 MB + 100 MB before the post-aggregation
   // `output_grid_size` cap fires. Reject upfront to prevent the
-  // OOM-abort path Codex flagged.
+  // OOM-abort path.
   if cs_size > MAX_RECONSTRUCT_GRID_CELLS {
     return Err(
       ShapeError::OutputGridTooLarge {

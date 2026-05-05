@@ -40,7 +40,7 @@ fn synthetic_input_inputs(
   (raw, seg, plda, chunks_sw, frames_sw)
 }
 
-/// Codex F4: `count.len() != num_output_frames` must surface
+/// `count.len() != num_output_frames` must surface
 /// `Error::Reconstruct(Shape(CountLenMismatch))` *before* the offline
 /// stage-1 filter pass and the spill-backed `embeddings` /
 /// `post_plda` allocations. Using `num_output_frames = 64` and a
@@ -78,7 +78,7 @@ fn rejects_count_length_mismatch_before_clustering() {
   );
 }
 
-/// Codex F4: `num_output_frames == 0` must fail at the offline
+/// `num_output_frames == 0` must fail at the offline
 /// boundary with `ZeroNumOutputFrames`. The reconstruct module's own
 /// check fires on the same predicate, but only after stage 1-4 burn
 /// PLDA projection, AHC, VBx, and centroid work.
@@ -114,7 +114,7 @@ fn rejects_zero_num_output_frames_before_clustering() {
   );
 }
 
-/// Codex F4: a single `count[t] > MAX_COUNT_PER_FRAME` must surface
+/// a single `count[t] > MAX_COUNT_PER_FRAME` must surface
 /// `CountAboveMax`. `255` is the canonical `u8` sentinel-corruption
 /// value that this gate is sized to catch (theoretical max for
 /// community-1 is `~30`; the cap of `64` allows headroom while

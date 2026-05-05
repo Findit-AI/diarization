@@ -1227,7 +1227,7 @@ mod try_variant_tests {
     );
   }
 
-  /// Round-20 [medium]: derived chunk-start frame index must be
+  /// derived chunk-start frame index must be
   /// bounded within `[i64::MIN/2, i64::MAX/2]`. With finite-but-
   /// adversarial `chunk_step / frame_step`, the float-to-int cast
   /// `as i64` saturates, after which `start_frame + cf` panics in
@@ -1279,7 +1279,7 @@ mod try_variant_tests {
     );
   }
 
-  /// Round-21 [high]: tiny `per_chunk_value` paired with a huge
+  /// tiny `per_chunk_value` paired with a huge
   /// `num_output_frames` would otherwise hit `vec![0.0_f64;
   /// num_output_frames]` and panic on capacity overflow. The new
   /// cap surfaces this as `OutputFrameCountAboveMax`.
@@ -1305,7 +1305,7 @@ mod try_variant_tests {
     );
   }
 
-  /// Round-23 [medium]: `num_output_frames == 0` with non-empty
+  /// `num_output_frames == 0` with non-empty
   /// input would silently return `Ok([])`, hiding a malformed
   /// frame-count computation as data loss.
   #[test]
@@ -1326,7 +1326,7 @@ mod try_variant_tests {
     );
   }
 
-  /// Round-24 [medium]: positive but undersized `num_output_frames`
+  /// positive but undersized `num_output_frames`
   /// would silently truncate trailing chunk contributions via the
   /// inner-loop `ofr >= num_output_frames` skip. New guard rejects
   /// any value below `last_start_frame + num_frames_per_chunk`.
@@ -1376,7 +1376,7 @@ mod try_variant_tests {
     );
   }
 
-  /// Round-22 [high]: `num_chunks == 0` makes the length-product
+  /// `num_chunks == 0` makes the length-product
   /// shape check vacuously pass for any `num_frames_per_chunk`,
   /// after which the unconditional hamming-window `vec!` allocation
   /// blows up. Reject zero chunks before any allocation.

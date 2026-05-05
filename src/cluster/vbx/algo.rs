@@ -329,9 +329,9 @@ pub fn vbx_iterate(
   // V = sqrt(Phi); rho[t,d] = X[t,d] * V[d]. Column-major DMatrix
   // because the downstream `gamma.T @ rho` matmul (matrixmultiply
   // crate via nalgebra) exploits the column-major layout for its
-  // cache-blocked GEMM. Step 5's experiments (dot-based and
-  // axpy-outer-product matmuls in `ops::*`) regressed the dominant
-  // 01_dialogue fixture at the pipeline level — at our (T~200, S~10,
+  // cache-blocked GEMM. Hand-rolled dot-based and axpy-outer-product
+  // matmul replacements in `ops::*` regressed the dominant
+  // 01_dialogue fixture at the pipeline level: at our (T~200, S~10,
   // D=128) shape, matrixmultiply's blocked microkernel beats both
   // approaches. A proper hand-rolled cache-blocked GEMM is out of
   // scope here.
@@ -419,17 +419,15 @@ pub fn vbx_iterate(
     let log_p_x = logsumexp_rows(&log_p);
     // gamma[t,s] = exp(log_p_[t,s] + log_pi[s] - log_p_x[t])
     //
-    // Step 4 attempted to route this through a vectorized NEON exp
-    // polynomial (see `crate::ops::arch::neon::exp`) by reorganizing
-    // the (t, s) iteration into per-column SIMD batches. The
-    // polynomial is correct (parity tests pass at gamma 1e-12) but
-    // benchmarked ~3-5% slower at the pipeline level on Apple
-    // Silicon: the extra memory traffic of writing to and re-reading
-    // each column scratch outweighs the polynomial's narrow SIMD
-    // gain over libm's hand-tuned scalar `exp`. The primitive ships
-    // for future use on x86_64 platforms (where AVX2/AVX-512 8-lane
-    // exp would have a larger margin over scalar) and for
-    // architectures whose libm exp is slower.
+    // The vectorized NEON exp polynomial in `crate::ops::arch::neon::exp`
+    // is correct (parity tests pass at gamma 1e-12) but benchmarked
+    // ~3–5% slower at the pipeline level on Apple Silicon: the extra
+    // memory traffic of writing to and re-reading each column scratch
+    // outweighs the polynomial's narrow SIMD gain over libm's
+    // hand-tuned scalar `exp`. The primitive ships for future use on
+    // x86_64 platforms (where AVX2/AVX-512 8-lane exp would have a
+    // larger margin over scalar) and for architectures whose libm
+    // exp is slower.
     let mut new_gamma = DMatrix::<f64>::zeros(t, s);
     for tt in 0..t {
       for sj in 0..s {

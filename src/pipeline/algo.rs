@@ -99,11 +99,10 @@ pub struct AssignEmbeddingsInput<'a> {
   /// spill-backed `SpillBytes<f64>`. The pipeline transposes this
   /// into a separate column-major spill region before constructing
   /// the `nalgebra::DMatrixView` that VBx's GEMM call site consumes.
-  /// Earlier revisions exposed this slice as column-major directly,
-  /// but a row-major caller (numpy, row-wise Rust code) silently
-  /// produced wrong responsibilities — the typed boundary is now
-  /// row-major to match the natural producer convention, with the
-  /// transpose paid once per call inside `assign_embeddings`.
+  /// The boundary is row-major (matching numpy / row-wise Rust
+  /// code's natural convention) to avoid the silent-wrong-output
+  /// failure mode of an untyped column-major handoff; the transpose
+  /// is paid once per call inside `assign_embeddings`.
   post_plda: &'a [f64],
   /// Per-row dimensionality of [`Self::post_plda`] (i.e. PLDA
   /// projected feature width).

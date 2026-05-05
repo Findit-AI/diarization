@@ -84,15 +84,15 @@ ort = ["dep:ort"]
 # (MIT — see NOTICE for attribution).
 bundled-segmentation = ["ort"]
 # Alternative embedding inference backend via tch (libtorch C++ bindings).
-# Off by default — pulls in libtorch (≈600 MB shared library) and
+# Off by default — pulls in libtorch (~600 MB shared library) and
 # typically requires `LIBTORCH` env var pointing at a libtorch install.
 # Enables a TorchScript backend for the WeSpeaker embedding model that
 # matches pyannote's PyTorch inference bit-exactly on hard cases (e.g.
 # heavy-overlap fixtures where ONNX→ORT diverges by O(1) per element).
-# When ON, callers can construct via `EmbedModel::from_torchscript_file`
-# in addition to the existing `from_file` (ONNX). See
-# `scripts/export-wespeaker-torchscript.py` for the model export step.
+# When on, callers can construct via `EmbedModel::from_torchscript_file`
+# in addition to the existing `from_file` (ONNX).
 tch = ["dep:tch"]
+
 # ─── ONNX Runtime execution providers ─────────────────────────────────
 # Each `*` feature pulls in the matching `ort` execution provider.
 # All are off by default; the default ort dispatch runs on CPU.
@@ -136,42 +136,20 @@ gpu = [
   "rocm",
   "webgpu",
 ]
-# Pulls in the sister `silero` crate (path dep at `../silero/`) as an
-# optional dependency, used only by the `run_streaming_pipeline` example
-# to drive VAD externally. The crate's lib + non-streaming examples do
-# NOT depend on silero, so a clean checkout can `cargo build` /
-# `cargo test --no-default-features --features ort` without the sibling
-# directory present. Enable this feature when building the streaming
-# example or developing with VAD in scope. Codex review CRITICAL: prior
-# `silero = { path = "../silero" }` as a non-optional dep broke clean
-# CI checkouts whenever `../silero/` wasn't materialized alongside.
+# Pulls in the sister `silero` crate (`../silero/`) as an optional
+# dependency, used only by the `run_streaming_pipeline` example to
+# drive VAD externally. The crate's lib + non-streaming examples do
+# NOT depend on silero, so a clean checkout without `../silero/`
+# materialized still builds. Enable this feature when building the
+# streaming example or developing with VAD in scope.
 silero-vad = ["dep:silero"]
+
 # Internal feature for benchmarks. Exposes pub(crate) modules
 # (`vbx`, `ahc`, `centroid`, `pipeline`, `reconstruct`, `hungarian`,
 # `plda`) as `pub` so external benches in `benches/*.rs` can call the
 # inner kernels directly. Not part of the public API contract — the
-# `_` prefix marks it as private; downstream callers should reach the
-# pipeline via `Diarizer` once Phase 5c integration lands.
+# `_` prefix marks it as private.
 _bench = []
-# An earlier revision exposed `diarization::plda::RawEmbedding::from_raw_array`
-# and `diarization::plda::PostXvecEmbedding::from_pyannote_capture` behind a
-# public `plda-fixtures` feature, intending it to act as the gate that
-# kept distribution-invariant constructors out of production code.
-# Cargo features are unified across the dep graph though, so any crate
-# in the build (including parity tooling and offline scripts) enabling
-# `plda-fixtures` would have re-exposed those constructors for the
-# entire compile, collapsing the type-level guard. Codex review
-# MEDIUM. The constructors are now `#[cfg(test)] pub(crate)` and the
-# parity test lives inside the crate as a `#[cfg(test)]` module so it
-# can still construct via the internal API. Production integration
-# (Phase 5+) will own a single typed entry from `EmbedModel`.
-# `std` is now unconditional. The crate uses std/alloc throughout
-# (`Vec`, `HashMap`, `kaldi-native-fbank` C bindings, `nalgebra`'s
-# default `std` feature, etc.); the previous `#![no_std]` toggle was
-# advertised but never actually compiled. Codex review HIGH —
-# `cargo check --no-default-features` failed with 47 errors before.
-# If a future Sans-I/O / `alloc`-only mode is wanted, it will need a
-# real audit of the dependency set, not just a feature flag.
 
 [dependencies]
 mediatime = "0.1"
@@ -179,79 +157,72 @@ thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
 tch = { version = "0.24", optional = true }
 
-# New in v0.1.0 phase 2 (spec §7).
 kaldi-native-fbank = "0.1"
 nalgebra = "0.34"
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
 
-# Phase 3: constrained Hungarian assignment.
+# Constrained Hungarian assignment.
 ordered-float = "5.3"
 pathfinding = "4.15"
 
-# Phase 4: AHC initialization (centroid-method linkage).
+# AHC initialization (centroid-method linkage).
 kodama = "0.3"
 
-# Phase 5: integer→decimal-string rendering for pyannote's
+# Allocation-free integer→decimal-string rendering for pyannote's
 # `Annotation.labels()` lex-sort (cluster id → SPEAKER_NN label
-# remapping in RTTM emission). itoa::Buffer is a [u8; 40] stack
-# buffer — allocation-free.
+# remapping in RTTM emission).
 itoa = "1"
 
-# Spill backend (round-28 of adversarial review): the AHC pdist /
-# reconstruct grid / aggregate frame buffers cross 256 MB on
-# pathological inputs. `SpillVec<T>` falls back to file-backed mmap
-# above the configurable threshold so the same inputs succeed at
-# the cost of disk I/O instead of OOM-aborting the
-# `Result`-returning pipeline. See `src/ops/spill.rs`.
+# Spill backend: AHC pdist / reconstruct grid / aggregate frame
+# buffers cross 256 MB on pathological inputs. The spill module
+# falls back to file-backed mmap above the configurable threshold
+# so the same inputs succeed at the cost of disk I/O instead of
+# OOM-aborting the `Result`-returning pipeline. See
+# `src/ops/spill.rs`.
 memmapix = "0.9"
 bytemuck = "1"
 tempfile = "3"
 # Cross-platform `File::allocate` for the spill backend
 # (`posix_fallocate` on Linux, `F_PREALLOCATE` on macOS,
 # `SetFileValidData`/`SetEndOfFile` on Windows). Reserves disk blocks
-# before mmap so writes through the mapping cannot SIGBUS on
-# ENOSPC. Used in `ops::spill::SpillBytesMut::new_mmap`.
+# before mmap so writes through the mapping cannot `SIGBUS` on
+# `ENOSPC`.
 fs4 = "1"
+
 # `rustix::fs::OFlags::TMPFILE` on Linux/Android: the spill backend
 # opens an anonymous (never-linked) tempfile so there is no race
 # window between create + unlink for a same-UID process to grab a
 # writable fd. `tempfile`'s Linux fast path also tries `O_TMPFILE`
 # but silently falls back to `mkstemp + unlink` on filesystems
 # without support — we want to surface that as a typed error
-# instead. `rustix` is already in the dep graph transitively via
-# `tempfile` / `fs4`, so promoting it to a direct dependency adds
-# no compile-time cost while letting us avoid a separate `libc`
-# import.
+# instead.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
-# IMPORTANT: any deps below must be cross-platform. The
-# `[target.'cfg(...)']` table above ONLY covers `rustix`; `silero` /
-# `serde` / `humantime-serde` belong under the regular `[dependencies]`
-# block so they remain available on macOS/Windows. (Codex review HIGH:
-# they were briefly placed inside the target-specific block, which
-# silently scoped them Linux/Android-only and broke `serde` and
-# `silero-vad` feature builds elsewhere.)
+# Cross-platform optional deps below. They MUST stay outside the
+# `[target.'cfg(...)']` block above — that block scopes its entries
+# to Linux/Android only.
+
+# Sister `silero` crate (VAD for streaming voice-range detection).
+# Used by the `run_streaming_pipeline` example; the lib + offline
+# examples do not depend on it, so a clean checkout can build
+# without `../silero/` materialized. Enable via
+# `--features silero-vad`.
 [dependencies.silero]
-# Phase 5e: silero VAD for streaming voice-range detection. Sister
-# project at `findit-studio/silero` (path dep until both publish to
-# the same registry). Optional + feature-gated so clean checkouts
-# without `../silero/` materialized still build the lib (Codex review
-# CRITICAL). Enable via `--features silero-vad`.
 version = "0.3"
 optional = true
 
+# `serde` impls for the public `*Options` / `*Config` types so
+# callers can persist diarization configuration.
 [dependencies.serde]
-# Optional `serde` support for `*Options` / `*Config` types. Gated
-# behind `feature = "serde"`.
 version = "1"
 optional = true
 features = ["derive"]
 
-[dependencies.humantime-serde]
 # Provides the "humantime" string format ("250ms", "1.5s") for
-# `Duration` fields — same convention as the sister `silero` crate.
+# `Duration` fields when the `serde` feature is on.
+[dependencies.humantime-serde]
 version = "1"
 optional = true
 
@@ -260,7 +231,7 @@ optional = true
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
-# `diarization::plda` parity tests load Phase-0 captured `.npz` artifacts.
+# `diarization::plda` parity tests load captured `.npz` artifacts.
 # Production code embeds the PLDA weights via `include_bytes!` and
 # does not depend on npyz.
 npyz = { version = "0.9", features = ["npz"] }
