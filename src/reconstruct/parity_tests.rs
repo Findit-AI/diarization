@@ -3,7 +3,7 @@
 
 use std::{fs::File, io::BufReader, path::PathBuf};
 
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 use npyz::npz::NpzArchive;
 
 use crate::{
@@ -139,10 +139,9 @@ fn run_reconstruct_parity(fixture_dir: &str) {
 
   let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
-  let num_train = post_plda_shape[0] as usize;
+  let _num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
-  let post_plda_dm = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
-  let post_plda = post_plda_dm.as_slice();
+  let post_plda: &[f64] = &post_plda_flat;
   let (phi_flat, _) = read_npz_array::<f64>(&plda_path, "phi");
   let phi = DVector::<f64>::from_vec(phi_flat);
   let (chunk_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_chunk_idx");
@@ -279,10 +278,9 @@ fn run_reconstruct_parity_with_tolerance(fixture_dir: &str, max_mismatch_frac: f
 
   let plda_path = fixture(&format!("{base}/plda_embeddings.npz"));
   let (post_plda_flat, post_plda_shape) = read_npz_array::<f64>(&plda_path, "post_plda");
-  let num_train = post_plda_shape[0] as usize;
+  let _num_train = post_plda_shape[0] as usize;
   let plda_dim = post_plda_shape[1] as usize;
-  let post_plda_dm = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
-  let post_plda = post_plda_dm.as_slice();
+  let post_plda: &[f64] = &post_plda_flat;
   let (phi_flat, _) = read_npz_array::<f64>(&plda_path, "phi");
   let phi = DVector::<f64>::from_vec(phi_flat);
   let (chunk_idx_i64, _) = read_npz_array::<i64>(&plda_path, "train_chunk_idx");

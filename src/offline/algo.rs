@@ -653,11 +653,13 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
 
   // ── Stage 3: PLDA project active embeddings ────────────────────
   //
-  // Spill-backed, **column-major** layout matching `nalgebra::DMatrix`'s
-  // storage convention: `data[d * num_train + i]` for row `i`, column
-  // `d`. Downstream `assign_embeddings` reconstructs a
-  // `nalgebra::DMatrixView` over this slice for the VBx GEMM call,
-  // so the column-major layout is mandatory for bit-equal numerics.
+  // Spill-backed, **row-major** layout (`data[i * plda_dim + d]`) —
+  // numpy/pyannote's natural C-order convention and the contract of
+  // [`AssignEmbeddingsInput::post_plda`]. The pipeline transposes
+  // into a column-major spill region internally for the VBx GEMM
+  // call site; the row-major boundary keeps the layout intent
+  // unambiguous from any producer (numpy, row-wise Rust code, this
+  // module) without an untyped layout footgun.
   let plda_dim = plda.phi().len();
   let post_plda_len = num_train
     .checked_mul(plda_dim)
@@ -676,9 +678,10 @@ pub fn diarize_offline(input: &OfflineInput<'_>) -> Result<OfflineOutput, Error>
       arr.copy_from_slice(&raw_embeddings[base..base + EMBEDDING_DIM]);
       let raw = RawEmbedding::from_raw_array(arr)?;
       let projected = plda.project(&raw)?;
+      let row_dst = &mut storage[i * plda_dim..(i + 1) * plda_dim];
       for (d, v) in projected.iter().enumerate() {
-        // Column-major write: column `d`, row `i`.
-        storage[d * num_train + i] = *v;
+        // Row-major write: row `i`, column `d`.
+        row_dst[d] = *v;
       }
     }
   }

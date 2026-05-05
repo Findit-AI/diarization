@@ -90,15 +90,20 @@ pub struct AssignEmbeddingsInput<'a> {
   num_speakers: usize,
   segmentations: &'a [f64],
   num_frames: usize,
-  /// Post-PLDA features for the active training subset, **column-
-  /// major** flat layout matching nalgebra's `DMatrix` storage:
-  /// `data[d * num_train + i]` for entry at row `i`, column `d`.
+  /// Post-PLDA features for the active training subset, **row-major**
+  /// flat layout `[i][d]` (numpy/pyannote default `C`-order):
+  /// `data[i * plda_dim + d]` for entry at row `i`, column `d`.
   /// Length must equal `num_train * plda_dim`.
   ///
   /// Backed by anything that exposes `&[f64]` — heap `Vec<f64>` or
-  /// spill-backed `SpillBytes<f64>`. Internally reconstructed as a
-  /// `nalgebra::DMatrixView` for the VBx GEMM call site, so the
-  /// nalgebra column-major layout convention is mandatory.
+  /// spill-backed `SpillBytes<f64>`. The pipeline transposes this
+  /// into a separate column-major spill region before constructing
+  /// the `nalgebra::DMatrixView` that VBx's GEMM call site consumes.
+  /// Earlier revisions exposed this slice as column-major directly,
+  /// but a row-major caller (numpy, row-wise Rust code) silently
+  /// produced wrong responsibilities — the typed boundary is now
+  /// row-major to match the natural producer convention, with the
+  /// transpose paid once per call inside `assign_embeddings`.
   post_plda: &'a [f64],
   /// Per-row dimensionality of [`Self::post_plda`] (i.e. PLDA
   /// projected feature width).
@@ -132,7 +137,8 @@ impl<'a> AssignEmbeddingsInput<'a> {
   /// - `segmentations`: per-`(chunk, frame, speaker)` activity flattened
   ///   `[c][f][s]`. Length `num_chunks * num_frames * num_speakers`.
   /// - `post_plda`: post-PLDA features for the active training subset,
-  ///   shape `(num_train, plda_dim)`.
+  ///   shape `(num_train, plda_dim)`, **row-major** flat layout
+  ///   (`data[i * plda_dim + d]`).
   /// - `phi`: eigenvalue diagonal (length `plda_dim`).
   /// - `train_chunk_idx` / `train_speaker_idx`: row-major active
   ///   indices, length `num_train`.
@@ -393,6 +399,19 @@ pub fn assign_embeddings(
   if phi.len() != plda_dim {
     return Err(ShapeError::PhiPldaDimMismatch.into());
   }
+  // Validate `post_plda` is entirely finite *before* any expensive
+  // allocation. `vbx_iterate` itself rejects non-finite `x`, but only
+  // after `assign_embeddings` has built `train_embeddings`, the
+  // L2-normalized AHC matrix, the O(num_train²) condensed pdist, and
+  // run linkage. A single NaN/`±inf` in `post_plda` near the train
+  // cap would burn substantial spill disk + CPU before surfacing a
+  // typed input error. Pull the check forward to fail fast with the
+  // same `NonFiniteField::PostPlda` error regardless of input scale.
+  for &v in post_plda {
+    if !v.is_finite() {
+      return Err(NonFiniteField::PostPlda.into());
+    }
+  }
   // Validate train indices stay within bounds — out-of-range silently
   // poisons centroid math by reading garbage embeddings.
   for i in 0..num_train {
@@ -566,14 +585,39 @@ pub fn assign_embeddings(
     );
   }
   let qinit = build_qinit(&ahc_clusters, num_init);
-  // Reconstruct a column-major nalgebra view over the spill-backed
-  // `post_plda` slice for VBx's GEMM call sites. The slice layout
-  // matches `nalgebra::DMatrix`'s storage convention
-  // (`data[d * num_train + i]`), so this is a zero-copy view —
-  // `gamma.transpose() * &rho` inside `vbx_iterate` will dispatch
-  // through the same matrixmultiply backend with bit-identical
-  // numerics.
-  let post_plda_view = nalgebra::DMatrixView::from_slice(post_plda, num_train, plda_dim);
+  // Transpose the row-major caller buffer into a column-major spill
+  // region so we can hand a `nalgebra::DMatrixView::from_slice` to
+  // `vbx_iterate`. nalgebra's `DMatrix` is column-major, so the view
+  // expects `data[d * num_train + i]`; the caller-facing API takes
+  // row-major (`data[i * plda_dim + d]`) to match numpy/pyannote's
+  // C-order convention. A previous revision reinterpreted the raw
+  // slice directly without a layout marker — a row-major caller
+  // silently produced wrong responsibilities.
+  //
+  // The transpose is a single O(num_train · plda_dim) pass; at the
+  // production cap (`num_train ≤ MAX_AHC_TRAIN = 32_000`,
+  // `plda_dim = 128`) that is ~32 MB of spill-backed write, sub-ms
+  // wall time. We allocate the column-major buffer through
+  // `SpillBytesMut` so a multi-hour stream that crosses the
+  // `SpillOptions::threshold_bytes` boundary keeps the typed
+  // `SpillError` path instead of OOM-aborting on the heap.
+  let post_plda_col_len = num_train
+    .checked_mul(plda_dim)
+    .ok_or(ShapeError::PostPldaRowMismatch)?;
+  let mut post_plda_col_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(post_plda_col_len, &input.spill_options)?;
+  {
+    let dst = post_plda_col_buf.as_mut_slice();
+    for i in 0..num_train {
+      let src_row = &post_plda[i * plda_dim..(i + 1) * plda_dim];
+      for (d, &v) in src_row.iter().enumerate() {
+        dst[d * num_train + i] = v;
+      }
+    }
+  }
+  let post_plda_col = post_plda_col_buf.freeze();
+  let post_plda_view =
+    nalgebra::DMatrixView::from_slice(post_plda_col.as_slice(), num_train, plda_dim);
   let vbx_out = vbx_iterate(post_plda_view, phi, &qinit, fa, fb, max_iters)?;
   if vbx_out.stop_reason() == StopReason::MaxIterationsReached {
     // Pyannote silently accepts max_iters reached — it's the common

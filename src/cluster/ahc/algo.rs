@@ -107,7 +107,14 @@ pub fn ahc_init(
     return Ok(vec![0]);
   }
 
-  let normed_row_major = l2_normalize_to_row_major(embeddings, n, d);
+  // L2-normalize → row-major flat buffer, spill-backed via
+  // `SpillBytesMut`. At the documented `MAX_AHC_TRAIN = 32_000`
+  // cap with `embed_dim = 256`, the normalized matrix is
+  // `32_000 * 256 * 8 ≈ 65 MB` — same data-bearing scale as
+  // `train_embeddings` and worth the spill route so a multi-hour
+  // input crossing `SpillOptions::threshold_bytes` keeps the
+  // typed `SpillError` instead of OOM-aborting on the heap path.
+  let normed_row_major = l2_normalize_to_row_major(embeddings, n, d, spill_options)?;
   // Scalar pdist on every architecture. AHC is the one place in the
   // cluster_vbx pipeline where SIMD determinism actually matters:
   // the dendrogram cut is a hard `<= threshold` decision, so a pair
@@ -136,40 +143,53 @@ pub fn ahc_init(
   // hands out for both backends without copying.
   let pair_count = crate::ops::scalar::pair_count(n);
   let mut cond = crate::ops::spill::SpillBytesMut::<f64>::zeros(pair_count, spill_options)?;
-  crate::ops::scalar::pdist_euclidean_into(&normed_row_major, n, d, cond.as_mut_slice());
+  crate::ops::scalar::pdist_euclidean_into(normed_row_major.as_slice(), n, d, cond.as_mut_slice());
   let dend = linkage(cond.as_mut_slice(), n, Method::Centroid);
 
   Ok(fcluster_distance_remap(dend.steps(), n, threshold))
 }
 
-/// Pack the row-wise L2-normalized embeddings into a row-major flat
-/// buffer in a single pass. nalgebra's `DMatrix` is column-major, and
-/// [`crate::ops::pdist_euclidean`] (and its eventual SIMD backend)
-/// wants a contiguous row-major slice — so we fuse the normalize +
-/// transpose into one allocation.
+/// Pack the row-wise L2-normalized embeddings into a spill-backed
+/// row-major flat buffer in a single pass. The output is the same
+/// data-bearing scale as the input `embeddings` slice (`n * d` f64),
+/// so production-scale inputs route through `SpillBytesMut` here too
+/// — a heap `Vec` would defeat the spill plumbing the caller paid
+/// for in `train_embeddings`.
+///
+/// [`crate::ops::pdist_euclidean`] consumes the result via the read-
+/// only `&[f64]` returned by `SpillBytes::as_slice()`.
 ///
 /// Caller has already rejected zero-norm rows AND non-finite squared
 /// norms (overflow). Both invariants are debug-asserted here as a
 /// defense-in-depth check; production passes through unchanged.
-fn l2_normalize_to_row_major(m: &[f64], n: usize, d: usize) -> Vec<f64> {
-  let mut out = Vec::with_capacity(n * d);
-  for r in 0..n {
-    let row = &m[r * d..(r + 1) * d];
-    let mut sq = 0.0;
-    for &v in row {
-      sq += v * v;
-    }
-    debug_assert!(
-      sq.is_finite() && sq > 0.0,
-      "l2_normalize_to_row_major: caller must reject non-finite/zero \
-       squared norms (row {r}: sq = {sq})"
-    );
-    let inv_norm = sq.sqrt().recip();
-    for &v in row {
-      out.push(v * inv_norm);
+fn l2_normalize_to_row_major(
+  m: &[f64],
+  n: usize,
+  d: usize,
+  spill_options: &crate::ops::spill::SpillOptions,
+) -> Result<crate::ops::spill::SpillBytes<f64>, crate::ops::spill::SpillError> {
+  let mut out = crate::ops::spill::SpillBytesMut::<f64>::zeros(n * d, spill_options)?;
+  {
+    let dst = out.as_mut_slice();
+    for r in 0..n {
+      let row = &m[r * d..(r + 1) * d];
+      let mut sq = 0.0;
+      for &v in row {
+        sq += v * v;
+      }
+      debug_assert!(
+        sq.is_finite() && sq > 0.0,
+        "l2_normalize_to_row_major: caller must reject non-finite/zero \
+         squared norms (row {r}: sq = {sq})"
+      );
+      let inv_norm = sq.sqrt().recip();
+      let row_dst = &mut dst[r * d..(r + 1) * d];
+      for (i, &v) in row.iter().enumerate() {
+        row_dst[i] = v * inv_norm;
+      }
     }
   }
-  out
+  Ok(out.freeze())
 }
 
 /// `fcluster(criterion="distance", t=threshold)` followed by

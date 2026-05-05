@@ -561,3 +561,106 @@ mod ahc_train_cap_tests {
     );
   }
 }
+
+/// Codex F3 regression: a NaN/`±inf` in `post_plda` must surface as
+/// `NonFiniteField::PostPlda` *before* `assign_embeddings` allocates
+/// `train_embeddings`, builds the L2-normalized AHC matrix, computes
+/// the O(num_train²) condensed pdist, or runs linkage. Previously the
+/// non-finite value was caught only inside `vbx_iterate`, after all
+/// of that work — the early gate keeps the failure mode bounded
+/// regardless of input scale.
+#[cfg(test)]
+mod post_plda_finiteness_early_gate {
+  use super::*;
+  use crate::pipeline::error::NonFiniteField;
+
+  /// Build the smallest valid `assign_embeddings` input that drives
+  /// AHC (`num_train >= 2`) and has well-formed shapes/finiteness on
+  /// every other field. The only non-finite value sits in `post_plda`
+  /// — the gate must reject before AHC runs.
+  fn input_with_nonfinite_post_plda(
+    post_plda: &[f64],
+  ) -> (Vec<f64>, Vec<f64>, DVector<f64>, Vec<usize>, Vec<usize>) {
+    let num_chunks = 1;
+    let num_speakers = 3; // MAX_SPEAKER_SLOTS = 3
+    let num_frames = 4;
+    let embed_dim = 2;
+    // Distinct embeddings so the train rows have non-zero L2 norm.
+    let embeddings: Vec<f64> = (0..num_chunks * num_speakers * embed_dim)
+      .map(|i| (i + 1) as f64)
+      .collect();
+    let segmentations: Vec<f64> = vec![0.5; num_chunks * num_frames * num_speakers];
+    let phi = DVector::<f64>::from_element(post_plda.len() / 2, 1.0);
+    let train_chunk_idx = vec![0_usize, 0_usize];
+    let train_speaker_idx = vec![0_usize, 1_usize];
+    (
+      embeddings,
+      segmentations,
+      phi,
+      train_chunk_idx,
+      train_speaker_idx,
+    )
+  }
+
+  #[test]
+  fn rejects_nan_in_post_plda_before_ahc() {
+    let plda_dim = 2;
+    let num_train = 2;
+    let mut post_plda = vec![0.1; num_train * plda_dim];
+    post_plda[1] = f64::NAN; // single poison cell
+    let (embeddings, segmentations, phi, train_chunk_idx, train_speaker_idx) =
+      input_with_nonfinite_post_plda(&post_plda);
+    let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      2,
+      1,
+      3,
+      &segmentations,
+      4,
+      &post_plda,
+      plda_dim,
+      &phi,
+      &train_chunk_idx,
+      &train_speaker_idx,
+    );
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::NonFinite(NonFiniteField::PostPlda))
+      ),
+      "expected NonFinite(PostPlda), got {r:?}"
+    );
+  }
+
+  #[test]
+  fn rejects_pos_inf_in_post_plda_before_ahc() {
+    let plda_dim = 2;
+    let num_train = 2;
+    let mut post_plda = vec![0.1; num_train * plda_dim];
+    post_plda[3] = f64::INFINITY;
+    let (embeddings, segmentations, phi, train_chunk_idx, train_speaker_idx) =
+      input_with_nonfinite_post_plda(&post_plda);
+    let input = AssignEmbeddingsInput::new(
+      &embeddings,
+      2,
+      1,
+      3,
+      &segmentations,
+      4,
+      &post_plda,
+      plda_dim,
+      &phi,
+      &train_chunk_idx,
+      &train_speaker_idx,
+    );
+    let r = assign_embeddings(&input);
+    assert!(
+      matches!(
+        r,
+        Err(crate::pipeline::Error::NonFinite(NonFiniteField::PostPlda))
+      ),
+      "expected NonFinite(PostPlda), got {r:?}"
+    );
+  }
+}

@@ -155,4 +155,9 @@ pub enum NonFiniteField {
   Embeddings,
   #[error("segmentations")]
   Segmentations,
+  /// `post_plda` had a NaN/`±inf` entry. Validated upfront in
+  /// `assign_embeddings` so the failure surfaces before the
+  /// `train_embeddings` / AHC / pdist allocations.
+  #[error("post_plda")]
+  PostPlda,
 }
