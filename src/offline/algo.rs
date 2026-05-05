@@ -113,8 +113,9 @@ pub enum ShapeError {
 // no longer allocate hundreds of MB of contiguous heap:
 //   * `embeddings`           — `(num_chunks * num_speakers, embed_dim)`
 //     f64, row-major flat → `SpillBytes<f64>` (built below)
-//   * `post_plda`            — `(num_train, plda_dim)` f64, column-major
-//     flat → `SpillBytes<f64>` (built below)
+//   * `post_plda`            — `(num_train, plda_dim)` f64, row-major
+//     flat → `SpillBytes<f64>` (built below). The pipeline transposes
+//     into a column-major spill region internally for VBx's GEMM.
 //   * `train_embeddings`     — `(num_train, embed_dim)` f64, row-major
 //     flat → `SpillBytes<f64>` (built inside `assign_embeddings`)
 //   * AHC pdist condensed    — `n*(n-1)/2` f64 → `SpillBytesMut`
