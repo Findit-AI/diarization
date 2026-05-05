@@ -88,7 +88,7 @@ pub enum StreamingError {
   /// through the infallible `count_pyannote` wrapper.
   #[error("streaming: aggregate: {0}")]
   Aggregate(#[from] crate::aggregate::Error),
-  /// Propagated from `crate::ops::spill::SpillVec::zeros` when the
+  /// Propagated from `crate::ops::spill::SpillBytesMut::zeros` when the
   /// per-range or concatenated scratch buffers cannot be allocated.
   /// At multi-hour scale these cross the 256 MiB default threshold
   /// and route through the file-backed mmap path; this surfaces
@@ -162,7 +162,7 @@ pub struct StreamingOfflineOptions {
   /// [`SpillOptions::default`]. Passed by reference into
   /// [`crate::aggregate::try_count_pyannote`] (per-range counts) and
   /// the constructed [`OfflineInput`] / [`ReconstructInput`] so every
-  /// transitive [`crate::ops::spill::SpillVec::zeros`] call honors
+  /// transitive [`crate::ops::spill::SpillBytesMut::zeros`] call honors
   /// it — no process-global side-effects.
   #[cfg_attr(feature = "serde", serde(default))]
   spill_options: SpillOptions,
@@ -271,11 +271,11 @@ struct AccumulatedRange {
   /// SLOTS_PER_CHUNK`. f64 to match pyannote internals. Spill-backed
   /// so very long voice ranges (multi-hour single utterance) don't
   /// OOM the heap; small ranges stay heap-resident.
-  segmentations: crate::ops::spill::SpillVec<f64>,
+  segmentations: crate::ops::spill::SpillBytesMut<f64>,
   /// Per-(chunk, slot) raw f32 embeddings, flattened `[c][s][d]`.
   /// Length `num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM`.
   /// Spill-backed for the same reason as `segmentations`.
-  raw_embeddings: crate::ops::spill::SpillVec<f32>,
+  raw_embeddings: crate::ops::spill::SpillBytesMut<f32>,
   /// Per-output-frame instantaneous speaker count, computed by
   /// `aggregate::count_pyannote` on this range's segmentations.
   /// `Arc<[u8]>` to avoid a copy from `count_pyannote`'s output;
@@ -414,7 +414,7 @@ impl StreamingOfflineDiarizer {
     // `OwnedDiarizationPipeline::run` for the same pattern.
     let segs_len = num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
     let mut segmentations =
-      crate::ops::spill::SpillVec::<f64>::zeros(segs_len, &self.options.spill_options)?;
+      crate::ops::spill::SpillBytesMut::<f64>::zeros(segs_len, &self.options.spill_options)?;
     {
       let segs = segmentations.as_mut_slice();
 
@@ -452,7 +452,7 @@ impl StreamingOfflineDiarizer {
     // ── Stage 2: per-(chunk, slot) masked embedding ────────────────
     let emb_len = num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
     let mut raw_embeddings =
-      crate::ops::spill::SpillVec::<f32>::zeros(emb_len, &self.options.spill_options)?;
+      crate::ops::spill::SpillBytesMut::<f32>::zeros(emb_len, &self.options.spill_options)?;
     {
       let segs = segmentations.as_mut_slice();
       let embs = raw_embeddings.as_mut_slice();
@@ -594,9 +594,9 @@ impl StreamingOfflineDiarizer {
     let total_segs_len = total_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
     let total_emb_len = total_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
     let mut all_segs =
-      crate::ops::spill::SpillVec::<f64>::zeros(total_segs_len, &self.options.spill_options)?;
+      crate::ops::spill::SpillBytesMut::<f64>::zeros(total_segs_len, &self.options.spill_options)?;
     let mut all_emb =
-      crate::ops::spill::SpillVec::<f32>::zeros(total_emb_len, &self.options.spill_options)?;
+      crate::ops::spill::SpillBytesMut::<f32>::zeros(total_emb_len, &self.options.spill_options)?;
     {
       let segs = all_segs.as_mut_slice();
       let embs = all_emb.as_mut_slice();
@@ -614,8 +614,10 @@ impl StreamingOfflineDiarizer {
 
     // ── 2. Concatenate count tensors (per-range adjacent in output) ─
     let total_output_frames: usize = self.ranges.iter().map(|r| r.count.len()).sum();
-    let mut all_count =
-      crate::ops::spill::SpillVec::<u8>::zeros(total_output_frames, &self.options.spill_options)?;
+    let mut all_count = crate::ops::spill::SpillBytesMut::<u8>::zeros(
+      total_output_frames,
+      &self.options.spill_options,
+    )?;
     {
       let buf = all_count.as_mut_slice();
       let mut off = 0;

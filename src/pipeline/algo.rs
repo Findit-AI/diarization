@@ -50,7 +50,7 @@ pub const MAX_QINIT_CELLS: usize = 5_000_000;
 /// distance work itself becomes user-perceptible (multi-second on
 /// modern CPUs at `embed_dim = 256`). The 4 GB allocation is safe
 /// because the pdist condensed buffer routes through
-/// `crate::ops::spill::SpillVec`, which falls back to file-backed
+/// `crate::ops::spill::SpillBytesMut`, which falls back to file-backed
 /// mmap above `SpillOptions::threshold_bytes` (default 256 MiB).
 /// The kernel pages cold rows out via the mmap'd tempfile rather
 /// than RAM+swap.
@@ -83,7 +83,7 @@ pub struct AssignEmbeddingsInput<'a> {
   max_iters: usize,
   /// Spill backend configuration. [`assign_embeddings`] passes this
   /// by reference to [`crate::cluster::ahc::ahc_init`], whose pdist
-  /// [`crate::ops::spill::SpillVec::zeros`] call honors it. Defaults
+  /// [`crate::ops::spill::SpillBytesMut::zeros`] call honors it. Defaults
   /// to [`SpillOptions::default`].
   spill_options: SpillOptions,
 }

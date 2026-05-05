@@ -93,7 +93,7 @@ pub struct OwnedPipelineOptions {
   /// [`SpillOptions::default`] (256 MiB heap threshold,
   /// [`std::env::temp_dir`] spill directory).
   /// [`OwnedDiarizationPipeline::run`] passes this by reference to
-  /// every [`crate::ops::spill::SpillVec::zeros`] reached transitively
+  /// every [`crate::ops::spill::SpillBytesMut::zeros`] reached transitively
   /// (AHC pdist, reconstruct grids, count buffers), so per-call
   /// configuration is local — no process-global side-effects.
   #[cfg_attr(feature = "serde", serde(default))]
@@ -441,11 +441,11 @@ impl OwnedDiarizationPipeline {
     // `segmentations` and `raw_embeddings` scale with audio length:
     // `segmentations` ≈ 50 MB / hour (f64), `raw_embeddings` ≈ 11 MB /
     // hour (f32). Multi-hour recordings cross the 256 MiB default
-    // spill threshold; route through `SpillVec` so the heap path is
+    // spill threshold; route through `SpillBytesMut` so the heap path is
     // bounded and large allocations fall back to file-backed mmap.
     let segs_len = num_chunks * FRAMES_PER_WINDOW * SLOTS_PER_CHUNK;
     let mut segmentations =
-      crate::ops::spill::SpillVec::<f64>::zeros(segs_len, cfg.spill_options())?;
+      crate::ops::spill::SpillBytesMut::<f64>::zeros(segs_len, cfg.spill_options())?;
     let segs = segmentations.as_mut_slice();
 
     for c in 0..num_chunks {
@@ -486,7 +486,7 @@ impl OwnedDiarizationPipeline {
     // ── Stage 2: per-(chunk, slot) masked embedding ────────────────
     let emb_len = num_chunks * SLOTS_PER_CHUNK * EMBEDDING_DIM;
     let mut raw_embeddings =
-      crate::ops::spill::SpillVec::<f32>::zeros(emb_len, cfg.spill_options())?;
+      crate::ops::spill::SpillBytesMut::<f32>::zeros(emb_len, cfg.spill_options())?;
     let embs = raw_embeddings.as_mut_slice();
 
     for c in 0..num_chunks {

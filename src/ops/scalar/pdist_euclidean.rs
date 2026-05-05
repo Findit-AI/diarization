@@ -35,7 +35,7 @@ pub fn pdist_euclidean(rows: &[f64], n: usize, d: usize) -> Vec<f64> {
 
 /// Same kernel as [`pdist_euclidean`], but writes into a caller-
 /// provided slice instead of allocating a `Vec`. Required by the
-/// AHC spill-buffer path: `crate::ops::spill::SpillVec<f64>` owns
+/// AHC spill-buffer path: `crate::ops::spill::SpillBytesMut<f64>` owns
 /// a `&mut [f64]` view that can route to either heap or
 /// file-backed mmap depending on `pair_count` and the configured
 /// [`SpillOptions`](crate::ops::spill::SpillOptions).

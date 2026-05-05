@@ -12,7 +12,7 @@ pub enum Error {
   Timing(#[from] TimingError),
   /// Failed to allocate a scratch buffer (`clustered`, `clustered_mask`,
   /// `aggregated`, `agg_mask`). The buffers route through
-  /// `crate::ops::spill::SpillVec`; on inputs whose grid sizes
+  /// `crate::ops::spill::SpillBytesMut`; on inputs whose grid sizes
   /// exceed `SpillOptions::threshold_bytes` (default 256 MiB), the
   /// allocation falls through to file-backed mmap, and tempfile /
   /// mmap failures surface here.

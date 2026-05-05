@@ -42,7 +42,7 @@ pub enum Error {
   /// `count_pyannote` wrapper used by the audio entrypoint.
   #[error("offline: aggregate: {0}")]
   Aggregate(#[from] crate::aggregate::Error),
-  /// Propagated from `crate::ops::spill::SpillVec::zeros` when the
+  /// Propagated from `crate::ops::spill::SpillBytesMut::zeros` when the
   /// per-call segmentation / embedding scratch buffers cannot be
   /// allocated (mmap failure on the spill backend, tempfile creation
   /// failure, size overflow). At multi-hour scale these buffers
@@ -157,7 +157,7 @@ pub struct OfflineInput<'a> {
   smoothing_epsilon: Option<f32>,
   /// Spill backend configuration. [`diarize_offline`] forwards it to
   /// the inner [`AssignEmbeddingsInput`] / [`ReconstructInput`], so
-  /// every transitive [`crate::ops::spill::SpillVec::zeros`] reached
+  /// every transitive [`crate::ops::spill::SpillBytesMut::zeros`] reached
   /// from this call sees the same options. Defaults to
   /// [`SpillOptions::default`].
   spill_options: SpillOptions,

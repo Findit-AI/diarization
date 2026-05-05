@@ -36,7 +36,7 @@ pub const MAX_COUNT_PER_FRAME: u8 = 64;
 /// mask, well above the realistic production envelope
 /// (`num_output_frames` bounded by audio duration, `num_clusters`
 /// typically 1–4). The big-allocation safety budget is delivered
-/// by `crate::ops::spill::SpillVec` — buffers above
+/// by `crate::ops::spill::SpillBytesMut` — buffers above
 /// `SpillOptions::threshold_bytes` (default 256 MiB) are
 /// file-backed via mmap rather than heap, so the cap represents a
 /// soft upper bound on disk space rather than an OOM cliff.
@@ -160,7 +160,7 @@ pub struct ReconstructInput<'a> {
   smoothing_epsilon: Option<f32>,
   /// Spill backend configuration. [`reconstruct`] passes this by
   /// reference to every per-cluster grid / mask
-  /// [`crate::ops::spill::SpillVec::zeros`] in its body. Defaults to
+  /// [`crate::ops::spill::SpillBytesMut::zeros`] in its body. Defaults to
   /// [`crate::ops::spill::SpillOptions::default`].
   spill_options: crate::ops::spill::SpillOptions,
 }
@@ -282,7 +282,7 @@ impl<'a> ReconstructInput<'a> {
     self.smoothing_epsilon
   }
   /// Spill backend configuration passed by reference to every
-  /// [`crate::ops::spill::SpillVec::zeros`] call inside
+  /// [`crate::ops::spill::SpillBytesMut::zeros`] call inside
   /// [`reconstruct`].
   pub const fn spill_options(&self) -> &crate::ops::spill::SpillOptions {
     &self.spill_options
@@ -595,14 +595,16 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   }
   // Spill-aware: `cs_size` reaches `MAX_RECONSTRUCT_GRID_CELLS = 1e8`
   // (~800 MB f64 + 100 MB u8 mask) at the cap. Routing through
-  // `SpillVec` lets the allocation fall back to file-backed mmap
+  // `SpillBytesMut` lets the allocation fall back to file-backed mmap
   // above `SpillOptions::threshold_bytes` (default 256 MiB) instead
   // of OOM-aborting. The mask migrates from `Vec<bool>` to
-  // `SpillVec<u8>` because `bool` is not `bytemuck::Pod`; we use
+  // `SpillBytesMut<u8>` because `bool` is not `bytemuck::Pod`; we use
   // `0u8` / `1u8` as the active flag (treated identically by the
   // downstream `mask[idx] == 1` check).
-  let mut clustered = crate::ops::spill::SpillVec::<f64>::zeros(cs_size, &input.spill_options)?;
-  let mut clustered_mask = crate::ops::spill::SpillVec::<u8>::zeros(cs_size, &input.spill_options)?;
+  let mut clustered =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(cs_size, &input.spill_options)?;
+  let mut clustered_mask =
+    crate::ops::spill::SpillBytesMut::<u8>::zeros(cs_size, &input.spill_options)?;
   let clustered = clustered.as_mut_slice();
   let clustered_mask = clustered_mask.as_mut_slice();
 
@@ -671,12 +673,12 @@ pub fn reconstruct(input: &ReconstructInput<'_>) -> Result<Arc<[f32]>, Error> {
   }
   // Same spill rationale as `clustered`/`clustered_mask` above:
   // `output_grid_size` reaches `MAX_RECONSTRUCT_GRID_CELLS` at the
-  // cap. `agg_mask` migrates from `Vec<bool>` to `SpillVec<u8>`
+  // cap. `agg_mask` migrates from `Vec<bool>` to `SpillBytesMut<u8>`
   // (0/1 sentinel; `bytemuck::Pod` requirement).
   let mut aggregated =
-    crate::ops::spill::SpillVec::<f32>::zeros(output_grid_size, &input.spill_options)?;
+    crate::ops::spill::SpillBytesMut::<f32>::zeros(output_grid_size, &input.spill_options)?;
   let mut agg_mask =
-    crate::ops::spill::SpillVec::<u8>::zeros(output_grid_size, &input.spill_options)?;
+    crate::ops::spill::SpillBytesMut::<u8>::zeros(output_grid_size, &input.spill_options)?;
   let aggregated = aggregated.as_mut_slice();
   let agg_mask = agg_mask.as_mut_slice();
 

@@ -40,7 +40,7 @@ use crate::reconstruct::SlidingWindow;
 
 /// Hard cap on `num_output_frames` accepted by the fallible aggregate
 /// APIs. The internal `aggregated` / `overlapping_count` buffers
-/// route through `crate::ops::spill::SpillVec`, so this cap is a
+/// route through `crate::ops::spill::SpillBytesMut`, so this cap is a
 /// soft upper bound rather than an OOM cliff: above
 /// `SpillOptions::threshold_bytes` (default 256 MiB) the buffers
 /// are file-backed via mmap.
@@ -69,7 +69,7 @@ pub enum Error {
   /// Failed to allocate a spill-backed scratch buffer (`aggregated`,
   /// `overlapping_count`). At the cap, each buffer reaches
   /// `MAX_OUTPUT_FRAMES = 1e8` f64 cells (~800 MB) and routes
-  /// through `crate::ops::spill::SpillVec`, so tempfile / mmap
+  /// through `crate::ops::spill::SpillBytesMut`, so tempfile / mmap
   /// failures surface here.
   #[error("aggregate: failed to allocate scratch buffer: {0}")]
   Spill(#[from] crate::ops::spill::SpillError),
@@ -407,7 +407,8 @@ pub fn try_hamming_aggregate(
   // Spill-backed scratch buffer for the aggregation (~800 MB at the
   // cap). The hamming weights buffer is small (`num_frames_per_chunk
   // ≤ ~1000` for realistic inputs) and stays on the heap.
-  let mut out_buf = crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
+  let mut out_buf =
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(num_output_frames, spill_options)?;
   let out = out_buf.as_mut_slice();
   let n_minus_1 = (num_frames_per_chunk - 1) as f64;
   let hamming: Vec<f64> = (0..num_frames_per_chunk)
@@ -441,7 +442,7 @@ pub fn try_hamming_aggregate(
   // return type (`Vec<f64>`). The aggregate work is the heavy
   // bit (kernel pages 800 MB through the pdist + hamming loop);
   // the final materialization to `Vec` allocates the same N cells
-  // on the heap. Future API: return `SpillVec<f64>` directly to
+  // on the heap. Future API: return `SpillBytesMut<f64>` directly to
   // eliminate this copy, but that's a public-signature change.
   Ok(out.to_vec())
 }
@@ -730,9 +731,9 @@ pub fn try_count_pyannote(
   // function (the final `Arc<[u8]>` count tensor is built from
   // these via the trusted-len iterator collect below).
   let mut aggregated_buf =
-    crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(num_output_frames, spill_options)?;
   let mut overlapping_count_buf =
-    crate::ops::spill::SpillVec::<f64>::zeros(num_output_frames, spill_options)?;
+    crate::ops::spill::SpillBytesMut::<f64>::zeros(num_output_frames, spill_options)?;
   let aggregated = aggregated_buf.as_mut_slice();
   let overlapping_count = overlapping_count_buf.as_mut_slice();
   for c in 0..num_chunks {
