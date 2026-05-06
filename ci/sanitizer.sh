@@ -5,18 +5,39 @@ export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
 TARGET="x86_64-unknown-linux-gnu"
 
+# Scope: SIMD module only (`src/ops/`).
+#
+# Every `unsafe` block in this crate's production source lives under
+# `src/ops/` (verified by `grep -rn "unsafe " src/ --include='*.rs'`):
+# the dispatchers route to `arch::*` SIMD kernels via `unsafe` calls,
+# and the kernels themselves use `core::arch::*` intrinsics behind
+# `pub(crate) unsafe fn`. The rest of the codebase is safe Rust, so
+# sanitizers add no signal there.
+#
+# `--no-default-features` skips `ort` (the default feature). `ort`
+# pulls C/C++ FFI (ort-sys) and `kaldi-native-fbank` (also C bindings
+# via the dev-dep transitive graph). Neither is sanitizer-instrumented,
+# so MSAN reports `use-of-uninitialized-value` inside them on every run.
+# Not our bug, not fixable in our code; scoping to `ops::` skips them.
+#
+# This is the same pattern siglip2's CI uses for its SIMD-only sanitizer
+# coverage.
+
 # Run address sanitizer
 RUSTFLAGS="-Z sanitizer=address" \
-cargo test --tests --target "$TARGET" --all-features
+cargo test --lib --target "$TARGET" --no-default-features ops::
 
 # Run leak sanitizer
 RUSTFLAGS="-Z sanitizer=leak" \
-cargo test --tests --target "$TARGET" --all-features
+cargo test --lib --target "$TARGET" --no-default-features ops::
 
 # Run memory sanitizer (requires -Zbuild-std for instrumented std)
 RUSTFLAGS="-Z sanitizer=memory" \
-cargo -Zbuild-std test --tests --target "$TARGET" --all-features
+cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features ops::
 
-# Run thread sanitizer (requires -Zbuild-std for instrumented std)
+# Run thread sanitizer (requires -Zbuild-std for instrumented std).
+# Note: `ops::*` has no concurrency primitives — TSAN is kept here for
+# symmetry and to catch any future regression that introduces shared
+# state. Cheap to run.
 RUSTFLAGS="-Z sanitizer=thread" \
-cargo -Zbuild-std test --tests --target "$TARGET" --all-features
+cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features ops::

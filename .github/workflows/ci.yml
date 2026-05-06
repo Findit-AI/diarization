@@ -55,26 +55,51 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Apply clippy lints
-      run: cargo hack clippy --each-feature --exclude-no-default-features
+      # Exclude `tch` (libtorch env-dep) from the each-feature sweep —
+      # it has its own dedicated CI job. `silero-vad` IS swept now
+      # that `silero` is a registry dep. The per-EP features
+      # (`coreml`/`cuda`/`tensorrt`/...) and the `gpu` meta-feature
+      # are also excluded: `each-feature` would build them
+      # individually but `ort-sys 2.0.0-rc.12`'s prebuilt
+      # `download-binaries` archives are CPU-only, so a vendor EP
+      # link step (e.g. webgpu) would fail to satisfy the link
+      # against a vendor lib that the runner does not provide.
+      # Per-EP coverage lives in the docs.rs metadata + a focused
+      # `ep-link-check` job below; the each-feature sweep stays
+      # bounded to the link-safe core features.
+      run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   # Run tests on some extra platforms
+  # Portability check: scalar-only build across the broad cross matrix.
+  # Default features (`ort`, `bundled-segmentation`) require native
+  # ONNX-Runtime linking and are not provisioned for wasm/WASI/riscv/etc.
+  # in this repo, so we build with `--no-default-features` here. ORT
+  # support on its supported targets is exercised by the `cross-ort`
+  # job below.
   cross:
-    name: cross
+    name: cross (scalar, --no-default-features)
     strategy:
       matrix:
+        # `wasm32-unknown-unknown` is intentionally excluded here:
+        # the transitive `getrandom 0.2` dep emits a `compile_error!`
+        # on that target unless the `js` feature is enabled, and
+        # browser-wasm is not a dia target. `wasm32-unknown-emscripten`
+        # is also excluded — emscripten is superseded by WASI for
+        # server-side wasm, and diarization-in-browser via emscripten
+        # is impractical (model size + ORT-WebAssembly is its own path).
+        # `i686-linux-android` is excluded because Google Play has
+        # required 64-bit since 2019; the `aarch64-linux-android` /
+        # `x86_64-linux-android` entries cover the live Android matrix.
         target:
           - aarch64-unknown-linux-gnu
           - aarch64-linux-android
           - aarch64-unknown-linux-musl
-          - i686-linux-android
           - x86_64-linux-android
           - i686-pc-windows-gnu
           - x86_64-pc-windows-gnu
           - i686-unknown-linux-gnu
           - powerpc64-unknown-linux-gnu
           - riscv64gc-unknown-linux-gnu
-          - wasm32-unknown-unknown
-          - wasm32-unknown-emscripten
           - wasm32-wasip1
           - wasm32-wasip1-threads
           - wasm32-wasip2
@@ -93,10 +118,208 @@ jobs:
             ${{ runner.os }}-cross-
       - name: Install Rust
         run: rustup update stable && rustup default stable
+      - name: Install mingw-w64 (windows-gnu targets)
+        # Transitive `windows-sys` builds via mingw's `dlltool` when
+        # cross-compiling to `*-pc-windows-gnu`. The Ubuntu runner does
+        # not ship it by default, so install on demand for those
+        # targets only. `gcc-mingw-w64` provides both i686 and x86_64
+        # toolchains in one package.
+        if: contains(matrix.target, 'pc-windows-gnu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64
+      - name: cargo build --target ${{ matrix.target }} --no-default-features
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --target ${{ matrix.target }} --no-default-features
+
+  # ORT-enabled build matrix. Restricted to the targets where the
+  # `ort` crate ships prebuilt binaries (or links cleanly against the
+  # system installation): native x86_64/aarch64 Linux/macOS/Windows.
+  # Triples that lack ORT provisioning live in the `cross` job above.
+  cross-ort:
+    name: cross (ort + bundled-segmentation)
+    strategy:
+      matrix:
+        # Targets where `ort-sys 2.0.0-rc.12` ships a prebuilt
+        # archive via `download-binaries`. Windows MSVC is covered
+        # by `cross-ort-windows-msvc` below — `x86_64-pc-windows-gnu`
+        # is intentionally excluded here because the upstream
+        # distribution table has only the MSVC archive, and a Linux
+        # runner cross-building to `windows-gnu` would surface a
+        # build-script error rather than validating ort.
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-ort-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-ort-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
       - name: cargo build --target ${{ matrix.target }}
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
+
+  # Windows-MSVC ort coverage — runs on `windows-latest` because
+  # `ort-sys 2.0.0-rc.12` ships a Windows MSVC archive (the GNU
+  # variant is not provided by the upstream distribution table).
+  cross-ort-windows-msvc:
+    name: cross (ort + bundled-segmentation) [windows-msvc]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-ort-msvc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-ort-msvc-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo build --target x86_64-pc-windows-msvc
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo build --target x86_64-pc-windows-msvc
+
+  # Per-EP **bindings** check (NOT link coverage). The cargo-hack
+  # feature sweeps above exclude every per-EP feature (and the
+  # `gpu` meta-feature) because `ort-sys 2.0.0-rc.12`'s
+  # `download-binaries` archive is CPU-only and cannot satisfy a
+  # vendor link step on the runner. `cargo check` does NOT link —
+  # it stops after type/borrow checking — so this job catches
+  # bindings-level regressions (renamed type, broken
+  # `#[doc(cfg(...))]`, missing re-export) without needing vendor
+  # libs. Real link validation requires a vendor-provisioned host
+  # (CUDA toolkit, ROCm runtime, DirectML.dll, etc.) and is out of
+  # scope for the open CI matrix; downstream callers building a
+  # multi-EP binary on such a host get the link contract there.
+  ep-bindings-check:
+    name: per-EP bindings check (no link)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ep:
+          - coreml
+          - cuda
+          - tensorrt
+          - directml
+          - rocm
+          - migraphx
+          - openvino
+          - webgpu
+          - xnnpack
+          - onednn
+          - cann
+          - acl
+          - qnn
+          - nnapi
+          - tvm
+          - azure
+          - gpu
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ep-${{ matrix.ep }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ep-${{ matrix.ep }}-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo check --features ${{ matrix.ep }}
+        run: cargo check --no-default-features --features ort,${{ matrix.ep }}
+
+  # docs.rs equivalence gate. `package.metadata.docs.rs.features`
+  # enables ALL 16 per-EP features simultaneously plus the
+  # streaming-example surface; the cargo-hack sweeps above exclude
+  # every per-EP feature, and the per-EP `cargo check` matrix only
+  # tests one EP at a time. Without this job, a feature interaction
+  # (conflicting re-exports, `#[doc(cfg(...))]` mismatch, item-name
+  # collision) could pass every other CI gate yet break the docs.rs
+  # build. `cargo doc` exercises the same feature combination
+  # docs.rs uses, with `-D rustdoc::broken_intra_doc_links` to
+  # catch link rot.
+  docs-rs-check:
+    name: docs.rs feature-set doc build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-docsrs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-docsrs-
+      - name: Install Rust (nightly for docsrs cfg)
+        # docs.rs builds with nightly + `--cfg docsrs`; mirror that
+        # so a `#[cfg_attr(docsrs, doc(cfg(...)))]` regression caught
+        # only on docs.rs surfaces here too.
+        run: rustup toolchain install nightly --no-self-update && rustup default nightly
+      - name: cargo +nightly doc (docs.rs feature set)
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links --cfg docsrs"
+        run: |
+          cargo doc --no-deps --features \
+            ort,bundled-segmentation,serde,silero-vad,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure
+
+  # Compile check for the `tch` (TorchScript) backend. `tch` is not in
+  # the cargo-hack feature sweeps below because it requires libtorch
+  # set up on the runner. Without this dedicated job, a regression that
+  # breaks `cargo build --no-default-features --features tch` (e.g.
+  # `EmbedModel` accidentally gated on `feature = "ort"` only) would
+  # ship undetected.
+  tch-compile-check:
+    name: tch-only compile check
+    runs-on: ubuntu-latest
+    env:
+      LIBTORCH_USE_PYTORCH: 1
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tch-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tch-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Install libtorch via PyTorch (CPU-only)
+        # `tch` 0.24 picks up libtorch from the active PyTorch
+        # installation when LIBTORCH_USE_PYTORCH=1; this avoids a
+        # separate libtorch tarball download.
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: cargo check --no-default-features --features tch
+        run: cargo check --lib --no-default-features --features tch
 
   build:
     name: build
@@ -125,7 +348,14 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run build
-      run: cargo hack build --feature-powerset --exclude-no-default-features
+      # Powerset sweep: exclude `tch` (libtorch env-dep, dedicated
+      # job) and every per-EP / `gpu` feature. The CPU-only
+      # `ort-sys` `download-binaries` archive cannot satisfy a
+      # vendor-EP link step on the runner, and `--feature-powerset`
+      # over the 16 EPs would also explode combinatorially. Per-EP
+      # link coverage lives in the dedicated `ep-link-check` job
+      # below.
+      run: cargo hack build --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   test:
     name: test
@@ -154,7 +384,63 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run test
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features loom
+      # Same exclusion list as the build sweep: `tch` (libtorch
+      # env-dep, dedicated job) and all per-EP / `gpu` features
+      # (CPU-only `ort-sys` archive cannot satisfy vendor link
+      # steps; per-EP coverage is in `ep-link-check`).
+      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
+
+  # AVX2 + FMA correctness via Intel SDE. GH free runners may have AVX2
+  # natively, but our dispatcher prefers AVX-512F on hosts that have it
+  # — which would skip the AVX2 backend entirely. SDE pinned to a
+  # Haswell CPU model emulates AVX2 + FMA without AVX-512, forcing the
+  # AVX2 branch under emulation. Codex CI sweep.
+  avx2-sde:
+    name: AVX2 (Intel SDE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sde-avx2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sde-avx2-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Run AVX2 SIMD tests under SDE
+        run: bash ci/sde_avx2.sh
+
+  # AVX-512F correctness via Intel SDE. Free GitHub runners are AMD
+  # EPYC Milan (no AVX-512) or older Intel Xeons — neither has AVX-512
+  # reliably. Without this job, a reduction-or-load mistake in the
+  # unsafe AVX-512 path would only surface on production AVX-512 hosts
+  # (Sapphire Rapids, Zen 4, etc.). SDE emulates AVX-512 in software
+  # so the dispatcher picks the AVX-512 path under emulation and the
+  # differential tests in `ops::` exercise it. Codex CI sweep.
+  avx512-sde:
+    name: AVX-512 (Intel SDE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sde-avx512-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sde-avx512-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Run AVX-512 SIMD tests under SDE
+        run: bash ci/sde_avx512.sh
 
   sanitizer:
     name: sanitizer
@@ -250,31 +536,11 @@ jobs:
         run: |
           bash ci/miri_sb.sh "${{ matrix.target }}"
 
-  loom:
-    name: loom
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-loom-
-      - name: Install Rust
-        run: rustup update nightly --no-self-update && rustup default nightly
-      - name: Loom tests
-        run: cargo test --tests --features loom
+  # The previous `loom` job was carried over from the colconv ci.yml
+  # template but never wired — diarization has no concurrency primitives
+  # to verify with `loom`. Cargo would have rejected `--features loom`
+  # on every run because no such feature exists in `Cargo.toml`. Removed
+  # rather than adding a placeholder feature with no actual loom tests.
 
   # valgrind:
   #   name: valgrind
@@ -315,7 +581,10 @@ jobs:
       - cross
       - test
       - sanitizer
-      - loom
+      - miri-tb
+      - miri-sb
+      - avx2-sde
+      - avx512-sde
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -335,7 +604,12 @@ jobs:
       - name: Run tarpaulin
         env:
           RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --all-features --run-types tests --run-types doctests --workspace --out xml
+        # Explicit feature list instead of `--all-features`: the `tch`
+        # backend needs libtorch on the runner (handled only by the
+        # dedicated `tch-compile-check` job). `silero-vad` is enabled
+        # below because the streaming example is documented as a
+        # supported quickstart and we want coverage to exercise it.
+        run: cargo tarpaulin --features ort,bundled-segmentation,serde,silero-vad,_bench --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:
