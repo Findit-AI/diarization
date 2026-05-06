@@ -29,7 +29,7 @@ mkdir -p "$MODELS_DIR"
 # Pin a specific HF commit so the download is reproducible. The
 # README quickstart pins the same revision + SHA-256 inline; keep
 # both in sync when bumping.
-REV="8ecadc1f8bc31dac506e46d1f5aa7c25e00277ec"
+REV="38168b544a562dec24d49e63786c16e80782eeaf"
 URL="https://huggingface.co/FinDIT-Studio/dia-models/resolve/$REV/wespeaker_resnet34_lm.onnx"
 DEST="$MODELS_DIR/wespeaker_resnet34_lm.onnx"
 

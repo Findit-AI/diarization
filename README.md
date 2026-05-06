@@ -49,7 +49,7 @@ diarization output.
 
 ```sh
 # Pinned upstream revision + expected SHA-256 of the FP32 single-file ONNX.
-DIA_EMBED_MODEL_REV="8ecadc1f8bc31dac506e46d1f5aa7c25e00277ec"
+DIA_EMBED_MODEL_REV="38168b544a562dec24d49e63786c16e80782eeaf"
 DIA_EMBED_MODEL_SHA256="4c15c6be4235318d092c9d347e00c68ba476136d6172f675f76ad6b0c2661f01"
 mkdir -p models
 TMP="$(mktemp -t wespeaker_resnet34_lm.XXXX.onnx)"
