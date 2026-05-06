@@ -17,27 +17,6 @@ Sans-I/O speaker diarization with pyannote-equivalent accuracy.
 
 </div>
 
-## Status
-
-v0.1.0 ships:
-
-- `diarization::segment` — speaker segmentation (pyannote/segmentation-3.0).
-  **Bundled by default** (~6 MB, MIT) via `SegmentModel::bundled()`.
-- `diarization::embed` — speaker fingerprint (WeSpeaker ResNet34 ONNX +
-  kaldi fbank). **Not bundled** — 27 MB exceeds the crates.io 10 MB cap;
-  caller fetches via `scripts/download-embed-model.sh` or sets
-  `DIA_EMBED_MODEL_PATH`.
-- `diarization::plda` — pyannote/speaker-diarization-community-1 PLDA
-  whitening. **Bundled by default** (CC-BY-4.0) via `PldaTransform::new()`.
-- `diarization::cluster` + `pipeline` — pyannote `cluster_vbx` primitives
-  (PLDA → AHC → VBx → centroid → cosine → Hungarian → reconstruct).
-- `diarization::offline::OwnedDiarizationPipeline` — owned-audio batch
-  entrypoint.
-- `diarization::streaming::StreamingOfflineDiarizer` — voice-range-driven
-  streaming entrypoint with the same per-fixture DER as offline (caller
-  drives a VAD; heavy stages 1+2 run eagerly, global clustering deferred
-  to `finalize`).
-
 ## Quick start
 
 The segmentation model and PLDA weights ship inside the crate — only the
