@@ -299,14 +299,36 @@ rpath = false
 
 [package.metadata.docs.rs]
 # Pin the docs.rs feature set explicitly. `all-features = true`
-# would enable `tch` (needs LIBTORCH on the build host),
-# `silero-vad` (registry dep `silero = "0.3"`, omitted to keep the
-# docs build minimal), and the `_bench` internal feature — none of which
-# docs.rs is set up to provide. The list below covers the public
-# API surface (default `ort` + `bundled-segmentation`, optional
-# `serde`, and the `gpu` meta-feature which exercises every
-# `dia::ep::*` re-export).
-features = ["ort", "bundled-segmentation", "serde", "gpu"]
+# would enable `tch` (needs LIBTORCH on the build host) and the
+# `_bench` internal feature — neither of which docs.rs provides.
+# The list below covers the full public API surface: default
+# (`ort` + `bundled-segmentation`), optional `serde`, the streaming
+# example surface (`silero-vad`), and EVERY per-EP feature so that
+# every `dia::ep::*` re-export and `#[doc(cfg(...))]` annotation
+# renders on docs.rs (the `gpu` meta-feature alone covers only
+# 6 of the 16 EPs and would silently hide the rest).
+features = [
+  "ort",
+  "bundled-segmentation",
+  "serde",
+  "silero-vad",
+  "coreml",
+  "cuda",
+  "tensorrt",
+  "directml",
+  "rocm",
+  "migraphx",
+  "openvino",
+  "webgpu",
+  "xnnpack",
+  "onednn",
+  "cann",
+  "acl",
+  "qnn",
+  "nnapi",
+  "tvm",
+  "azure",
+]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]

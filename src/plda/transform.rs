@@ -375,8 +375,8 @@ impl PldaTransform {
   ///   construction-time invariant; this guards against arithmetic
   ///   overflows in the LDA projection).
   /// - [`Error::DegenerateInput`] if `‖input - mean1‖` is below the
-  ///   data-calibrated [`XVEC_CENTERED_MIN_NORM`] threshold (`0.1`
-  ///   — see that constant's docs for the calibration), or if the
+  ///   data-calibrated `XVEC_CENTERED_MIN_NORM` threshold (`0.1`
+  ///   — see the constant's source docs for the calibration), or if the
   ///   second-stage intermediate becomes degenerate. The first check
   ///   rejects both the `mean1.astype(f32)` collapse-to-mean attack
   ///   and the more sophisticated `mean1 + small_jitter` variants

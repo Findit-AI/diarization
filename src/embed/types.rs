@@ -40,9 +40,9 @@ impl Embedding {
   /// - **Degenerate norm**: `||raw||_2 < NORM_EPSILON`, division would
   ///   amplify floating-point noise to no useful direction.
   ///
-  /// Use after [`EmbedModel::embed_features_batch`](crate::embed::EmbedModel::embed_features_batch)
-  /// plus custom aggregation. The high-level `EmbedModel::embed{,_weighted,_masked}`
-  /// methods surface `None` here as
+  /// Use after running raw `EmbedModel` inference plus your own
+  /// aggregation. The higher-level `EmbedModel::embed*` methods
+  /// surface `None` here as
   /// [`Error::DegenerateEmbedding`](crate::embed::Error::DegenerateEmbedding);
   /// callers who need to distinguish NaN/inf from zero-norm should
   /// validate `raw` is_finite themselves before calling.

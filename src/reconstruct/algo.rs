@@ -302,8 +302,8 @@ impl<'a> ReconstructInput<'a> {
 ///
 /// - [`Error::Shape`] for any dimension mismatch.
 /// - [`Error::NonFinite`] if `segmentations` contains a non-finite
-///   value (NaN handling is supported via [`Inference::aggregate`]'s
-///   mask path; arbitrary `±inf` is rejected).
+///   value (NaN handling is supported via pyannote's
+///   `Inference.aggregate` mask path; arbitrary `±inf` is rejected).
 /// - [`Error::Timing`] for non-finite or non-positive sliding-window
 ///   parameters.
 pub fn reconstruct(

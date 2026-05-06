@@ -18,8 +18,9 @@
 //! possible when `num_speakers > num_alive_clusters`).
 //!
 //! Stage 8 (per-frame discrete diarization) is handled by
-//! [`crate::reconstruct`]. `diarization::pipeline` is crate-private —
-//! callers reach the pipeline via [`crate::Diarizer`].
+//! [`crate::reconstruct`]. Callers usually reach this pipeline
+//! transitively via [`crate::offline::diarize_offline`] or
+//! [`crate::streaming::StreamingOfflineDiarizer`].
 
 mod algo;
 pub mod error;

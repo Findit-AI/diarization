@@ -44,9 +44,9 @@ pub enum Error {
   #[error("PLDA: centered input has near-zero norm; cannot L2-normalize")]
   DegenerateInput,
 
-  /// Vector handed to
-  /// [`PostXvecEmbedding::from_pyannote_capture`](crate::plda::PostXvecEmbedding::from_pyannote_capture)
-  /// has a norm too far from `sqrt(PLDA_DIMENSION) ≈ 11.31` — i.e.
+  /// Vector handed to the captured-fixture `PostXvecEmbedding`
+  /// constructor (test-only) has a norm too far from
+  /// `sqrt(PLDA_DIMENSION) ≈ 11.31` — i.e.
   /// it is not in the post-`xvec_tf` distribution that `plda_tf`
   /// requires.
   ///

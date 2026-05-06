@@ -23,10 +23,10 @@
 //! ## When NOT to use this
 //!
 //! Latency is `finalize`-bound — the global clustering pass does not
-//! emit spans incrementally. For sub-range latency (live captioning,
-//! real-time speaker labels), use
-//! [`crate::diarizer::Diarizer::process_samples`] (online cosine +
-//! EMA, lower accuracy but emits spans as voice ranges close).
+//! emit spans incrementally. If you need *sub-range* latency (live
+//! captioning, real-time speaker labels), this entrypoint is the
+//! wrong shape — you would need an online clusterer that emits
+//! spans as voice ranges close, which dia does not currently ship.
 
 mod offline_diarizer;
 

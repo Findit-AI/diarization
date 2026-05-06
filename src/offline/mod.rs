@@ -8,16 +8,19 @@
 //!
 //! ## Where this fits
 //!
-//! - The streaming [`crate::diarizer::Diarizer`] runs an online
-//!   cosine + EMA clusterer. It is fast and works on live audio
-//!   without seeing the future, but its DER on the captured
-//!   community-1 fixtures is ~20-40% (the online clusterer
-//!   over-splits compared to pyannote's batch VBx).
 //! - This module runs the full pyannote `community-1` clustering
 //!   flow as a *batch* operation on already-computed segmentation +
 //!   raw-embedding tensors. DER ≈ 0% on the 5 short captured
 //!   fixtures (length-dependent divergence at T=1004; tracked
 //!   separately).
+//! - For audio-in / RTTM-out, pair with [`OwnedDiarizationPipeline`]
+//!   (under `feature = "ort"`), which calls the segmentation +
+//!   embedding ONNX models for you and forwards into
+//!   [`diarize_offline`].
+//! - For an *incremental* push-style entrypoint (good for VAD-driven
+//!   streaming where you produce voice ranges over time but only need
+//!   one final RTTM), see
+//!   [`crate::streaming::StreamingOfflineDiarizer`].
 //!
 //! ## What this module accepts
 //!

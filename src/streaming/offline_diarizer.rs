@@ -43,8 +43,9 @@
 //! roughly as O(num_train²) for AHC and O(num_train · plda_dim²) for
 //! VBx, where `num_train` ≈ active (chunk, slot) pairs. For a 1 h
 //! conversation that's ~10 000 pairs — multi-second clustering. For
-//! near-realtime indexing this is acceptable; for sub-range latency
-//! see [`crate::diarizer::Diarizer`].
+//! near-realtime indexing this is acceptable; sub-range live-streaming
+//! latency would need an online clusterer that dia does not currently
+//! ship.
 
 use std::sync::Arc;
 

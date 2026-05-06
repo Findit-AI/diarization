@@ -161,11 +161,9 @@ impl SegmentModel {
 
   /// Load the model from disk with default options.
   ///
-  /// Default options come from
-  /// [`Self::default_options_with_auto_providers`] — when an `ep-*`
-  /// cargo feature (e.g. `coreml`, `cuda`) is enabled, the matching
-  /// execution provider is auto-registered at session creation. With
-  /// no `ep-*` feature on, this is identical to
+  /// When an `ep-*` cargo feature (e.g. `coreml`, `cuda`) is enabled
+  /// the matching execution provider is auto-registered at session
+  /// creation; with no `ep-*` feature on, this is identical to
   /// `from_file_with_options(path, SegmentModelOptions::default())`.
   pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
     Self::from_file_with_options(path, Self::default_options_with_auto_providers())

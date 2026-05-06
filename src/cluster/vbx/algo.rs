@@ -18,9 +18,8 @@ pub const MAX_ITERS_CAP: usize = 1_000;
 /// without convergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-  /// EM converged: an iteration's ELBO step was classified as
-  /// [`ElboStep::Converged`] (delta within the scale-aware
-  /// regression band) and the loop exited early.
+  /// EM converged: an iteration's ELBO step delta landed within the
+  /// scale-aware regression band and the loop exited early.
   Converged,
   /// The loop ran all `max_iters` iterations without ever firing
   /// the convergence check. The output is the best estimate seen,

@@ -37,7 +37,7 @@
 //! This was the dominant DER contributor on dia 5d (1.77–6.71% on
 //! 5/6 captured fixtures vs pyannote's 0%). The pyannote-correct
 //! formula closes the gap to bit-exact `count` on the captured
-//! fixtures (verified by [`parity_tests`]).
+//! fixtures (verified by `aggregate::parity_tests`).
 //!
 //! No PIT alignment is needed for the count tensor — collapsing
 //! speakers within each chunk via `sum`/`any` is permutation-

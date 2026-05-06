@@ -47,7 +47,7 @@
 //! registers each as `MayUse` — the first one whose ops match runs
 //! and the rest stay dormant on CPU fallback.
 //!
-//! Note: [`auto_providers`] is what
+//! Note: [`auto_providers()`](crate::ep::auto_providers) is what
 //! [`crate::segment::SegmentModel::bundled`] already calls; you
 //! normally never invoke it directly. It is `pub` for callers who
 //! want to build the same provider list and apply it through the

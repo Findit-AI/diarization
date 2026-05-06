@@ -110,8 +110,9 @@ pub(crate) mod ops;
 /// callers can name and construct the types they need.
 ///
 /// Production deployments where `/tmp` is `tmpfs` (Docker default)
-/// **must** override [`SpillOptions::with_spill_dir`] to a real-disk
-/// path — without it, "spill to disk" reduces to "spill to RAM" and
+/// **must** override [`SpillOptions::with_spill_dir`](crate::spill::SpillOptions::with_spill_dir)
+/// to a real-disk path — without it, "spill to disk" reduces to
+/// "spill to RAM" and
 /// the OOM concern that motivates this whole subsystem is
 /// unaddressed. That override is only possible because these types
 /// are exposed here.

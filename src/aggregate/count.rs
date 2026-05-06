@@ -498,10 +498,10 @@ pub fn num_output_frames_pyannote(
 ///
 /// # Errors
 ///
-/// - [`ShapeError::ZeroNumChunks`] if `num_chunks == 0`.
-/// - [`ShapeError::InvalidFrameStep`] if `frame_step` is not a positive
+/// - `ShapeError::ZeroNumChunks` if `num_chunks == 0`.
+/// - `ShapeError::InvalidFrameStep` if `frame_step` is not a positive
 ///   finite scalar.
-/// - [`ShapeError::OutputFrameCountOverflow`] if `chunk_duration /
+/// - `ShapeError::OutputFrameCountOverflow` if `chunk_duration /
 ///   frame_step` is non-finite, negative, or rounds to a value that
 ///   does not fit in `usize` (or whose `+1` would overflow). Catches
 ///   pathological geometries like `chunk_duration = 1e15` with
@@ -561,7 +561,7 @@ pub fn try_num_output_frames_pyannote(
 /// ```
 ///
 /// `segmentations`: `(num_chunks, num_frames_per_chunk, num_speakers)`
-/// flattened row-major in the [c][f][s] order pyannote uses.
+/// flattened row-major in the `[c][f][s]` order pyannote uses.
 ///
 /// Returns a [`CountTensor`] holding the per-output-frame count and
 /// the matching `SlidingWindow`. `chunks_sw` describes the input

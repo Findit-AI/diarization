@@ -480,7 +480,8 @@ impl OfflineOutput {
 ///
 /// - [`Error::Shape`] if any tensor dimension mismatches.
 /// - [`Error::Plda`] if a (chunk, speaker) raw embedding is degenerate
-///   (zero-norm / NaN — see [`RawEmbedding::from_raw_array`]).
+///   (zero-norm / NaN — caught by the `RawEmbedding` constructor in
+///   `crate::plda`).
 /// - [`Error::Pipeline`] if `assign_embeddings` rejects a non-finite
 ///   intermediate or hits a shape gate.
 /// - [`Error::Reconstruct`] for non-finite segmentations or invalid

@@ -284,7 +284,7 @@ pub fn try_discrete_to_spans(
 /// using numeric sort would silently mislabel speakers vs the
 /// pyannote reference.
 ///
-/// Implementation: [`cmp_cluster_id_str`] is the canonical
+/// Implementation: a private `cmp_cluster_id_str` is the canonical
 /// pyannote-equivalent comparator. It renders both ids into stack-
 /// allocated `itoa::Buffer`s and compares the resulting `&str`
 /// slices — zero heap allocation.

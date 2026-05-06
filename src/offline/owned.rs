@@ -306,9 +306,11 @@ impl Default for OwnedPipelineOptions {
 /// End-to-end audio→RTTM offline diarization pipeline.
 ///
 /// Borrows `&mut SegmentModel`, `&mut EmbedModel`, and `&PldaTransform`
-/// per [`run`](Self::run) call (they're caller-owned because both
-/// model types are `!Sync` — see [`crate::diarizer::Diarizer`] for
-/// the same pattern). Configuration is held in [`OwnedPipelineOptions`].
+/// per [`run`](Self::run) call. Both model types are `!Sync` (ORT
+/// session state is single-threaded), so the caller owns them and
+/// hands `&mut` references in — same pattern as
+/// [`crate::streaming::StreamingOfflineDiarizer::push_voice_range`].
+/// Configuration is held in [`OwnedPipelineOptions`].
 pub struct OwnedDiarizationPipeline {
   options: OwnedPipelineOptions,
 }
