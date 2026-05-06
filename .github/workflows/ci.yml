@@ -83,21 +83,23 @@ jobs:
         # `wasm32-unknown-unknown` is intentionally excluded here:
         # the transitive `getrandom 0.2` dep emits a `compile_error!`
         # on that target unless the `js` feature is enabled, and
-        # browser-wasm is not a dia target. The WASI / emscripten
-        # variants below have OS interfaces that satisfy `getrandom`
-        # without the `js` shim, so they stay in the matrix.
+        # browser-wasm is not a dia target. `wasm32-unknown-emscripten`
+        # is also excluded — emscripten is superseded by WASI for
+        # server-side wasm, and diarization-in-browser via emscripten
+        # is impractical (model size + ORT-WebAssembly is its own path).
+        # `i686-linux-android` is excluded because Google Play has
+        # required 64-bit since 2019; the `aarch64-linux-android` /
+        # `x86_64-linux-android` entries cover the live Android matrix.
         target:
           - aarch64-unknown-linux-gnu
           - aarch64-linux-android
           - aarch64-unknown-linux-musl
-          - i686-linux-android
           - x86_64-linux-android
           - i686-pc-windows-gnu
           - x86_64-pc-windows-gnu
           - i686-unknown-linux-gnu
           - powerpc64-unknown-linux-gnu
           - riscv64gc-unknown-linux-gnu
-          - wasm32-unknown-emscripten
           - wasm32-wasip1
           - wasm32-wasip1-threads
           - wasm32-wasip2
@@ -116,6 +118,16 @@ jobs:
             ${{ runner.os }}-cross-
       - name: Install Rust
         run: rustup update stable && rustup default stable
+      - name: Install mingw-w64 (windows-gnu targets)
+        # Transitive `windows-sys` builds via mingw's `dlltool` when
+        # cross-compiling to `*-pc-windows-gnu`. The Ubuntu runner does
+        # not ship it by default, so install on demand for those
+        # targets only. `gcc-mingw-w64` provides both i686 and x86_64
+        # toolchains in one package.
+        if: contains(matrix.target, 'pc-windows-gnu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64
       - name: cargo build --target ${{ matrix.target }} --no-default-features
         run: |
           rustup target add ${{ matrix.target }}
