@@ -70,9 +70,9 @@ pub fn weighted_centroids(
   }
   let expected_emb_len = num_train
     .checked_mul(embed_dim)
-    .ok_or(ShapeError::EmbeddingsQRowMismatch)?;
+    .ok_or(ShapeError::EmbeddingsLenOverflow)?;
   if embeddings.len() != expected_emb_len {
-    return Err(ShapeError::EmbeddingsQRowMismatch.into());
+    return Err(ShapeError::EmbeddingsLenMismatch.into());
   }
   if !sp_threshold.is_finite() {
     return Err(ShapeError::NonFiniteSpThreshold.into());

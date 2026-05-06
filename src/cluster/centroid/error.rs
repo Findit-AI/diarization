@@ -50,11 +50,17 @@ pub enum ShapeError {
   #[error("sp.len() must equal q.ncols()")]
   SpQClusterMismatch,
   /// `num_train_embeddings != q.nrows()`.
-  #[error("embeddings.nrows() must equal q.nrows()")]
+  #[error("num_train_embeddings must equal q.nrows()")]
   EmbeddingsQRowMismatch,
   /// `embed_dim == 0`.
   #[error("embeddings must have at least one column")]
   ZeroEmbeddingDim,
+  /// `num_train_embeddings * embed_dim` overflows `usize`.
+  #[error("num_train_embeddings * embed_dim overflows usize")]
+  EmbeddingsLenOverflow,
+  /// `embeddings.len() != num_train_embeddings * embed_dim`.
+  #[error("embeddings.len() must equal num_train_embeddings * embed_dim")]
+  EmbeddingsLenMismatch,
   /// `sp_threshold` is NaN or `±inf`.
   #[error("sp_threshold must be finite")]
   NonFiniteSpThreshold,

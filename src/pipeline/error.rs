@@ -52,6 +52,9 @@ pub enum ShapeError {
   /// `num_chunks * num_speakers` overflows `usize`.
   #[error("num_chunks * num_speakers overflows usize")]
   EmbeddingsRowsOverflow,
+  /// `num_chunks * num_speakers * embed_dim` overflows `usize`.
+  #[error("num_chunks * num_speakers * embed_dim overflows usize")]
+  EmbeddingsLenOverflow,
   /// `embeddings.len() != num_chunks * num_speakers * embed_dim`.
   #[error("embeddings.len() must equal num_chunks * num_speakers * embed_dim")]
   EmbeddingsRowMismatch,

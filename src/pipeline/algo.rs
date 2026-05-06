@@ -366,7 +366,7 @@ pub fn assign_embeddings(
     .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
   let expected_emb_len = expected_emb_rows
     .checked_mul(embed_dim)
-    .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
+    .ok_or(ShapeError::EmbeddingsLenOverflow)?;
   if embeddings.len() != expected_emb_len {
     return Err(ShapeError::EmbeddingsRowMismatch.into());
   }
@@ -541,7 +541,7 @@ pub fn assign_embeddings(
   // `&[f64]` directly — no `DMatrix` materialization.
   let train_emb_len = num_train
     .checked_mul(embed_dim)
-    .ok_or(ShapeError::EmbeddingsRowsOverflow)?;
+    .ok_or(ShapeError::EmbeddingsLenOverflow)?;
   let mut train_embeddings_buf =
     crate::ops::spill::SpillBytesMut::<f64>::zeros(train_emb_len, &input.spill_options)?;
   {
