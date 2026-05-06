@@ -16,3 +16,37 @@
 
 /target
 Cargo.lock
+/models/*.onnx
+/models/*.onnx.data
+/models/*.pt
+# Segmentation model is committed to git so it ships with the crate
+# (`SegmentModel::bundled` under feature `bundled-segmentation`).
+!/models/segmentation-3.0.onnx
+# WeSpeaker ResNet34-LM is too large for crates.io (27 MB), but is
+# committed to git so it can be served as a GitHub release asset.
+# It is excluded from the crate tarball via `[package] exclude` in
+# Cargo.toml so `cargo publish` doesn't accidentally ship it.
+# The `.onnx.data` sidecar is no longer used — we ship the
+# single-file packed form (works on ORT's CoreML EP loader, which
+# fails to relocate external initializers).
+!/models/wespeaker_resnet34_lm.onnx
+**.claude/
+docs/
+
+# Spike-specific (kaldi-native-fbank parity)
+spikes/kaldi_fbank/python/.venv/
+spikes/kaldi_fbank/python/__pycache__/
+spikes/kaldi_fbank/python/*.egg-info/
+spikes/kaldi_fbank/python/uv.lock
+spikes/kaldi_fbank/rust.csv
+spikes/kaldi_fbank/python.csv
+
+# Phase-0 parity capture: large local artifacts.
+tests/parity/fixtures/*/clip_16k.wav
+# verify_capture.py writes a backup before re-running.
+tests/parity/fixtures/.*.backup/
+
+# uv venv + setuptools editable-install scaffolding for tests/parity/python/.
+tests/parity/python/.venv/
+tests/parity/python/uv.lock
+tests/parity/python/*.egg-info/
