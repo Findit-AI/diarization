@@ -51,17 +51,27 @@ if [ -f "$DEST" ]; then
   echo "Re-downloading..."
 fi
 
-echo "Downloading WeSpeaker ResNet34-LM (26.5 MB) from $URL ..."
-curl --fail --show-error --location --output "$DEST" --progress-bar "$URL"
+# Atomic install: download to a same-directory temp file, verify the
+# SHA, then rename into place. Same directory so `mv` is a single
+# rename (not a copy across filesystems). Trap removes the temp on
+# any exit path — interrupted curl, SHA mismatch, or shell signal —
+# so the canonical $DEST is never left in a corrupt state.
+TMP="$(mktemp "${DEST}.partial.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
 
-ACTUAL_SHA256="$(shasum -a 256 "$DEST" | awk '{print $1}')"
+echo "Downloading WeSpeaker ResNet34-LM (26.5 MB) from $URL ..."
+curl --fail --show-error --location --output "$TMP" --progress-bar "$URL"
+
+ACTUAL_SHA256="$(shasum -a 256 "$TMP" | awk '{print $1}')"
 if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-  echo "Error: downloaded file sha256 mismatch."
-  echo "  expected: $EXPECTED_SHA256"
-  echo "  actual:   $ACTUAL_SHA256"
-  echo "The Hugging Face repo may have re-published; verify upstream and"
-  echo "update EXPECTED_SHA256 in this script."
+  echo "Error: downloaded file sha256 mismatch." >&2
+  echo "  expected: $EXPECTED_SHA256" >&2
+  echo "  actual:   $ACTUAL_SHA256" >&2
+  echo "The Hugging Face repo may have re-published; verify upstream and" >&2
+  echo "update EXPECTED_SHA256 in this script." >&2
   exit 1
 fi
 
+mv -f "$TMP" "$DEST"
+trap - EXIT
 echo "Saved to $DEST (sha256 verified)."

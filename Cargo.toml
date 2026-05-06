@@ -136,12 +136,12 @@ gpu = [
   "rocm",
   "webgpu",
 ]
-# Pulls in the sister `silero` crate (`../silero/`) as an optional
-# dependency, used only by the `run_streaming_pipeline` example to
-# drive VAD externally. The crate's lib + non-streaming examples do
-# NOT depend on silero, so a clean checkout without `../silero/`
-# materialized still builds. Enable this feature when building the
-# streaming example or developing with VAD in scope.
+# Pulls in the sister `silero` crate (`silero = "0.3"`) as an
+# optional dependency, used only by the `run_streaming_pipeline`
+# example to drive VAD externally. The crate's lib + non-streaming
+# examples do NOT depend on silero, so a clean checkout still builds
+# without it. Enable this feature when building the streaming
+# example or developing with VAD in scope.
 silero-vad = ["dep:silero"]
 
 # Internal feature for benchmarks. Exposes pub(crate) modules
@@ -207,8 +207,7 @@ rustix = { version = "1", features = ["fs"] }
 # Sister `silero` crate (VAD for streaming voice-range detection).
 # Used by the `run_streaming_pipeline` example; the lib + offline
 # examples do not depend on it, so a clean checkout can build
-# without `../silero/` materialized. Enable via
-# `--features silero-vad`.
+# without it. Enable via `--features silero-vad`.
 [dependencies.silero]
 version = "0.3"
 optional = true
@@ -237,6 +236,11 @@ hound = "3"
 npyz = { version = "0.9", features = ["npz"] }
 # Used by the `serde` feature's roundtrip tests.
 serde_json = "1"
+
+[[example]]
+path = "examples/run_owned_pipeline.rs"
+name = "run_owned_pipeline"
+required-features = ["ort", "bundled-segmentation"]
 
 [[example]]
 path = "examples/run_owned_pipeline_tch.rs"
@@ -294,7 +298,15 @@ overflow-checks = false
 rpath = false
 
 [package.metadata.docs.rs]
-all-features = true
+# Pin the docs.rs feature set explicitly. `all-features = true`
+# would enable `tch` (needs LIBTORCH on the build host),
+# `silero-vad` (registry dep `silero = "0.3"`, omitted to keep the
+# docs build minimal), and the `_bench` internal feature — none of which
+# docs.rs is set up to provide. The list below covers the public
+# API surface (default `ort` + `bundled-segmentation`, optional
+# `serde`, and the `gpu` meta-feature which exercises every
+# `dia::ep::*` re-export).
+features = ["ort", "bundled-segmentation", "serde", "gpu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]

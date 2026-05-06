@@ -1,131 +1,123 @@
 # UNRELEASED
 
-This release ships `diarization::embed`, `diarization::cluster`, and `diarization::Diarizer`,
-completing the v0.1.0 phase 2 vision. `diarization::segment` gains an additive
-v0.X bump (see CORRECTNESS GUARANTEES below).
+The pyannote-community-1 offline + streaming-offline pipelines now
+ship in full: VBx clustering, PLDA, AHC, centroid + Hungarian
+assignment, reconstruction, RTTM emission. The crate exposes both
+the offline pipeline (one-shot batch) and the streaming-offline
+variant (push voice ranges, finalize once at the end). End-to-end
+DER vs pyannote 4.0.4 on the in-repo fixture suite is ≤ 0.4% on the
+worst clip and bit-exact on the rest.
 
-FEATURES — `diarization::embed`
+PUBLIC SURFACE
 
-- **`Embedding`** newtype (256-d L2-normalized) with invariant
-  `||embedding|| > NORM_EPSILON`, enforced by `Embedding::normalize_from`
-  returning `None` on degenerate inputs.
-- **`compute_fbank`** kaldi-compatible feature extraction wrapping
-  `kaldi-native-fbank`. Verified against `torchaudio.compliance.kaldi.fbank`
-  per the spec §15 #43 pre-impl spike.
-- **`EmbedModel`** ort wrapper for WeSpeaker ResNet34. `from_file` /
-  `from_memory` constructors with `_with_options` variants. Auto-derives
-  `Send`; explicitly `!Sync` (matches `diarization::segment::SegmentModel`).
-- **`embed`** / **`embed_with_meta`**: high-level API. Sliding-window
-  mean for clips > 2 s.
-- **`embed_weighted`** / **`embed_weighted_with_meta`**: per-sample
-  voice-probability soft weighting.
-- **`embed_masked`** / **`embed_masked_with_meta`**: rev-8 binary
-  keep-mask (gather-and-embed). Used by `Diarizer::exclude_overlap`.
-- **Generic `EmbeddingMeta<A=(), T=()>`**: caller-supplied metadata
-  flows through `EmbeddingResult`. Defaults to `()` so the unit-typed
-  metadata path is zero-cost.
-- **`cosine_similarity`** free function alongside `Embedding::similarity`.
+- **`diarization::offline`** — `OfflineInput` / `diarize_offline`:
+  caller-supplied segmentation + embedding tensors → diarization +
+  RTTM spans. No ORT inference inside; pair with `OwnedDiarizationPipeline`
+  (under `feature = "ort"`) for the full audio entrypoint.
+- **`diarization::streaming::StreamingOfflineDiarizer`** — push
+  voice ranges incrementally via `push_voice_range(&mut seg, &mut emb,
+  ...)`, call `finalize(&plda)` once to produce RTTM spans. Same
+  numerics as `diarize_offline` modulo plumbing.
+- **`diarization::segment`** — `SegmentModel::bundled()` /
+  `from_file` / `from_memory` (default + `_with_options` variants);
+  segmentation-3.0 ONNX is embedded via `include_bytes!` under the
+  default `bundled-segmentation` feature.
+- **`diarization::embed`** — `EmbedModel::from_file` /
+  `from_memory` (and `from_torchscript_file` under `feature = "tch"`).
+  WeSpeaker ResNet34-LM is BYO; fetch it from
+  `FinDIT-Studio/dia-models` on HuggingFace. The single-file packed
+  ONNX is the canonical form.
+- **`diarization::plda`** — `PldaTransform::new()` (no args; weights
+  embedded via `include_bytes!`); CC-BY-4.0 with attribution
+  preserved in `NOTICE` and `models/plda/SOURCE.md`.
+- **`diarization::cluster`** — `ahc`, `vbx`, `centroid`, `hungarian`
+  submodules expose the algorithmic primitives directly for callers
+  who want to wire their own pipeline.
+- **`diarization::pipeline::assign_embeddings`** — the AHC + VBx +
+  centroid + Hungarian core, callable on already-projected
+  post-PLDA features.
+- **`diarization::reconstruct`** — discrete grid + RTTM span emission
+  + `try_discrete_to_spans` (fallible variant for direct callers).
+- **`diarization::aggregate::count_pyannote`** — overlap-add per-frame
+  speaker-count tensor, bit-exact with pyannote.
+- **`diarization::ep`** — opt-in ORT execution providers (CoreML,
+  CUDA, TensorRT, DirectML, ROCm, OpenVINO, WebGPU, …) gated by
+  per-EP cargo features and the `gpu` meta-feature. `auto_providers()`
+  helper picks compiled-in EPs at runtime.
+- **`diarization::spill`** — `SpillOptions` + `SpillBytes` /
+  `SpillBytesMut` for file-backed mmap fallback above the
+  configurable threshold; protects multi-hour inputs from
+  OOM-aborting the pipeline.
 
-FEATURES — `diarization::cluster`
+ASYMMETRIC EP DEFAULT
 
-- **Online streaming `Clusterer`** with `submit(&Embedding)` returning
-  `ClusterAssignment { speaker_id, is_new_speaker, similarity }`.
-  `RollingMean` and `Ema(α)` update strategies on an unnormalized
-  accumulator (handles antipodal cancellation gracefully via lazy
-  `cached_centroid` refresh).
-- **`OverflowStrategy::Reject`** (default — caller decides) /
-  **`AssignClosest`** (no centroid update on forced assignment).
-- **Offline `cluster_offline`** with two methods:
-  - **Spectral** (default): cosine affinity + degree-matrix
-    precondition + normalized Laplacian + nalgebra eigendecomposition
-    + eigengap K-detection (capped at `MAX_AUTO_SPEAKERS = 15`) +
-    K-means++ + Lloyd. PRNG pinned to `rand_chacha::ChaCha8Rng` with
-    explicit byte-fixture regression test.
-  - **Agglomerative**: Single / Complete / Average linkage with
-    cosine distance ReLU-clamped to `[0, 1]`.
-- **Deterministic K-means++** seeding (Arthur & Vassilvitskii 2007).
-  Default seed `0`; same input + seed → same labels across runs.
-- **N ≤ 2 fast paths** before any matrix work; isolated-node
-  precondition catches dissimilar inputs without an undefined Laplacian.
-
-FEATURES — `diarization::Diarizer` (rev-6 pyannote-style reconstruction)
-
-- **`process_samples`** / **`finish_stream`**: streaming entry points
-  borrowing `&mut SegmentModel` + `&mut EmbedModel` per call.
-- **VAD-friendly variable-length input**: empty / sub-window /
-  multi-clip / whole-stream pushes all handled without special-casing.
-- **`exclude_overlap`** mask (spec §5.8): per-window binarized + clean
-  masks → sample-rate `keep_mask`; clean used when its gathered length
-  ≥ `MIN_CLIP_SAMPLES`, else falls back to speaker-only. On doubly-
-  failed gather, skip-and-continue (matches pyannote
-  `speaker_verification.py:611-612`).
-- **Per-frame per-cluster overlap-add stitching** (spec §5.9):
-  collapse-by-max within cluster + overlap-add SUM across windows.
-- **Per-frame instantaneous-speaker-count tracking** (spec §5.10):
-  per-frame overlap-add MEAN with warm-up trim
-  (`speaker_count(warm_up=(0.1, 0.1))`), rounded.
-- **Count-bounded argmax + per-cluster RLE** (spec §5.11):
-  deterministic tie-break (smaller cluster_id wins).
-- **Output**: `DiarizedSpan { range, speaker_id, is_new_speaker,
-  average_activation, activity_count, clean_mask_fraction }` per
-  closed speaker turn.
-- **`collected_embeddings()`**: per-(window, slot) granularity context
-  retained across the session.
-- **Introspection**: `pending_inferences`, `buffered_samples`,
-  `buffered_frames`, `total_samples_pushed`, `num_speakers`, `speakers`.
-- **Auto-derived `Send + Sync`**.
-
-FEATURES — `diarization::segment` v0.X bump
-
-- **`Action::SpeakerScores { id, window_start, raw_probs }`** variant
-  emitted from `push_inference` alongside `Action::Activity`.
-- **`Action` is now `#[non_exhaustive]`** so future additions are
-  non-breaking.
-- **`pub(crate) Segmenter::peek_next_window_start()`** for the
-  Diarizer's reconstruction finalization-boundary computation.
+- `SegmentModel::bundled()` / `::from_file()` auto-register
+  `dia::ep::auto_providers()` so any compiled-in `ep-*` feature
+  accelerates segmentation with no caller code change.
+- `EmbedModel::from_file()` does **NOT** auto-register EPs.
+  Empirically, ORT's CoreML EP miscompiles the WeSpeaker
+  ResNet34-LM graph and emits NaN/Inf on most realistic inputs
+  across every CoreML compute unit / model format / static-shape
+  knob; auto-on would crash the embed pipeline. Callers on a vetted
+  EP host opt in via `EmbedModelOptions::default().with_providers(...)`
+  and `EmbedModel::from_file_with_options(path, opts)`. See
+  `crate::ep` and `crate::embed::EmbedModel::from_file` docs.
 
 CORRECTNESS GUARANTEES
 
-- **Bit-deterministic offline clustering** for a given input + seed,
-  enforced by `tests/chacha_keystream_fixture.rs` regression test.
-- **Frame-rate math verified**: `diarization::segment::stitch::frame_to_sample`
-  yields ≈ 271.65 samples/frame (≈ 58.9 fps); the Diarizer carries a
-  `frame_to_sample_u64` helper bit-exactly equivalent to segment's
-  `u32` version.
-- **Documented divergences from pyannote** (spec §1): sliding-window
-  mean for long-clip embed, sample-rate vs frame-rate gather in
-  `exclude_overlap`, online vs batch clustering, default Spectral vs
-  pyannote VBx, deterministic argmax tie-break.
+- **Bit-exact pyannote 4.0.4 parity** on the in-repo fixture suite
+  (01_dialogue, 02_pyannote_sample, 03_dual_speaker,
+  04_three_speaker, 05_four_speaker — DER 0.0000–0.0037; 06_long_recording
+  is `#[ignore]`d at the strict bit-level due to GEMM-roundoff drift
+  past T=1004 but the per-frame coverage at DER 0.0019 is the
+  release-blocking metric).
+- **SpillBytes / SpillBytesMut** are `Send + Sync`; the runtime EP
+  registration is per-session.
+- **Cross-platform** spill: `posix_fallocate` on Linux,
+  `F_PREALLOCATE` on macOS, `SetFileValidData`/`SetEndOfFile` on
+  Windows; reservations happen before any mapped writes so we
+  never `SIGBUS` on `ENOSPC` mid-run.
 
 TESTING
 
-- ~175 unit tests across `diarization::embed`, `diarization::cluster`, `diarization::diarizer`.
-- 149 lib tests pass on `--no-default-features --features std` (no ort).
-- Gated integration tests for end-to-end Diarizer pump on a 30-s clip
-  (8 #[ignore]'d tests in `tests/integration_diarizer.rs`).
-- Pyannote parity harness (`tests/parity/run.sh`) — manual; targets
-  DER ≤ 10% absolute (rev-8 T3-I relaxed from 5%).
+- 495 lib unit tests pass on default features; full DER suite
+  (in-repo + speakrs clips) at the bit-exact baseline.
+- Parity tests under `src/*/parity_tests.rs` skip cleanly via
+  `parity_fixtures_or_skip!` when `tests/parity/fixtures/` is
+  absent (the published crate tarball excludes the fixtures to
+  stay under the 10 MiB crates.io limit).
+- `tests/parity/run.sh` is a manual harness for end-to-end DER
+  validation against pyannote-on-disk; provide your own clip path
+  if running outside a workspace checkout.
 
 BUILD
 
-- New deps: `nalgebra = "0.34"`, `rand = "0.10"` (default-features =
-  false), `rand_chacha = "0.10"` (default-features = false),
-  `kaldi-native-fbank = "0.1"`.
+- Rust edition 2024, MSRV 1.95.
+- `nalgebra 0.34`, `kodama 0.3` (AHC linkage), `kaldi-native-fbank 0.1`,
+  `pathfinding 4.15` (Hungarian), `mediatime`, `thiserror`,
+  `memmapix 0.9` + `bytemuck 1` + `tempfile 3` + `fs4 1` for the
+  spill backend, `rustix` (Linux/Android only, for `O_TMPFILE`).
+- Optional features: `serde`, `tch`, `silero-vad`, plus 16 per-EP
+  features (`coreml`, `cuda`, `tensorrt`, `directml`, `rocm`,
+  `migraphx`, `openvino`, `webgpu`, `xnnpack`, `onednn`, `cann`,
+  `acl`, `qnn`, `nnapi`, `tvm`, `azure`) and a `gpu` meta-feature.
 
-KNOWN LIMITATIONS / DEFERRED TO v0.1.1+
+KNOWN LIMITATIONS / DEFERRED
 
-- No bundled WeSpeaker model (~25 MB); use
-  `scripts/download-embed-model.sh`.
-- VBx clustering (pyannote's offline default) not shipped; spec §15 #44.
-- HMM-GMM clustering not shipped; spec §15.
-- `min_cluster_size` cluster pruning not shipped; spec §15.
-- Configurable `warm_up` for speaker-count not shipped; hardcoded to
-  pyannote default `(0.1, 0.1)`. Spec §15 #47.
-- Configurable `min_duration_on/off` for span-merging not shipped;
-  spec §15 #48.
-- Mask-aware embedding ONNX export deferred; current path uses
-  sample-rate gather + sliding-window-mean (one extra divergence
-  from pyannote on long masked clips). Spec §15 #49.
+- WeSpeaker embed model (~26 MiB) exceeds the crates.io 10 MiB
+  hard limit; not bundled. Fetch from
+  `FinDIT-Studio/dia-models` on HuggingFace at the pinned revision
+  documented in `scripts/download-embed-model.sh`, or set
+  `DIA_EMBED_MODEL_PATH` if you keep the model elsewhere.
+- ORT CoreML EP cannot run the WeSpeaker graph correctly; the
+  asymmetric default (seg-auto, embed-CPU) ships as the workaround.
+- FP16 / INT8 ONNX variants and TensorRT / OpenVINO IR / CoreML
+  `.mlpackage` formats are not provided; the canonical FP32
+  single-file ONNX runs on every ORT EP that doesn't have the
+  WeSpeaker miscompile.
+- 06_long_recording (T=1004) hits a GEMM-roundoff partition drift
+  at the strict bit-exact level; tolerant per-frame coverage is in
+  `reconstruct::parity_tests::reconstruct_within_tolerance_06_long_recording`.
 
 # 0.1.0 (2026-04-26)
 
