@@ -73,14 +73,23 @@ const SLOTS_PER_CHUNK: usize = 3;
 /// Errors from the streaming offline diarizer.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamingError {
+  /// Input shape / call ordering is invalid — see
+  /// `StreamingShapeError`.
   #[error("streaming: shape: {0}")]
   Shape(#[from] StreamingShapeError),
+  /// Wraps a segmentation-stage failure message (typically an ONNX
+  /// inference error stringified upfront because
+  /// [`crate::segment::Error`] doesn't always satisfy `Send`).
   #[error("streaming: segment: {0}")]
   Segment(String),
+  /// Wraps an embedding-stage failure message.
   #[error("streaming: embed: {0}")]
   Embed(String),
+  /// Propagated from the underlying [`crate::offline`] entrypoint
+  /// invoked by `finalize`.
   #[error("streaming: offline: {0}")]
   Offline(#[from] crate::offline::Error),
+  /// Propagated from [`crate::reconstruct`].
   #[error("streaming: reconstruct: {0}")]
   Reconstruct(#[from] crate::reconstruct::Error),
   /// Propagated from `aggregate::try_count_pyannote` when the count
@@ -294,6 +303,13 @@ struct AccumulatedRange {
 }
 
 impl StreamingOfflineDiarizer {
+  /// Construct an empty diarizer.
+  ///
+  /// Push voice ranges via [`Self::push_voice_range`] as the VAD
+  /// emits them, then call [`Self::finalize`] once at end-of-stream
+  /// to run global clustering and emit RTTM spans. `options` carries
+  /// the spill threshold and reconstruction knobs forwarded into the
+  /// underlying offline pipeline.
   pub fn new(options: StreamingOfflineOptions) -> Self {
     Self {
       options,

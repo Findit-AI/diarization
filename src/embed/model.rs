@@ -27,9 +27,14 @@ use std::path::Path;
 use crate::embed::{
   Error,
   embedder::{embed_unweighted, embed_weighted_inner},
-  options::{EMBEDDING_DIM, FBANK_FRAMES, FBANK_NUM_MELS, MIN_CLIP_SAMPLES, SAMPLE_RATE_HZ},
+  options::{EMBEDDING_DIM, MIN_CLIP_SAMPLES, SAMPLE_RATE_HZ},
   types::{Embedding, EmbeddingMeta, EmbeddingResult},
 };
+// `FBANK_FRAMES` and `FBANK_NUM_MELS` are only consumed inside the
+// `#[cfg(feature = "ort")]` backend. Importing them unconditionally
+// triggers `-D warnings` on `--no-default-features --features tch`.
+#[cfg(feature = "ort")]
+use crate::embed::options::{FBANK_FRAMES, FBANK_NUM_MELS};
 
 #[cfg(feature = "ort")]
 use crate::embed::EmbedModelOptions;

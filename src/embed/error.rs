@@ -12,12 +12,20 @@ pub enum Error {
   /// (for `embed`/`embed_weighted`) or the gathered length after
   /// applying a keep_mask in `embed_masked` was below the threshold.
   #[error("clip too short: {len} samples (need at least {min})")]
-  InvalidClip { len: usize, min: usize },
+  InvalidClip {
+    /// Actual sample count provided by the caller.
+    len: usize,
+    /// Minimum sample count required by the model
+    /// (`MIN_CLIP_SAMPLES`).
+    min: usize,
+  },
 
   /// `voice_probs.len() != samples.len()` for `embed_weighted`.
   #[error("voice_probs.len() = {weights_len} must equal samples.len() = {samples_len}")]
   WeightShapeMismatch {
+    /// Length of the audio sample slice.
     samples_len: usize,
+    /// Length of the voice-probability slice the caller passed.
     weights_len: usize,
   },
 
@@ -31,9 +39,14 @@ pub enum Error {
   #[error("voice_probs contains NaN/±inf/<0/>1; voice probabilities must be finite in [0.0, 1.0]")]
   InvalidVoiceProbs,
 
-  /// Rev-8: `keep_mask.len() != samples.len()` for `embed_masked`.
+  /// `keep_mask.len() != samples.len()` for `embed_masked`.
   #[error("keep_mask.len() = {mask_len} must equal samples.len() = {samples_len}")]
-  MaskShapeMismatch { samples_len: usize, mask_len: usize },
+  MaskShapeMismatch {
+    /// Length of the audio sample slice.
+    samples_len: usize,
+    /// Length of the keep-mask slice.
+    mask_len: usize,
+  },
 
   /// All windows had near-zero voice-probability weight; the weighted
   /// average is undefined. Almost always caller error.
@@ -58,7 +71,12 @@ pub enum Error {
   #[error(
     "chunk_samples.len() = {got}, expected {expected} (pyannote 10s @ 16 kHz = WINDOW_SAMPLES)"
   )]
-  ChunkSamplesShapeMismatch { expected: usize, got: usize },
+  ChunkSamplesShapeMismatch {
+    /// Expected sample count (`WINDOW_SAMPLES`).
+    expected: usize,
+    /// Actual sample count provided.
+    got: usize,
+  },
 
   /// `frame_mask.len()` passed to
   /// `EmbedModel::embed_chunk_with_frame_mask` doesn't match the
@@ -70,7 +88,12 @@ pub enum Error {
   #[error(
     "frame_mask.len() = {got}, expected {expected} (pyannote segmentation = FRAMES_PER_WINDOW)"
   )]
-  FrameMaskShapeMismatch { expected: usize, got: usize },
+  FrameMaskShapeMismatch {
+    /// Expected mask length (`FRAMES_PER_WINDOW`).
+    expected: usize,
+    /// Actual mask length provided.
+    got: usize,
+  },
 
   /// Input contains NaN or infinity.
   #[error("input contains non-finite values (NaN or infinity)")]
@@ -93,7 +116,12 @@ pub enum Error {
 
   /// ONNX inference output had an unexpected element count.
   #[error("inference scores length {got}, expected {expected}")]
-  InferenceShapeMismatch { expected: usize, got: usize },
+  InferenceShapeMismatch {
+    /// Element count the contract expects (`n * EMBEDDING_DIM`).
+    expected: usize,
+    /// Element count actually returned by the model.
+    got: usize,
+  },
 
   /// ONNX `session.run()` returned a zero-output `SessionOutputs`.
   /// Realistic causes are a malformed model export (no graph outputs)
@@ -135,8 +163,12 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error("model {tensor} dims {got:?}, expected {expected:?}")]
   IncompatibleModel {
+    /// Name of the tensor whose shape is wrong (e.g. `"input"` /
+    /// `"output"`).
     tensor: &'static str,
+    /// Shape the dia contract expects.
     expected: &'static [i64],
+    /// Shape the loaded ONNX file actually declares.
     got: Vec<i64>,
   },
 
@@ -145,7 +177,9 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "ort")))]
   #[error("failed to load model from {path}: {source}", path = path.display())]
   LoadModel {
+    /// Path to the ONNX file the loader attempted.
     path: PathBuf,
+    /// Underlying error from `ort`.
     #[source]
     source: ort::Error,
   },
@@ -161,7 +195,9 @@ pub enum Error {
   #[cfg_attr(docsrs, doc(cfg(feature = "tch")))]
   #[error("failed to load TorchScript model from {path}: {source}", path = path.display())]
   LoadTorchScript {
+    /// Path to the TorchScript module the loader attempted.
     path: std::path::PathBuf,
+    /// Underlying error from `tch`.
     #[source]
     source: tch::TchError,
   },

@@ -103,14 +103,19 @@ impl<A, T> EmbeddingMeta<A, T> {
     self
   }
 
+  /// Caller-supplied audio identifier propagated through the
+  /// embedding pipeline.
   pub fn audio_id(&self) -> &A {
     &self.audio_id
   }
 
+  /// Caller-supplied track identifier propagated through the
+  /// embedding pipeline.
   pub fn track_id(&self) -> &T {
     &self.track_id
   }
 
+  /// Optional correlation id (for telemetry / log correlation).
   pub fn correlation_id(&self) -> Option<u64> {
     self.correlation_id
   }
@@ -165,30 +170,43 @@ impl<A, T> EmbeddingResult<A, T> {
     }
   }
 
+  /// L2-normalized 256-d speaker embedding.
   pub fn embedding(&self) -> &Embedding {
     &self.embedding
   }
 
+  /// Duration of the source audio clip (pre-padding, pre-cropping).
   pub fn source_duration(&self) -> Duration {
     self.source_duration
   }
 
+  /// Number of 2 s windows averaged into the embedding (1 for clips
+  /// ≤ 2 s; sliding-window aggregation for longer clips).
   pub fn windows_used(&self) -> u32 {
     self.windows_used
   }
 
+  /// Sum of per-window weights used during aggregation. Zero ⇒
+  /// the result is degenerate; callers may want to inspect this for
+  /// quality gating.
   pub fn total_weight(&self) -> f32 {
     self.total_weight
   }
 
+  /// Caller-supplied audio identifier propagated from
+  /// [`EmbeddingMeta::audio_id`].
   pub fn audio_id(&self) -> &A {
     &self.audio_id
   }
 
+  /// Caller-supplied track identifier propagated from
+  /// [`EmbeddingMeta::track_id`].
   pub fn track_id(&self) -> &T {
     &self.track_id
   }
 
+  /// Optional correlation id propagated from
+  /// [`EmbeddingMeta::correlation_id`].
   pub fn correlation_id(&self) -> Option<u64> {
     self.correlation_id
   }

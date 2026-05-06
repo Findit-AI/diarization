@@ -35,7 +35,13 @@ pub enum Error {
   /// index). Pyannote prints a `WARNING:` to stdout and keeps the
   /// regressed state; this is a deliberate fail-fast divergence.
   #[error("ELBO regressed by {delta:.3e} at iteration {iter} (beyond float-roundoff tolerance)")]
-  ElboRegression { iter: usize, delta: f64 },
+  ElboRegression {
+    /// Iteration index at which the regression was detected.
+    iter: usize,
+    /// `ELBO[iter] - ELBO[iter - 1]` (negative beyond the
+    /// float-roundoff band).
+    delta: f64,
+  },
 }
 
 /// Specific shape-violation reasons for [`Error::Shape`].

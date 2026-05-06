@@ -141,11 +141,23 @@ fn main() -> Result<()> {
       ComputeUnits::All => "all",
     })
     .unwrap_or("default");
+  let seg_label = if force_cpu_seg {
+    "CPU"
+  } else if coreml_pinned {
+    "CoreML pinned"
+  } else {
+    "auto"
+  };
+  let emb_label = if force_cpu_emb {
+    "CPU"
+  } else if coreml_pinned {
+    "CoreML pinned"
+  } else {
+    "auto"
+  };
   eprintln!(
     "# dia: seg={} emb={} coreml_cu={}",
-    if force_cpu_seg { "CPU" } else { "auto" },
-    if force_cpu_emb { "CPU" } else { "auto" },
-    cu_label,
+    seg_label, emb_label, cu_label,
   );
   // Suppress unused-import warning (the explicit `_with_options`
   // path keeps the type alive; CoreML import is for downstream use

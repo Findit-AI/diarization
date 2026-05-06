@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+/// Errors returned by [`crate::cluster::hungarian::constrained_argmax`].
 #[derive(Debug, Error)]
 pub enum Error {
   /// Input shape is invalid (e.g., 0 speakers or 0 clusters).
@@ -15,12 +16,16 @@ pub enum Error {
 /// Specific shape-violation reasons for [`Error::Shape`].
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeError {
+  /// `chunks.len() == 0`.
   #[error("chunks must contain at least one chunk")]
   EmptyChunks,
+  /// `num_speakers == 0`.
   #[error("num_speakers must be at least 1")]
   ZeroSpeakers,
+  /// `num_clusters == 0`.
   #[error("num_clusters must be at least 1")]
   ZeroClusters,
+  /// Chunks have differing `(num_speakers, num_clusters)` shapes.
   #[error("all chunks must share the same shape")]
   InconsistentChunkShape,
 }
@@ -28,8 +33,12 @@ pub enum ShapeError {
 /// Specific non-finite reasons for [`Error::NonFinite`].
 #[derive(Debug, Error, Clone, Copy, PartialEq)]
 pub enum NonFiniteError {
+  /// `soft_clusters` contains `+inf` or `-inf` — the solver cannot
+  /// compute a meaningful argmax against an infinite cost.
   #[error("soft_clusters contains +inf or -inf")]
   InfInSoftClusters,
+  /// `soft_clusters` is entirely NaN — no finite value is available
+  /// as the `nanmin` replacement that pyannote uses.
   #[error("soft_clusters has no finite entries; cannot compute nanmin replacement")]
   NoFiniteEntries,
   /// A finite cost magnitude exceeds [`MAX_COST_MAGNITUDE`]. The
@@ -48,5 +57,10 @@ pub enum NonFiniteError {
   #[error(
     "soft_clusters contains finite value {value:e} with |value| > MAX_COST_MAGNITUDE ({max:e})"
   )]
-  WeightOutOfBounds { value: f64, max: f64 },
+  WeightOutOfBounds {
+    /// The offending finite value.
+    value: f64,
+    /// The configured `MAX_COST_MAGNITUDE` cap.
+    max: f64,
+  },
 }

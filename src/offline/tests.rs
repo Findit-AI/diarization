@@ -19,7 +19,7 @@ use crate::{
 /// raw_embeddings + segmentations matching `num_chunks * num_speakers
 /// * num_frames_per_chunk`, default sliding windows, with the count
 /// tensor controlled by the caller. The PLDA transform is bundled.
-fn synthetic_input_inputs(
+fn synthetic_inputs(
   num_chunks: usize,
   num_frames_per_chunk: usize,
 ) -> (
@@ -50,8 +50,7 @@ fn synthetic_input_inputs(
 fn rejects_count_length_mismatch_before_clustering() {
   let num_chunks = 1;
   let num_frames_per_chunk = 4;
-  let (raw, seg, plda, chunks_sw, frames_sw) =
-    synthetic_input_inputs(num_chunks, num_frames_per_chunk);
+  let (raw, seg, plda, chunks_sw, frames_sw) = synthetic_inputs(num_chunks, num_frames_per_chunk);
   let bad_count: Vec<u8> = Vec::new();
   let num_output_frames = 64;
   let input = OfflineInput::new(
@@ -86,8 +85,7 @@ fn rejects_count_length_mismatch_before_clustering() {
 fn rejects_zero_num_output_frames_before_clustering() {
   let num_chunks = 1;
   let num_frames_per_chunk = 4;
-  let (raw, seg, plda, chunks_sw, frames_sw) =
-    synthetic_input_inputs(num_chunks, num_frames_per_chunk);
+  let (raw, seg, plda, chunks_sw, frames_sw) = synthetic_inputs(num_chunks, num_frames_per_chunk);
   let bad_count: Vec<u8> = Vec::new();
   let num_output_frames = 0;
   let input = OfflineInput::new(
@@ -124,8 +122,7 @@ fn rejects_count_above_max_before_clustering() {
   let num_chunks = 1;
   let num_frames_per_chunk = 4;
   let num_output_frames = 64;
-  let (raw, seg, plda, chunks_sw, frames_sw) =
-    synthetic_input_inputs(num_chunks, num_frames_per_chunk);
+  let (raw, seg, plda, chunks_sw, frames_sw) = synthetic_inputs(num_chunks, num_frames_per_chunk);
   let mut bad_count: Vec<u8> = vec![1; num_output_frames];
   bad_count[5] = u8::MAX; // single poison cell, well above the cap of 64
   let input = OfflineInput::new(

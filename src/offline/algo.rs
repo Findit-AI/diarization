@@ -16,12 +16,17 @@ use nalgebra::DVector;
 /// where most failures surface in offline mode).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  /// Input shape / configuration is invalid — see `ShapeError`.
   #[error("offline: {0}")]
   Shape(#[from] ShapeError),
+  /// Propagated from [`crate::pipeline::assign_embeddings`].
   #[error("offline: pipeline: {0}")]
   Pipeline(#[from] crate::pipeline::Error),
+  /// Propagated from [`crate::reconstruct::reconstruct`] / RTTM
+  /// emission.
   #[error("offline: reconstruct: {0}")]
   Reconstruct(#[from] crate::reconstruct::Error),
+  /// Propagated from [`crate::plda::PldaTransform`].
   #[error("offline: plda: {0}")]
   Plda(#[from] crate::plda::Error),
   /// Propagated from segmentation ONNX inference inside the

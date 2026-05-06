@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+/// Errors returned by [`crate::cluster::centroid::weighted_centroids`].
 #[derive(Debug, Error)]
 pub enum Error {
   /// Input shape is invalid (mismatched dims, no surviving clusters,
@@ -39,20 +40,29 @@ pub enum Error {
 /// Specific shape-violation reasons for [`Error::Shape`].
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeError {
+  /// `q.nrows() == 0`.
   #[error("q must have at least one row")]
   EmptyQ,
+  /// `q.ncols() == 0`.
   #[error("q must have at least one column")]
   ZeroQClusters,
+  /// `sp.len() != q.ncols()`.
   #[error("sp.len() must equal q.ncols()")]
   SpQClusterMismatch,
+  /// `num_train_embeddings != q.nrows()`.
   #[error("embeddings.nrows() must equal q.nrows()")]
   EmbeddingsQRowMismatch,
+  /// `embed_dim == 0`.
   #[error("embeddings must have at least one column")]
   ZeroEmbeddingDim,
+  /// `sp_threshold` is NaN or `±inf`.
   #[error("sp_threshold must be finite")]
   NonFiniteSpThreshold,
+  /// No surviving cluster after the sp-threshold filter.
   #[error("no clusters survive the sp threshold (would produce empty centroid set)")]
   NoSurvivingClusters,
+  /// A surviving cluster's total `q`-column weight is `<= 0`.
+  /// Normalizing by it would yield NaN.
   #[error(
     "surviving cluster has non-positive total weight; \
      cannot normalize without producing NaN"
@@ -63,10 +73,13 @@ pub enum ShapeError {
 /// Field that contained a non-finite value.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum NonFiniteField {
+  /// A NaN/`±inf` entry in the `q` posterior.
   #[error("q")]
   Q,
+  /// A NaN/`±inf` entry in the `sp` speaker priors.
   #[error("sp")]
   Sp,
+  /// A NaN/`±inf` entry in the `embeddings` slice.
   #[error("embeddings")]
   Embeddings,
 }

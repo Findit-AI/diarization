@@ -993,6 +993,10 @@ mod tests {
   /// allocations use different `SpillOptions` instances — no shared
   /// state means no cross-test contamination.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "miri does not support fcntl(F_PREALLOCATE) / mmap; mmap-path tests cannot run"
+  )]
   fn read_write_roundtrip_both_backends() {
     let mmap_opts = SpillOptions::default().with_threshold_bytes(0);
     let mut v: SpillBytesMut<f64> = SpillBytesMut::zeros(64, &mmap_opts).expect("mmap alloc");
@@ -1022,6 +1026,10 @@ mod tests {
   /// Differential test: heap and mmap backends must produce
   /// bit-identical contents for the same write sequence.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "miri does not support fcntl(F_PREALLOCATE) / mmap; mmap-path tests cannot run"
+  )]
   fn heap_mmap_differential_bit_equal() {
     fn fill_and_collect<F: FnOnce(&mut SpillBytesMut<f64>)>(threshold: usize, fill: F) -> Vec<f64> {
       let opts = SpillOptions::new().with_threshold_bytes(threshold);
@@ -1092,6 +1100,10 @@ mod tests {
   /// Distinct `SpillOptions` values produce distinct backend
   /// choices on the same allocation size.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "miri does not support fcntl(F_PREALLOCATE) / mmap; mmap-path tests cannot run"
+  )]
   fn distinct_options_pick_distinct_backends() {
     let mmap_opts = SpillOptions::new().with_threshold_bytes(0);
     let v: SpillBytesMut<f64> = SpillBytesMut::zeros(64, &mmap_opts).expect("mmap alloc");
@@ -1125,6 +1137,10 @@ mod tests {
   /// Freeze on the mmap path preserves contents and the `Mmap`
   /// backend tag.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "miri does not support fcntl(F_PREALLOCATE) / mmap; mmap-path tests cannot run"
+  )]
   fn freeze_mmap_preserves_data_and_backend() {
     let opts = SpillOptions::default().with_threshold_bytes(0);
     let mut v: SpillBytesMut<f64> = SpillBytesMut::zeros(32, &opts).expect("alloc");
@@ -1163,6 +1179,10 @@ mod tests {
 
   /// Same shared-storage assertion for the mmap backend.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "miri does not support fcntl(F_PREALLOCATE) / mmap; mmap-path tests cannot run"
+  )]
   fn clone_shares_mmap_storage() {
     let opts = SpillOptions::default().with_threshold_bytes(0);
     let mut v: SpillBytesMut<f64> = SpillBytesMut::zeros(16, &opts).expect("alloc");

@@ -68,9 +68,9 @@ pub fn ahc_init(
   if d == 0 {
     return Err(ShapeError::ZeroEmbeddingDim.into());
   }
-  let expected_len = n.checked_mul(d).ok_or(ShapeError::EmptyEmbeddings)?;
+  let expected_len = n.checked_mul(d).ok_or(ShapeError::EmbeddingsSizeOverflow)?;
   if embeddings.len() != expected_len {
-    return Err(ShapeError::EmptyEmbeddings.into());
+    return Err(ShapeError::EmbeddingsLenMismatch.into());
   }
   if !threshold.is_finite() || threshold <= 0.0 {
     return Err(ShapeError::InvalidThreshold.into());

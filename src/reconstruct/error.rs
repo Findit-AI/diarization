@@ -2,12 +2,18 @@
 
 use thiserror::Error;
 
+/// Errors returned by [`crate::reconstruct::reconstruct`] and the
+/// fallible RTTM-emission helpers.
 #[derive(Debug, Error)]
 pub enum Error {
+  /// Input shape is invalid — see [`ShapeError`] for the specific
+  /// reason.
   #[error("reconstruct: shape error: {0}")]
   Shape(#[from] ShapeError),
+  /// A NaN/`±inf` was found in a field that requires finite values.
   #[error("reconstruct: non-finite value in {0}")]
   NonFinite(#[from] NonFiniteField),
+  /// `chunks_sw` / `frames_sw` sliding-window parameters are invalid.
   #[error("reconstruct: invalid sliding-window timing: {0}")]
   Timing(#[from] TimingError),
   /// Failed to allocate a scratch buffer (`clustered`, `clustered_mask`,
@@ -25,41 +31,64 @@ pub enum Error {
 /// Specific shape-violation reasons for [`Error::Shape`].
 #[derive(Debug, Error, Clone, Copy, PartialEq)]
 pub enum ShapeError {
+  /// `num_chunks == 0`.
   #[error("num_chunks must be at least 1")]
   ZeroNumChunks,
+  /// `num_frames_per_chunk == 0`.
   #[error("num_frames_per_chunk must be at least 1")]
   ZeroNumFramesPerChunk,
+  /// `num_speakers == 0`.
   #[error("num_speakers must be at least 1")]
   ZeroNumSpeakers,
+  /// `num_speakers > MAX_SPEAKER_SLOTS`.
   #[error("num_speakers must be <= MAX_SPEAKER_SLOTS (3)")]
   TooManySpeakers,
+  /// `segmentations.len() != num_chunks * num_frames_per_chunk *
+  /// num_speakers`.
   #[error("segmentations.len() != num_chunks * num_frames_per_chunk * num_speakers")]
   SegmentationsLenMismatch,
+  /// `hard_clusters.len() != num_chunks`.
   #[error("hard_clusters.len() != num_chunks")]
   HardClustersLenMismatch,
+  /// `num_output_frames == 0`.
   #[error("num_output_frames must be at least 1")]
   ZeroNumOutputFrames,
+  /// `count.len() != num_output_frames`.
   #[error("count.len() != num_output_frames")]
   CountLenMismatch,
+  /// A `count[t]` entry exceeds [`crate::reconstruct::MAX_COUNT_PER_FRAME`].
   #[error("count entry exceeds MAX_COUNT_PER_FRAME (64)")]
   CountAboveMax,
+  /// `hard_clusters` contains a negative id other than the reserved
+  /// `UNMATCHED` sentinel.
   #[error("hard_clusters contains a negative id other than UNMATCHED")]
   HardClustersNegativeId,
+  /// A `hard_clusters[c][s]` value exceeds
+  /// [`crate::reconstruct::MAX_CLUSTER_ID`].
   #[error("hard_clusters id exceeds MAX_CLUSTER_ID (1023)")]
   HardClustersIdAboveMax,
+  /// `num_chunks * num_frames_per_chunk * num_speakers` overflows
+  /// `usize`.
   #[error("num_chunks * num_frames_per_chunk * num_speakers overflows usize")]
   SegmentationsSizeOverflow,
+  /// `num_chunks * num_frames_per_chunk * num_clusters` overflows
+  /// `usize`.
   #[error("num_chunks * num_frames_per_chunk * num_clusters overflows usize")]
   ClusteredSizeOverflow,
+  /// `num_output_frames * num_clusters` overflows `usize`.
   #[error("num_output_frames * num_clusters overflows usize")]
   OutputGridSizeOverflow,
+  /// `hard_clusters[c]` has a non-UNMATCHED id in a trailing slot
+  /// (beyond `num_speakers`).
   #[error(
     "hard_clusters[c] has a non-UNMATCHED id in a slot beyond num_speakers; \
      slots num_speakers..MAX_SPEAKER_SLOTS must all be UNMATCHED"
   )]
   HardClustersTrailingSlotNotUnmatched,
+  /// `grid.len() != num_frames * num_clusters`.
   #[error("grid.len() must equal num_frames * num_clusters")]
   GridLenMismatch,
+  /// `num_frames * num_clusters` overflows `usize`.
   #[error("num_frames * num_clusters overflows usize")]
   GridSizeOverflow,
   /// `smoothing_epsilon` is `Some(NaN/±inf)` or `Some(< 0)`. The
@@ -74,7 +103,10 @@ pub enum ShapeError {
   /// enforce, but checked at the lower-level `reconstruct` boundary
   /// so direct callers cannot bypass it.
   #[error("smoothing_epsilon ({value:?}) must be None or Some(finite >= 0)")]
-  SmoothingEpsilonOutOfRange { value: Option<f32> },
+  SmoothingEpsilonOutOfRange {
+    /// The offending `smoothing_epsilon` value.
+    value: Option<f32>,
+  },
   /// `min_duration_off` is NaN/±inf or negative. RTTM span-merge
   /// reads this as a non-negative seconds quantity; `+inf` merges
   /// every same-cluster gap, `NaN` silently disables merging
@@ -84,7 +116,10 @@ pub enum ShapeError {
   ///
   /// [`try_discrete_to_spans`]: crate::reconstruct::try_discrete_to_spans
   #[error("min_duration_off ({value}) must be finite and >= 0")]
-  MinDurationOffOutOfRange { value: f64 },
+  MinDurationOffOutOfRange {
+    /// The offending `min_duration_off` value.
+    value: f64,
+  },
   /// `frames_sw` (the frame-level [`SlidingWindow`]) has a non-finite
   /// `start`/`duration`/`step` or non-positive `duration`/`step`. RTTM
   /// span emission computes `start + s * step + duration/2` per
@@ -106,7 +141,12 @@ pub enum ShapeError {
   /// emits {0, 1}, so any non-binary cell here indicates upstream
   /// corruption rather than a legitimate input to RTTM emission.
   #[error("grid contains non-binary value at index {index}: {value}")]
-  GridNonBinaryCell { index: usize, value: f32 },
+  GridNonBinaryCell {
+    /// 0-based flat index of the offending cell.
+    index: usize,
+    /// The non-binary cell value.
+    value: f32,
+  },
   /// `try_discrete_to_spans` was called with `num_frames == 0`. The
   /// `num_frames * num_clusters` product is zero in that case, so
   /// the empty-grid length check passes for any `num_clusters` —
@@ -130,7 +170,12 @@ pub enum ShapeError {
   /// input — and lets a caller of the public RTTM API drive an
   /// unbounded per-cluster loop.
   #[error("num_clusters ({got}) exceeds cap ({max} = MAX_CLUSTER_ID + 1)")]
-  TooManyClusters { got: usize, max: usize },
+  TooManyClusters {
+    /// Actual `num_clusters` value provided.
+    got: usize,
+    /// Cap (`MAX_CLUSTER_ID + 1 = 1024`).
+    max: usize,
+  },
   /// `num_output_frames * num_clusters` exceeds
   /// [`MAX_RECONSTRUCT_GRID_CELLS`]. The `reconstruct` function
   /// allocates `aggregated` and `agg_mask` of that size; without
@@ -141,7 +186,12 @@ pub enum ShapeError {
   ///
   /// [`MAX_RECONSTRUCT_GRID_CELLS`]: crate::reconstruct::MAX_RECONSTRUCT_GRID_CELLS
   #[error("num_output_frames * num_clusters ({got}) exceeds MAX_RECONSTRUCT_GRID_CELLS ({max})")]
-  OutputGridTooLarge { got: usize, max: usize },
+  OutputGridTooLarge {
+    /// `num_output_frames * num_clusters` cells requested.
+    got: usize,
+    /// Cap (`MAX_RECONSTRUCT_GRID_CELLS`).
+    max: usize,
+  },
   /// `num_output_frames` is positive but too small to cover the
   /// last chunk's frames. The `reconstruct` aggregation loop
   /// silently skips `out_f >= num_output_frames` contributions via
@@ -154,12 +204,18 @@ pub enum ShapeError {
      minimum ({required} = last_start_frame + num_frames_per_chunk); \
      trailing chunk contributions would be silently truncated"
   )]
-  OutputFrameCountTooSmall { got: usize, required: usize },
+  OutputFrameCountTooSmall {
+    /// Actual `num_output_frames` value.
+    got: usize,
+    /// Minimum required (`last_start_frame + num_frames_per_chunk`).
+    required: usize,
+  },
 }
 
 /// Field that contained a non-finite value.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum NonFiniteField {
+  /// `segmentations` contained a NaN/`±inf` entry.
   #[error("segmentations")]
   Segmentations,
 }
@@ -167,8 +223,10 @@ pub enum NonFiniteField {
 /// Specific timing-validation failures for [`Error::Timing`].
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum TimingError {
+  /// A sliding-window `start` / `duration` / `step` is non-finite.
   #[error("non-finite sliding-window parameter")]
   NonFiniteParameter,
+  /// A sliding-window `duration` or `step` is `<= 0`.
   #[error("non-positive duration or step")]
   NonPositiveDurationOrStep,
 }

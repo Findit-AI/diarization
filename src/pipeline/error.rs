@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+/// Errors returned by [`crate::pipeline::assign_embeddings`].
 #[derive(Debug, Error)]
 pub enum Error {
   /// Input shape is invalid (e.g., zero chunks, mismatched dims, etc.).
@@ -39,36 +40,53 @@ pub enum Error {
 /// Specific shape-violation reasons for [`Error::Shape`].
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeError {
+  /// `num_chunks == 0`.
   #[error("num_chunks must be at least 1")]
   ZeroNumChunks,
+  /// `num_speakers != MAX_SPEAKER_SLOTS` (community-1 expects 3).
   #[error("num_speakers must equal MAX_SPEAKER_SLOTS (segmentation-3.0 / community-1 = 3)")]
   WrongNumSpeakers,
+  /// `embed_dim == 0`.
   #[error("embeddings must have at least one column")]
   ZeroEmbeddingDim,
+  /// `num_chunks * num_speakers` overflows `usize`.
   #[error("num_chunks * num_speakers overflows usize")]
   EmbeddingsRowsOverflow,
+  /// `embeddings.len() / embed_dim != num_chunks * num_speakers`.
   #[error("embeddings.nrows() must equal num_chunks * num_speakers")]
   EmbeddingsRowMismatch,
+  /// `num_frames == 0`.
   #[error("num_frames must be at least 1")]
   ZeroNumFrames,
+  /// `num_chunks * num_frames * num_speakers` overflows `usize`.
   #[error("num_chunks * num_frames * num_speakers overflows usize")]
   SegmentationsOverflow,
+  /// `segmentations.len()` does not equal
+  /// `num_chunks * num_frames * num_speakers`.
   #[error("segmentations.len() must equal num_chunks * num_frames * num_speakers")]
   SegmentationsLenMismatch,
+  /// `train_chunk_idx.len() != train_speaker_idx.len()`.
   #[error("train_chunk_idx and train_speaker_idx must have the same length")]
   TrainIndexLenMismatch,
+  /// `post_plda.len() / plda_dim != num_train`.
   #[error("post_plda.nrows() must equal num_train")]
   PostPldaRowMismatch,
+  /// `plda_dim == 0`.
   #[error("post_plda must have at least one column (PLDA dimension)")]
   ZeroPldaDim,
+  /// `phi.len() != plda_dim`.
   #[error("phi.len() must equal post_plda.ncols()")]
   PhiPldaDimMismatch,
+  /// `train_chunk_idx[i] >= num_chunks`.
   #[error("train_chunk_idx[i] out of range")]
   TrainChunkIdxOutOfRange,
+  /// `train_speaker_idx[i] >= num_speakers`.
   #[error("train_speaker_idx[i] out of range")]
   TrainSpeakerIdxOutOfRange,
+  /// `threshold` is non-finite or non-positive.
   #[error("threshold must be a positive finite scalar")]
   InvalidThreshold,
+  /// `max_iters == 0`.
   #[error("max_iters must be at least 1")]
   ZeroMaxIters,
   /// Per-row squared-L2-norm of `embeddings` overflowed to `+inf`. The
@@ -151,8 +169,10 @@ pub enum ShapeError {
 /// Field that contained a non-finite value.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum NonFiniteField {
+  /// `embeddings` contained a NaN/`±inf` entry.
   #[error("embeddings")]
   Embeddings,
+  /// `segmentations` contained a NaN/`±inf` entry.
   #[error("segmentations")]
   Segmentations,
   /// `post_plda` had a NaN/`±inf` entry. Validated upfront in
