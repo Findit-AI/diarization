@@ -45,9 +45,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     _ => return Err("unsupported wav format".into()),
   };
 
+  // Embedding model: honor `DIA_EMBED_MODEL_PATH` if set, otherwise
+  // fall back to the conventional `<crate-root>/models/` location.
   let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  let emb_path: PathBuf = std::env::var_os("DIA_EMBED_MODEL_PATH")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| crate_root.join("models/wespeaker_resnet34_lm.onnx"));
   let mut seg = SegmentModel::bundled()?;
-  let mut emb = EmbedModel::from_file(crate_root.join("models/wespeaker_resnet34_lm.onnx"))?;
+  let mut emb = EmbedModel::from_file(&emb_path)
+    .map_err(|e| format!("load embed model from {}: {}", emb_path.display(), e))?;
   let plda = PldaTransform::new()?;
   let mut vad_session = VadSession::from_memory(silero::BUNDLED_MODEL)?;
   let vad_opts = SpeechOptions::default()

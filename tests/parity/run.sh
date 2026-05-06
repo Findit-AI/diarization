@@ -17,6 +17,25 @@ ROOT="$SCRIPT_DIR/../.."
 
 DEFAULT_CLIP="$SCRIPT_DIR/fixtures/01_dialogue/clip_16k.wav"
 CLIP="${1:-$DEFAULT_CLIP}"
+# `clip_16k.wav` files under `fixtures/*/` are gitignored (the upstream
+# reference clips are sourced separately and not tracked). On a clean
+# checkout the default path will not exist; surface a helpful error
+# instead of letting `realpath` fail under `set -e` with no context.
+if [ ! -f "$CLIP" ]; then
+  if [ "$CLIP" = "$DEFAULT_CLIP" ]; then
+    echo "[run.sh] error: default fixture clip not found at:" >&2
+    echo "          $DEFAULT_CLIP" >&2
+    echo "        That path is gitignored on purpose (upstream-sourced" >&2
+    echo "        audio). Either:" >&2
+    echo "          - pass an explicit clip:  ./tests/parity/run.sh path/to/clip_16k.wav" >&2
+    echo "          - or provision the fixture by running" >&2
+    echo "            tests/parity/python/capture_intermediates.py" >&2
+    echo "            against your own 16 kHz mono WAV." >&2
+  else
+    echo "[run.sh] error: clip not found: $CLIP" >&2
+  fi
+  exit 1
+fi
 ABS_CLIP="$(cd "$ROOT" && realpath "$CLIP")"
 SNAPSHOT_DIR="$(dirname "$ABS_CLIP")"
 MANIFEST="$SNAPSHOT_DIR/manifest.json"

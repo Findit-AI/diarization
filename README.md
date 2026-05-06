@@ -42,22 +42,50 @@ The segmentation model and PLDA weights ship inside the crate — only the
 WeSpeaker ResNet34-LM embedding ONNX is BYO (~26 MB; above the
 crates.io 10 MB hard limit, so it cannot be bundled). Fetch it from the
 [FinDIT-Studio/dia-models](https://huggingface.co/FinDIT-Studio/dia-models)
-HuggingFace bundle in either of two ways:
+HuggingFace bundle. Both commands below pin a specific HF commit and
+verify SHA-256 before installing — a republished or truncated upstream
+model surfaces as a hard failure rather than silently altering
+diarization output.
 
 ```sh
-# Option A: huggingface_hub CLI (recommended; handles caching + auth).
-hf download FinDIT-Studio/dia-models wespeaker_resnet34_lm.onnx \
-  --local-dir models
-
-# Option B: plain curl, no extra tools.
+# Pinned upstream revision + expected SHA-256 of the FP32 single-file ONNX.
+DIA_EMBED_MODEL_REV="8ecadc1f8bc31dac506e46d1f5aa7c25e00277ec"
+DIA_EMBED_MODEL_SHA256="4c15c6be4235318d092c9d347e00c68ba476136d6172f675f76ad6b0c2661f01"
 mkdir -p models
-curl -L -o models/wespeaker_resnet34_lm.onnx \
-  https://huggingface.co/FinDIT-Studio/dia-models/resolve/main/wespeaker_resnet34_lm.onnx
+TMP="$(mktemp -t wespeaker_resnet34_lm.XXXX.onnx)"
+```
+
+```sh
+# Option A: huggingface_hub CLI (handles caching, retries, optional auth).
+hf download \
+  --revision "$DIA_EMBED_MODEL_REV" \
+  --local-dir "$(dirname "$TMP")" \
+  --local-dir-use-symlinks False \
+  FinDIT-Studio/dia-models wespeaker_resnet34_lm.onnx
+mv "$(dirname "$TMP")/wespeaker_resnet34_lm.onnx" "$TMP"
+```
+
+```sh
+# Option B: plain curl, no extra tools.
+curl --fail --location \
+  --output "$TMP" \
+  "https://huggingface.co/FinDIT-Studio/dia-models/resolve/${DIA_EMBED_MODEL_REV}/wespeaker_resnet34_lm.onnx"
+```
+
+```sh
+# Then verify and install:
+ACTUAL="$(shasum -a 256 "$TMP" | awk '{print $1}')"
+if [ "$ACTUAL" != "$DIA_EMBED_MODEL_SHA256" ]; then
+  echo "SHA-256 mismatch: expected $DIA_EMBED_MODEL_SHA256, got $ACTUAL" >&2
+  rm -f "$TMP"; exit 1
+fi
+mv "$TMP" models/wespeaker_resnet34_lm.onnx
 ```
 
 (Workspace developers can also run `./scripts/download-embed-model.sh`,
-which wraps the same URL and verifies the SHA-256. The script is
-omitted from the published crate tarball.)
+which wraps the same revision + SHA. The script is omitted from the
+published crate tarball, so the inline commands above are the source
+of truth for crates.io users.)
 
 Then run an end-to-end example. The simplest needs only the `ort`
 feature:
