@@ -15,7 +15,7 @@ use std::{fs::File, hint::black_box, io::BufReader, path::PathBuf};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use diarization::pipeline::{AssignEmbeddingsInput, assign_embeddings};
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 use npyz::npz::NpzArchive;
 
 const FIXTURES: &[&str] = &[
@@ -47,12 +47,14 @@ fn read_npz<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, Vec<u64
 }
 
 struct PipelineInputs {
-  embeddings: DMatrix<f64>,
+  embeddings: Vec<f64>,
+  embed_dim: usize,
   num_chunks: usize,
   num_speakers: usize,
   segmentations: Vec<f64>,
   num_frames: usize,
-  post_plda: DMatrix<f64>,
+  post_plda: Vec<f64>,
+  plda_dim: usize,
   phi: DVector<f64>,
   train_chunk_idx: Vec<usize>,
   train_speaker_idx: Vec<usize>,
@@ -68,16 +70,7 @@ fn load(fixture_name: &str) -> PipelineInputs {
   let num_chunks = raw_shape[0] as usize;
   let num_speakers = raw_shape[1] as usize;
   let embed_dim = raw_shape[2] as usize;
-  let mut embeddings = DMatrix::<f64>::zeros(num_chunks * num_speakers, embed_dim);
-  for c in 0..num_chunks {
-    for s in 0..num_speakers {
-      let row = c * num_speakers + s;
-      let base = (c * num_speakers + s) * embed_dim;
-      for d in 0..embed_dim {
-        embeddings[(row, d)] = raw_flat[base + d] as f64;
-      }
-    }
-  }
+  let embeddings: Vec<f64> = raw_flat.iter().map(|&v| v as f64).collect();
 
   let seg_path = fixture(fixture_name, "segmentations.npz");
   let (seg_flat_f32, seg_shape) = read_npz::<f32>(&seg_path, "segmentations");
@@ -85,10 +78,8 @@ fn load(fixture_name: &str) -> PipelineInputs {
   let segmentations: Vec<f64> = seg_flat_f32.iter().map(|&v| v as f64).collect();
 
   let plda_path = fixture(fixture_name, "plda_embeddings.npz");
-  let (post_plda_flat, post_plda_shape) = read_npz::<f64>(&plda_path, "post_plda");
-  let num_train = post_plda_shape[0] as usize;
+  let (post_plda, post_plda_shape) = read_npz::<f64>(&plda_path, "post_plda");
   let plda_dim = post_plda_shape[1] as usize;
-  let post_plda = DMatrix::<f64>::from_row_slice(num_train, plda_dim, &post_plda_flat);
   let (phi_flat, _) = read_npz::<f64>(&plda_path, "phi");
   let phi = DVector::<f64>::from_vec(phi_flat);
   let (chunk_idx_i64, _) = read_npz::<i64>(&plda_path, "train_chunk_idx");
@@ -105,11 +96,13 @@ fn load(fixture_name: &str) -> PipelineInputs {
 
   PipelineInputs {
     embeddings,
+    embed_dim,
     num_chunks,
     num_speakers,
     segmentations,
     num_frames,
     post_plda,
+    plda_dim,
     phi,
     train_chunk_idx,
     train_speaker_idx,
@@ -128,11 +121,13 @@ fn bench(c: &mut Criterion) {
       b.iter(|| {
         let input = AssignEmbeddingsInput::new(
           &inp.embeddings,
+          inp.embed_dim,
           inp.num_chunks,
           inp.num_speakers,
           &inp.segmentations,
           inp.num_frames,
           &inp.post_plda,
+          inp.plda_dim,
           &inp.phi,
           &inp.train_chunk_idx,
           &inp.train_speaker_idx,

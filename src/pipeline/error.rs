@@ -52,8 +52,8 @@ pub enum ShapeError {
   /// `num_chunks * num_speakers` overflows `usize`.
   #[error("num_chunks * num_speakers overflows usize")]
   EmbeddingsRowsOverflow,
-  /// `embeddings.len() / embed_dim != num_chunks * num_speakers`.
-  #[error("embeddings.nrows() must equal num_chunks * num_speakers")]
+  /// `embeddings.len() != num_chunks * num_speakers * embed_dim`.
+  #[error("embeddings.len() must equal num_chunks * num_speakers * embed_dim")]
   EmbeddingsRowMismatch,
   /// `num_frames == 0`.
   #[error("num_frames must be at least 1")]
@@ -68,14 +68,14 @@ pub enum ShapeError {
   /// `train_chunk_idx.len() != train_speaker_idx.len()`.
   #[error("train_chunk_idx and train_speaker_idx must have the same length")]
   TrainIndexLenMismatch,
-  /// `post_plda.len() / plda_dim != num_train`.
-  #[error("post_plda.nrows() must equal num_train")]
+  /// `post_plda.len() != num_train * plda_dim`.
+  #[error("post_plda.len() must equal num_train * plda_dim")]
   PostPldaRowMismatch,
   /// `plda_dim == 0`.
   #[error("post_plda must have at least one column (PLDA dimension)")]
   ZeroPldaDim,
   /// `phi.len() != plda_dim`.
-  #[error("phi.len() must equal post_plda.ncols()")]
+  #[error("phi.len() must equal plda_dim")]
   PhiPldaDimMismatch,
   /// `train_chunk_idx[i] >= num_chunks`.
   #[error("train_chunk_idx[i] out of range")]

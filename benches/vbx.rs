@@ -88,7 +88,7 @@ fn bench(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::from_parameter(name), &inputs, |b, inp| {
       b.iter(|| {
         let out = vbx_iterate(
-          black_box(&inp.post_plda),
+          black_box(inp.post_plda.as_view()),
           black_box(&inp.phi),
           black_box(&inp.qinit),
           black_box(inp.fa),

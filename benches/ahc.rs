@@ -20,8 +20,7 @@
 use std::{fs::File, hint::black_box, io::BufReader, path::PathBuf};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use diarization::cluster::ahc::ahc_init;
-use nalgebra::DMatrix;
+use diarization::{cluster::ahc::ahc_init, ops::spill::SpillOptions};
 use npyz::npz::NpzArchive;
 
 const FIXTURES: &[&str] = &[
@@ -53,7 +52,9 @@ fn read_npz<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, Vec<u64
 }
 
 struct AhcInputs {
-  train_embeddings: DMatrix<f64>,
+  train_embeddings: Vec<f64>,
+  num_train: usize,
+  embed_dim: usize,
   threshold: f64,
 }
 
@@ -68,30 +69,39 @@ fn load(fixture_name: &str) -> AhcInputs {
   let (chunk_idx, _) = read_npz::<i64>(&plda_path, "train_chunk_idx");
   let (speaker_idx, _) = read_npz::<i64>(&plda_path, "train_speaker_idx");
   let num_train = chunk_idx.len();
-  let mut train_embeddings = DMatrix::<f64>::zeros(num_train, embed_dim);
+  let mut train_embeddings = vec![0.0_f64; num_train * embed_dim];
   for i in 0..num_train {
     let c = chunk_idx[i] as usize;
     let s = speaker_idx[i] as usize;
     let base = (c * num_speakers + s) * embed_dim;
     for d in 0..embed_dim {
-      train_embeddings[(i, d)] = raw_flat[base + d] as f64;
+      train_embeddings[i * embed_dim + d] = raw_flat[base + d] as f64;
     }
   }
   let threshold = read_npz::<f64>(&ahc_path, "threshold").0[0];
   AhcInputs {
     train_embeddings,
+    num_train,
+    embed_dim,
     threshold,
   }
 }
 
 fn bench(c: &mut Criterion) {
   let mut group = c.benchmark_group("ahc_init");
+  let spill_opts = SpillOptions::new();
   for &name in FIXTURES {
     let inputs = load(name);
     group.bench_with_input(BenchmarkId::from_parameter(name), &inputs, |b, inp| {
       b.iter(|| {
-        let labels =
-          ahc_init(black_box(&inp.train_embeddings), black_box(inp.threshold)).expect("ahc_init");
+        let labels = ahc_init(
+          black_box(&inp.train_embeddings),
+          black_box(inp.num_train),
+          black_box(inp.embed_dim),
+          black_box(inp.threshold),
+          black_box(&spill_opts),
+        )
+        .expect("ahc_init");
         black_box(labels);
       });
     });

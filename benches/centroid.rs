@@ -53,7 +53,9 @@ fn read_npz<T: npyz::Deserialize>(path: &PathBuf, key: &str) -> (Vec<T>, Vec<u64
 struct CentroidInputs {
   q: DMatrix<f64>,
   sp: DVector<f64>,
-  embeddings: DMatrix<f64>,
+  embeddings: Vec<f64>,
+  num_train: usize,
+  embed_dim: usize,
 }
 
 fn load(fixture_name: &str) -> CentroidInputs {
@@ -73,17 +75,23 @@ fn load(fixture_name: &str) -> CentroidInputs {
   let embed_dim = raw_shape[2] as usize;
   let (chunk_idx, _) = read_npz::<i64>(&plda_path, "train_chunk_idx");
   let (speaker_idx, _) = read_npz::<i64>(&plda_path, "train_speaker_idx");
-  let mut embeddings = DMatrix::<f64>::zeros(num_train, embed_dim);
+  let mut embeddings = vec![0.0_f64; num_train * embed_dim];
   for i in 0..num_train {
     let c = chunk_idx[i] as usize;
     let s = speaker_idx[i] as usize;
     let base = (c * num_speakers + s) * embed_dim;
     for d in 0..embed_dim {
-      embeddings[(i, d)] = raw_flat[base + d] as f64;
+      embeddings[i * embed_dim + d] = raw_flat[base + d] as f64;
     }
   }
 
-  CentroidInputs { q, sp, embeddings }
+  CentroidInputs {
+    q,
+    sp,
+    embeddings,
+    num_train,
+    embed_dim,
+  }
 }
 
 fn bench(c: &mut Criterion) {
@@ -96,6 +104,8 @@ fn bench(c: &mut Criterion) {
           black_box(&inp.q),
           black_box(&inp.sp),
           black_box(&inp.embeddings),
+          black_box(inp.num_train),
+          black_box(inp.embed_dim),
           SP_ALIVE_THRESHOLD,
         )
         .expect("weighted_centroids");
