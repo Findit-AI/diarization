@@ -6,7 +6,9 @@
 //! original-timeline RTTM spans.
 //!
 //! ```sh
-//! cargo run --example run_streaming_pipeline --features ort --release -- clip_16k.wav > hyp.rttm
+//! cargo run --release \
+//!   --features ort,silero-vad,bundled-segmentation \
+//!   --example run_streaming_pipeline -- clip_16k.wav > hyp.rttm
 //! ```
 
 use diarization::{

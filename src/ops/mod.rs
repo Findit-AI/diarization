@@ -69,8 +69,9 @@ pub use dispatch::{axpy, dot, logsumexp_row};
 
 // ─── runtime CPU-feature detection ───────────────────────────────────
 //
-// Two impls per arch: `feature = "std"` (runtime atomic-cached
-// detection) vs no_std (compile-time `cfg!(target_feature = ...)`).
+// Runtime atomic-cached CPU-feature detection. The crate uses std
+// throughout, so we always have access to `std::sync::atomic`;
+// detection is computed once and cached.
 // `diarization_force_scalar` overrides everything for testing — set
 // it via `RUSTFLAGS="--cfg diarization_force_scalar"` to bypass any
 // SIMD backend.

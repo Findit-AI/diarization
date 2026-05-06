@@ -4,8 +4,10 @@
 //! ```sh
 //! LIBTORCH=$(pwd)/tests/parity/python/.venv/lib/python3.12/site-packages/torch \
 //!   LIBTORCH_BYPASS_VERSION_CHECK=1 \
-//!   cargo run --release --no-default-features --features ort,tch \
-//!   --example run_owned_pipeline_tch tests/parity/fixtures/04_three_speaker/clip_16k.wav > hyp.rttm
+//!   cargo run --release --no-default-features \
+//!     --features ort,tch,bundled-segmentation \
+//!     --example run_owned_pipeline_tch \
+//!     tests/parity/fixtures/04_three_speaker/clip_16k.wav > hyp.rttm
 //! ```
 
 use diarization::{

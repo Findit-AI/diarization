@@ -1,9 +1,10 @@
 //! Demonstrates the Sans-I/O Segmenter API with a synthetic inferencer that
 //! returns logits for "speaker A continuously voiced." Run with:
 //!
-//!     cargo run --no-default-features --features std --example stream_layer1
+//!     cargo run --no-default-features --example stream_layer1
 //!
-//! No model file required.
+//! No model file required (the Sans-I/O state machine is exercisable
+//! with synthetic inputs without `ort`).
 
 use diarization::segment::{
   Action, FRAMES_PER_WINDOW, POWERSET_CLASSES, SegmentOptions, Segmenter, WINDOW_SAMPLES,

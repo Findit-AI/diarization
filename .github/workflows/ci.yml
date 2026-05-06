@@ -179,17 +179,20 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           cargo build --target x86_64-pc-windows-msvc
 
-  # Per-EP compile check. The cargo-hack feature sweeps above
-  # exclude every per-EP feature (and the `gpu` meta-feature)
-  # because `ort-sys 2.0.0-rc.12`'s `download-binaries` archive is
-  # CPU-only and cannot satisfy a vendor link step on the runner.
-  # Without this dedicated job, an EP-feature regression (renamed
-  # type, broken `#[doc(cfg(...))]`, missing re-export) would only
-  # surface on a vendor-provisioned host. `cargo check` does not
-  # link, so we get the bindings-level regression coverage without
-  # the link-step failure.
-  ep-link-check:
-    name: per-EP cargo check
+  # Per-EP **bindings** check (NOT link coverage). The cargo-hack
+  # feature sweeps above exclude every per-EP feature (and the
+  # `gpu` meta-feature) because `ort-sys 2.0.0-rc.12`'s
+  # `download-binaries` archive is CPU-only and cannot satisfy a
+  # vendor link step on the runner. `cargo check` does NOT link —
+  # it stops after type/borrow checking — so this job catches
+  # bindings-level regressions (renamed type, broken
+  # `#[doc(cfg(...))]`, missing re-export) without needing vendor
+  # libs. Real link validation requires a vendor-provisioned host
+  # (CUDA toolkit, ROCm runtime, DirectML.dll, etc.) and is out of
+  # scope for the open CI matrix; downstream callers building a
+  # multi-EP binary on such a host get the link contract there.
+  ep-bindings-check:
+    name: per-EP bindings check (no link)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -228,6 +231,43 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo check --features ${{ matrix.ep }}
         run: cargo check --no-default-features --features ort,${{ matrix.ep }}
+
+  # docs.rs equivalence gate. `package.metadata.docs.rs.features`
+  # enables ALL 16 per-EP features simultaneously plus the
+  # streaming-example surface; the cargo-hack sweeps above exclude
+  # every per-EP feature, and the per-EP `cargo check` matrix only
+  # tests one EP at a time. Without this job, a feature interaction
+  # (conflicting re-exports, `#[doc(cfg(...))]` mismatch, item-name
+  # collision) could pass every other CI gate yet break the docs.rs
+  # build. `cargo doc` exercises the same feature combination
+  # docs.rs uses, with `-D rustdoc::broken_intra_doc_links` to
+  # catch link rot.
+  docs-rs-check:
+    name: docs.rs feature-set doc build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-docsrs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-docsrs-
+      - name: Install Rust (nightly for docsrs cfg)
+        # docs.rs builds with nightly + `--cfg docsrs`; mirror that
+        # so a `#[cfg_attr(docsrs, doc(cfg(...)))]` regression caught
+        # only on docs.rs surfaces here too.
+        run: rustup toolchain install nightly --no-self-update && rustup default nightly
+      - name: cargo +nightly doc (docs.rs feature set)
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links --cfg docsrs"
+        run: |
+          cargo doc --no-deps --features \
+            ort,bundled-segmentation,serde,silero-vad,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure
 
   # Compile check for the `tch` (TorchScript) backend. `tch` is not in
   # the cargo-hack feature sweeps below because it requires libtorch

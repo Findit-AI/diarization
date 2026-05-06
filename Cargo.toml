@@ -245,12 +245,14 @@ required-features = ["ort", "bundled-segmentation"]
 [[example]]
 path = "examples/run_owned_pipeline_tch.rs"
 name = "run_owned_pipeline_tch"
-required-features = ["tch", "ort"]
+# Calls `SegmentModel::bundled()` which needs `bundled-segmentation`.
+required-features = ["tch", "ort", "bundled-segmentation"]
 
 [[example]]
 path = "examples/run_streaming_pipeline.rs"
 name = "run_streaming_pipeline"
-required-features = ["silero-vad", "ort"]
+# Calls `SegmentModel::bundled()` which needs `bundled-segmentation`.
+required-features = ["silero-vad", "ort", "bundled-segmentation"]
 
 [[bench]]
 path = "benches/segment.rs"
