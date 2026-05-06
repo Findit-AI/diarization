@@ -400,7 +400,7 @@ impl EmbedModel {
   /// Available with the `ort` feature (on by default).
   ///
   /// **Embedding inference defaults to ORT-CPU dispatch** even when
-  /// `ep-*` cargo features (e.g. `coreml`, `cuda`) are compiled in.
+  /// per-EP cargo features (e.g. `coreml`, `cuda`) are compiled in.
   /// This is intentional: ORT's CoreML EP is known to mistranslate
   /// the WeSpeaker ResNet34-LM graph and emit NaN/Inf on common
   /// inputs (independent of compute-unit / model-format /
@@ -441,7 +441,7 @@ impl EmbedModel {
   /// your own DER + finite-output check before committing an EP
   /// override into production.
   ///
-  /// `SegmentModel::bundled()` does auto-register `ep-*`-compiled
+  /// `SegmentModel::bundled()` does auto-register per-EP-compiled
   /// providers because the segmentation graph is CoreML-safe — see
   /// [`crate::segment::SegmentModel::bundled`] for that contract.
   #[cfg(feature = "ort")]

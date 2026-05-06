@@ -52,7 +52,7 @@ PUBLIC SURFACE
 ASYMMETRIC EP DEFAULT
 
 - `SegmentModel::bundled()` / `::from_file()` auto-register
-  `dia::ep::auto_providers()` so any compiled-in `ep-*` feature
+  `dia::ep::auto_providers()` so any compiled-in per-EP feature
   accelerates segmentation with no caller code change.
 - `EmbedModel::from_file()` does **NOT** auto-register EPs.
   Empirically, ORT's CoreML EP miscompiles the WeSpeaker

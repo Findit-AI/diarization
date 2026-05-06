@@ -1,6 +1,6 @@
 //! ONNX Runtime execution providers — opt-in hardware acceleration.
 //!
-//! Each `ep-*` cargo feature in `Cargo.toml` toggles the matching
+//! Each per-EP cargo feature in `Cargo.toml` toggles the matching
 //! ORT execution provider (EP). When the feature is on, the EP type
 //! is re-exported here so callers can construct a provider and pass
 //! it to [`crate::segment::SegmentModelOptions::with_providers`] or
@@ -55,7 +55,7 @@
 //! constructor stays on CPU by design).
 //!
 //! ```ignore
-//! # // ignored: depends on which `ep-*` features are compiled in.
+//! # // ignored: depends on which per-EP features are compiled in.
 //! use diarization::ep::auto_providers;
 //! let seg_opts = diarization::segment::SegmentModelOptions::default()
 //!   .with_providers(auto_providers());
@@ -63,7 +63,7 @@
 //!
 //! ## Runtime requirements
 //!
-//! The `ep-*` cargo features only enable the *bindings*. Each EP
+//! The per-EP cargo features only enable the *bindings*. Each EP
 //! still needs the matching native library on the host:
 //!
 //! - `coreml` — Apple Silicon / macOS, no extra install (ships in
@@ -161,7 +161,7 @@ pub use ort::ep::TVM;
 #[cfg_attr(docsrs, doc(cfg(feature = "azure")))]
 pub use ort::ep::Azure;
 
-/// Build a provider list from whichever `ep-*` features are compiled in.
+/// Build a provider list from whichever per-EP features are compiled in.
 ///
 /// Order is "most-likely-to-accelerate first":
 /// `TensorRT → CUDA → CoreML → DirectML → ROCm → MIGraphX →
@@ -170,13 +170,13 @@ pub use ort::ep::Azure;
 /// so the first whose ops match accelerates and the rest stay
 /// dormant on CPU fallback.
 ///
-/// Returns an empty `Vec` if no `ep-*` features are enabled, in which
+/// Returns an empty `Vec` if no per-EP features are enabled, in which
 /// case ORT runs on its default CPU dispatch.
 ///
 /// # Example
 ///
 /// ```ignore
-/// # // ignored: depends on which `ep-*` features are compiled in.
+/// # // ignored: depends on which per-EP features are compiled in.
 /// use diarization::ep::auto_providers;
 ///
 /// let seg_opts = diarization::segment::SegmentModelOptions::default()

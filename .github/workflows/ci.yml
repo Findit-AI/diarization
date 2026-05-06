@@ -55,12 +55,19 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Apply clippy lints
-      # Exclude `tch` (needs libtorch — env-dependent setup) from the
-      # cargo-hack feature sweep. `tch` has its own dedicated CI job
-      # that provisions PyTorch explicitly. `silero-vad` IS swept now
-      # that `silero` is a registry dep (not a `../silero/` path
-      # dependency anymore).
-      run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch
+      # Exclude `tch` (libtorch env-dep) from the each-feature sweep —
+      # it has its own dedicated CI job. `silero-vad` IS swept now
+      # that `silero` is a registry dep. The per-EP features
+      # (`coreml`/`cuda`/`tensorrt`/...) and the `gpu` meta-feature
+      # are also excluded: `each-feature` would build them
+      # individually but `ort-sys 2.0.0-rc.12`'s prebuilt
+      # `download-binaries` archives are CPU-only, so a vendor EP
+      # link step (e.g. webgpu) would fail to satisfy the link
+      # against a vendor lib that the runner does not provide.
+      # Per-EP coverage lives in the docs.rs metadata + a focused
+      # `ep-link-check` job below; the each-feature sweep stays
+      # bounded to the link-safe core features.
+      run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   # Run tests on some extra platforms
   # Portability check: scalar-only build across the broad cross matrix.
@@ -117,10 +124,16 @@ jobs:
     name: cross (ort + bundled-segmentation)
     strategy:
       matrix:
+        # Targets where `ort-sys 2.0.0-rc.12` ships a prebuilt
+        # archive via `download-binaries`. Windows MSVC is covered
+        # by `cross-ort-windows-msvc` below — `x86_64-pc-windows-gnu`
+        # is intentionally excluded here because the upstream
+        # distribution table has only the MSVC archive, and a Linux
+        # runner cross-building to `windows-gnu` would surface a
+        # build-script error rather than validating ort.
         target:
           - aarch64-unknown-linux-gnu
           - x86_64-unknown-linux-gnu
-          - x86_64-pc-windows-gnu
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -140,6 +153,81 @@ jobs:
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
+
+  # Windows-MSVC ort coverage — runs on `windows-latest` because
+  # `ort-sys 2.0.0-rc.12` ships a Windows MSVC archive (the GNU
+  # variant is not provided by the upstream distribution table).
+  cross-ort-windows-msvc:
+    name: cross (ort + bundled-segmentation) [windows-msvc]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-ort-msvc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-ort-msvc-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo build --target x86_64-pc-windows-msvc
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo build --target x86_64-pc-windows-msvc
+
+  # Per-EP compile check. The cargo-hack feature sweeps above
+  # exclude every per-EP feature (and the `gpu` meta-feature)
+  # because `ort-sys 2.0.0-rc.12`'s `download-binaries` archive is
+  # CPU-only and cannot satisfy a vendor link step on the runner.
+  # Without this dedicated job, an EP-feature regression (renamed
+  # type, broken `#[doc(cfg(...))]`, missing re-export) would only
+  # surface on a vendor-provisioned host. `cargo check` does not
+  # link, so we get the bindings-level regression coverage without
+  # the link-step failure.
+  ep-link-check:
+    name: per-EP cargo check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ep:
+          - coreml
+          - cuda
+          - tensorrt
+          - directml
+          - rocm
+          - migraphx
+          - openvino
+          - webgpu
+          - xnnpack
+          - onednn
+          - cann
+          - acl
+          - qnn
+          - nnapi
+          - tvm
+          - azure
+          - gpu
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ep-${{ matrix.ep }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ep-${{ matrix.ep }}-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo check --features ${{ matrix.ep }}
+        run: cargo check --no-default-features --features ort,${{ matrix.ep }}
 
   # Compile check for the `tch` (TorchScript) backend. `tch` is not in
   # the cargo-hack feature sweeps below because it requires libtorch
@@ -203,10 +291,14 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run build
-      # Exclude `tch` (libtorch env-dep, covered by a dedicated job).
-      # `silero-vad` is in the sweep now that `silero` is a registry
-      # dep.
-      run: cargo hack build --feature-powerset --exclude-no-default-features --exclude-features tch
+      # Powerset sweep: exclude `tch` (libtorch env-dep, dedicated
+      # job) and every per-EP / `gpu` feature. The CPU-only
+      # `ort-sys` `download-binaries` archive cannot satisfy a
+      # vendor-EP link step on the runner, and `--feature-powerset`
+      # over the 16 EPs would also explode combinatorially. Per-EP
+      # link coverage lives in the dedicated `ep-link-check` job
+      # below.
+      run: cargo hack build --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   test:
     name: test
@@ -235,10 +327,11 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run test
-      # Exclude `tch` (libtorch env-dep, covered by a dedicated job).
-      # `silero-vad` is in the sweep now that `silero` is a registry
-      # dep.
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features tch
+      # Same exclusion list as the build sweep: `tch` (libtorch
+      # env-dep, dedicated job) and all per-EP / `gpu` features
+      # (CPU-only `ort-sys` archive cannot satisfy vendor link
+      # steps; per-EP coverage is in `ep-link-check`).
+      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   # AVX2 + FMA correctness via Intel SDE. GH free runners may have AVX2
   # natively, but our dispatcher prefers AVX-512F on hosts that have it

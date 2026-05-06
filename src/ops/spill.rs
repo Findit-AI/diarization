@@ -172,6 +172,7 @@ use std::{
 use bytemuck::Pod;
 #[cfg(target_os = "linux")]
 use memmapix::Advice;
+#[cfg(any(unix, windows))]
 use memmapix::{MmapMut, MmapOptions};
 
 /// Errors returned by [`SpillBytesMut`] allocation.
@@ -259,6 +260,24 @@ pub enum SpillError {
     /// Underlying I/O error.
     #[source]
     source: std::io::Error,
+  },
+  /// The host target does not support file-backed spilling. The
+  /// mmap path requires `cfg(any(unix, windows))` because it leans
+  /// on `fs4::FileExt` (`posix_fallocate` / `F_PREALLOCATE` /
+  /// `SetFileValidData`) and tempfile semantics. wasm32 / WASI / etc.
+  /// build the lib but the spill mmap path is compiled out, so an
+  /// allocation above [`SpillOptions::threshold_bytes`] surfaces this
+  /// variant. Callers can either lower the input size, raise the
+  /// threshold above the requested allocation, or treat this as a
+  /// hard fail on the unsupported target.
+  #[error(
+    "spill: host target does not support file-backed spilling \
+     (allocation of {bytes} bytes exceeds the heap threshold but \
+     this build was compiled without the unix/windows mmap path)"
+  )]
+  UnsupportedTarget {
+    /// Requested allocation in bytes.
+    bytes: u64,
   },
 }
 
@@ -384,6 +403,15 @@ impl Default for SpillOptions {
 /// write phase) and [`SpillBytes`] (after `freeze`). Holds the
 /// mapping plus the unlinked tempfile that backs it; both are
 /// dropped together when the last `Arc<MmapHandle>` goes away.
+///
+/// File-backed spilling requires platform APIs (`O_TMPFILE` /
+/// `FILE_FLAG_DELETE_ON_CLOSE`, `posix_fallocate` / `F_PREALLOCATE`
+/// / `SetFileValidData`, mmap) that `fs4` and `memmapix` only
+/// implement on `cfg(any(unix, windows))`. On other targets
+/// (wasm32, WASI, …) this struct and the surrounding mmap path are
+/// compiled out; an above-threshold allocation surfaces
+/// [`SpillError::UnsupportedTarget`] instead.
+#[cfg(any(unix, windows))]
 struct MmapHandle {
   /// We keep `MmapMut` even after freeze; the type-system
   /// invariant is that `SpillBytes` only ever borrows it through
@@ -433,6 +461,10 @@ enum SpillMutInner<T> {
   /// directory (Unix) or opened with `FILE_FLAG_DELETE_ON_CLOSE`
   /// (Windows); no path is visible to other processes while the
   /// mapping is live. Dropping the file reclaims the disk space.
+  ///
+  /// Compiled out on `cfg(not(any(unix, windows)))`; see
+  /// [`MmapHandle`] / [`SpillError::UnsupportedTarget`].
+  #[cfg(any(unix, windows))]
   Mmap { map: MmapMut, _file: std::fs::File },
 }
 
@@ -535,11 +567,24 @@ impl<T: Pod> SpillBytesMut<T> {
         _phantom: PhantomData,
       })
     } else {
-      // mmap path.
-      Self::new_mmap(n, bytes, opts.spill_dir())
+      // mmap path. Only supported on `cfg(any(unix, windows))` —
+      // wasm/WASI builds compile this branch out via the routing
+      // below and surface `SpillError::UnsupportedTarget` instead.
+      #[cfg(any(unix, windows))]
+      {
+        Self::new_mmap(n, bytes, opts.spill_dir())
+      }
+      #[cfg(not(any(unix, windows)))]
+      {
+        let _ = (n, opts);
+        Err(SpillError::UnsupportedTarget {
+          bytes: bytes as u64,
+        })
+      }
     }
   }
 
+  #[cfg(any(unix, windows))]
   fn new_mmap(n: usize, bytes: usize, spill_dir: Option<&Path>) -> Result<Self, SpillError> {
     // Backing-file creation strategy depends on the platform:
     //
@@ -664,6 +709,7 @@ impl<T: Pod> SpillBytesMut<T> {
   pub fn as_slice(&self) -> &[T] {
     match &self.inner {
       SpillMutInner::Heap(arc) => arc,
+      #[cfg(any(unix, windows))]
       SpillMutInner::Mmap { map, .. } => {
         let bytes: &[u8] = &map[..];
         if bytes.is_empty() {
@@ -687,6 +733,7 @@ impl<T: Pod> SpillBytesMut<T> {
       SpillMutInner::Heap(arc) => {
         Arc::get_mut(arc).expect("SpillBytesMut: heap Arc must be unique (refcount 1)")
       }
+      #[cfg(any(unix, windows))]
       SpillMutInner::Mmap { map, .. } => {
         let bytes: &mut [u8] = &mut map[..];
         if bytes.is_empty() {
@@ -698,10 +745,18 @@ impl<T: Pod> SpillBytesMut<T> {
   }
 
   /// Returns `true` if this buffer is backed by an mmap'd tempfile.
-  /// `false` if it is heap-backed.
+  /// `false` if it is heap-backed. Always `false` on
+  /// `cfg(not(any(unix, windows)))` (mmap path is compiled out).
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn is_mmapped(&self) -> bool {
-    matches!(self.inner, SpillMutInner::Mmap { .. })
+    #[cfg(any(unix, windows))]
+    {
+      matches!(self.inner, SpillMutInner::Mmap { .. })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      false
+    }
   }
 
   /// Convert to a [`SpillBytes`] for cheap-clone fan-out.
@@ -714,6 +769,7 @@ impl<T: Pod> SpillBytesMut<T> {
   pub fn freeze(self) -> SpillBytes<T> {
     let data = match self.inner {
       SpillMutInner::Heap(arc) => SpillBytesData::Heap(arc),
+      #[cfg(any(unix, windows))]
       SpillMutInner::Mmap { map, _file } => {
         SpillBytesData::Mmap(Arc::new(MmapHandle { map, _file }))
       }
@@ -749,6 +805,9 @@ pub struct SpillBytes<T> {
 
 enum SpillBytesData<T> {
   Heap(Arc<[T]>),
+  /// Compiled out on `cfg(not(any(unix, windows)))`; see
+  /// [`SpillError::UnsupportedTarget`].
+  #[cfg(any(unix, windows))]
   Mmap(Arc<MmapHandle>),
 }
 
@@ -756,6 +815,7 @@ impl<T> Clone for SpillBytesData<T> {
   fn clone(&self) -> Self {
     match self {
       SpillBytesData::Heap(arc) => SpillBytesData::Heap(Arc::clone(arc)),
+      #[cfg(any(unix, windows))]
       SpillBytesData::Mmap(arc) => SpillBytesData::Mmap(Arc::clone(arc)),
     }
   }
@@ -791,6 +851,7 @@ impl<T: Pod> SpillBytes<T> {
   pub fn as_slice(&self) -> &[T] {
     match &self.data {
       SpillBytesData::Heap(arc) => arc,
+      #[cfg(any(unix, windows))]
       SpillBytesData::Mmap(handle) => {
         let bytes: &[u8] = &handle.map[..];
         if bytes.is_empty() {
@@ -802,10 +863,18 @@ impl<T: Pod> SpillBytes<T> {
   }
 
   /// Returns `true` if this buffer is backed by an mmap'd tempfile.
-  /// `false` if it is heap-backed.
+  /// `false` if it is heap-backed. Always `false` on
+  /// `cfg(not(any(unix, windows)))` (mmap path is compiled out).
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn is_mmapped(&self) -> bool {
-    matches!(self.data, SpillBytesData::Mmap(_))
+    #[cfg(any(unix, windows))]
+    {
+      matches!(self.data, SpillBytesData::Mmap(_))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      false
+    }
   }
 }
 
