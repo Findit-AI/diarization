@@ -239,8 +239,12 @@ impl<'a> AssignEmbeddingsInput<'a> {
   pub const fn num_frames(&self) -> usize {
     self.num_frames
   }
-  /// Post-PLDA features for the active training subset (column-major
-  /// flat slice; length `num_train * plda_dim`).
+  /// Post-PLDA features for the active training subset, **row-major**
+  /// flat slice (`data[i * plda_dim + d]`; length
+  /// `num_train * plda_dim`). The pipeline transposes into a
+  /// column-major spill region internally for the VBx
+  /// `nalgebra::DMatrixView` handoff — see the field-level docs on
+  /// [`AssignEmbeddingsInput::post_plda`].
   pub const fn post_plda(&self) -> &'a [f64] {
     self.post_plda
   }

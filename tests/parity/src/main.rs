@@ -104,13 +104,21 @@ fn main() -> Result<()> {
   let emb_path = std::env::var("DIA_EMBED_MODEL_PATH")
     .unwrap_or_else(|_| "models/wespeaker_resnet34_lm.onnx".into());
   let plda = PldaTransform::new().context("load plda")?;
+  // The explicit-CoreML construction kicks in when ANY of the
+  // three debug knobs is set, not just compute_units. Otherwise
+  // `model_format=mlprogram` or `static_shapes=1` would be parsed
+  // but silently ignored because the auto-registered EP wouldn't
+  // see them.
+  let coreml_pinned = compute_units.is_some() || model_format.is_some() || static_shapes;
   let mut seg = if force_cpu_seg {
     SegmentModel::bundled_with_options(SegmentModelOptions::default())
       .context("load bundled segment model (CPU)")?
-  } else if compute_units.is_some() {
-    // Caller pinned a compute unit — explicitly construct the EP
-    // with that pin and pass via `_with_options`. Default
-    // `bundled()` would auto_providers() with CoreML's defaults.
+  } else if coreml_pinned {
+    // Caller pinned at least one debug knob — explicitly construct
+    // the EP with all three (compute_units / model_format /
+    // static_shapes) honored via `coreml_provider()`. Default
+    // `bundled()` would auto_providers() with CoreML's defaults
+    // and ignore the knobs.
     let opts = SegmentModelOptions::default().with_providers(vec![coreml_provider()]);
     SegmentModel::bundled_with_options(opts).context("load bundled segment model (CoreML pinned)")?
   } else {
@@ -119,7 +127,7 @@ fn main() -> Result<()> {
   let mut emb = if force_cpu_emb {
     EmbedModel::from_file_with_options(&emb_path, EmbedModelOptions::default())
       .context("load embed model (CPU)")?
-  } else if compute_units.is_some() {
+  } else if coreml_pinned {
     let opts = EmbedModelOptions::default().with_providers(vec![coreml_provider()]);
     EmbedModel::from_file_with_options(&emb_path, opts).context("load embed model (CoreML pinned)")?
   } else {

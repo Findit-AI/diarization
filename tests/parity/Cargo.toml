@@ -7,10 +7,13 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# Enable the `coreml` feature so we can flip the CoreML provider
-# on via the `DIA_USE_COREML_*` env vars in `src/main.rs`. The full
-# `ep-*` matrix is documented in dia's `Cargo.toml`; flip the right
-# feature on for the GPU/EP you want to benchmark on.
+# Enable the `coreml` feature so the parity binary can register
+# the CoreML EP per the runtime env vars defined in `src/main.rs`:
+#   DIA_DISABLE_AUTO_PROVIDERS, DIA_FORCE_CPU_SEG, DIA_FORCE_CPU_EMB,
+#   DIA_COREML_COMPUTE_UNITS, DIA_COREML_MODEL_FORMAT,
+#   DIA_COREML_STATIC_SHAPES.
+# The full per-EP feature matrix is documented in dia's `Cargo.toml`;
+# flip the right feature on for the GPU/EP you want to benchmark on.
 diarization = { path = "../..", features = ["ort", "coreml"] }
 # Direct ort dep so we can construct `CoreML::default().with_compute_units(...)`
 # for the CoreML compute-unit isolation knob (debugging the WeSpeaker
