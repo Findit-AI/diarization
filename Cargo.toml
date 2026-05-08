@@ -157,7 +157,13 @@ thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
 tch = { version = "0.24", optional = true }
 
-kaldi-native-fbank = "0.1"
+# Real-valued FFT for the bit-exact torchaudio.compliance.kaldi.fbank
+# port (see `src/embed/torchaudio_fbank.rs`). PyTorch's `torch.fft.rfft`
+# routes to pocketfft on CPU; `realfft` wraps `rustfft`'s
+# Cooley-Tukey radix-2 path which produces the same spectrum within
+# ~1e-7 relative — small enough that the resnet+pooling output stays
+# within sub-ULP of pyannote on the 14-audio bench.
+realfft = "3"
 nalgebra = "0.34"
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }

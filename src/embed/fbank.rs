@@ -1,7 +1,8 @@
 //! Kaldi-compatible fbank feature extraction. Spec §4.2.
 //!
-//! Wraps [`kaldi-native-fbank`](kaldi_native_fbank) with the WeSpeaker /
-//! pyannote conventions:
+//! Bit-near-exact port of `torchaudio.compliance.kaldi.fbank`
+//! (see `src/embed/torchaudio_fbank.rs`) wrapped to match the
+//! WeSpeaker / pyannote conventions:
 //! - 16 kHz mono input
 //! - 80 mel bins
 //! - 25 ms frame length, 10 ms frame shift
@@ -19,11 +20,6 @@
 //! Verified against `torchaudio.compliance.kaldi.fbank` per Task 1 spike
 //! (max |Δ| ~ 2.4e-4 on f32; spec §15 #43).
 
-use kaldi_native_fbank::{
-  fbank::{FbankComputer, FbankOptions},
-  online::{FeatureComputer, OnlineFeature},
-};
-
 use crate::embed::{
   error::Error,
   options::{FBANK_FRAMES, FBANK_NUM_MELS, MIN_CLIP_SAMPLES},
@@ -37,14 +33,14 @@ use crate::embed::{
 /// # Errors
 /// - [`Error::InvalidClip`] if `samples.len() < MIN_CLIP_SAMPLES` (< 25 ms).
 /// - [`Error::NonFiniteInput`] if any sample is NaN/inf.
-/// - [`Error::Fbank`] if `kaldi-native-fbank` rejects the configuration.
 ///
 /// # Numerical contract
-/// Verified against `torchaudio.compliance.kaldi.fbank` per Task 1 spike
-/// (max |Δ| ~ 2.4e-4 on f32; spec §15 #43). The spike threshold is wider
-/// than the spec's <1e-4 because pure f32 arithmetic accumulates noise
-/// over 200 × 80 mel coefficients; values are within float-precision
-/// agreement with the reference and produce the same downstream embeddings.
+/// Verified against `torchaudio.compliance.kaldi.fbank`: max abs
+/// element error 2.2e-4 on the worst frame of a 23.6-min Mandarin
+/// recording, but propagates to ≤1e-5 max abs in the WeSpeaker
+/// embedding (vs 0.66 with the prior `kaldi-native-fbank` backend).
+/// 95% of cells agree below 1e-5; the residual is f32 FFT
+/// reduction-order noise (rustfft radix-2 vs PyTorch's pocketfft).
 pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBANK_FRAMES]>, Error> {
   if samples.len() < MIN_CLIP_SAMPLES as usize {
     return Err(Error::InvalidClip {
@@ -56,47 +52,10 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
     return Err(Error::NonFiniteInput);
   }
 
-  // Configure FbankOptions to match WeSpeaker / torchaudio.compliance.kaldi.fbank.
-  // The defaults of kaldi-native-fbank 0.1.0 do NOT match torchaudio in several
-  // ways (dither, window_type, num_mel_bins, use_energy, energy_floor) so we
-  // override every field that diverges. Verified against the Task 1 spike at
-  // `spikes/kaldi_fbank/src/main.rs`.
-  let mut opts = FbankOptions::default();
-  opts.frame_opts.samp_freq = 16_000.0;
-  opts.frame_opts.frame_length_ms = 25.0;
-  opts.frame_opts.frame_shift_ms = 10.0;
-  opts.frame_opts.dither = 0.0;
-  opts.frame_opts.preemph_coeff = 0.97;
-  opts.frame_opts.remove_dc_offset = true;
-  opts.frame_opts.window_type = "hamming".to_string();
-  opts.frame_opts.round_to_power_of_two = true;
-  opts.frame_opts.blackman_coeff = 0.42;
-  opts.frame_opts.snip_edges = true;
-  opts.mel_opts.num_bins = 80;
-  opts.mel_opts.low_freq = 20.0;
-  opts.mel_opts.high_freq = 0.0;
-  opts.use_energy = false;
-  opts.raw_energy = true;
-  opts.htk_compat = false;
-  opts.energy_floor = 1.0;
-  opts.use_log_fbank = true;
-  opts.use_power = true;
-
-  let computer = FbankComputer::new(opts).map_err(Error::Fbank)?;
-  let mut online = OnlineFeature::new(FeatureComputer::Fbank(computer));
-
-  // pyannote / wespeaker scale: input is float-normalized to [-1, 1); the
-  // reference path multiplies by 1 << 15 = 32768.0 to recover int16
-  // magnitudes (which kaldi expects). See pyannote
-  // `pyannote/audio/pipelines/speaker_verification.py:549`.
-  let scaled: Vec<f32> = samples.iter().map(|&x| x * 32_768.0).collect();
-  online.accept_waveform(16_000.0, &scaled);
-  online.input_finished();
-
-  let n_avail = online.num_frames_ready();
-  // Boxed: 200 × 80 × 4 = 64KB array would overflow typical thread stack
-  // budgets (default 8MB main, 2MB worker). Heap allocation is fine here —
-  // the alloc cost is ~µs and dwarfed by the fbank computation itself.
+  // Bit-near-exact port of `torchaudio.compliance.kaldi.fbank` —
+  // see `compute_full_fbank` and `src/embed/torchaudio_fbank.rs`.
+  let raw = super::torchaudio_fbank::compute_fbank(samples);
+  let n_avail = raw.len() / FBANK_NUM_MELS;
   let mut out = Box::new([[0.0f32; FBANK_NUM_MELS]; FBANK_FRAMES]);
 
   if n_avail >= FBANK_FRAMES {
@@ -105,19 +64,15 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
     // already-masked-or-padded audio.
     let start = (n_avail - FBANK_FRAMES) / 2;
     for (f, out_row) in out.iter_mut().enumerate() {
-      let frame = online
-        .get_frame(start + f)
-        .expect("get_frame within num_frames_ready");
-      out_row.copy_from_slice(frame);
+      let src = &raw[(start + f) * FBANK_NUM_MELS..(start + f + 1) * FBANK_NUM_MELS];
+      out_row.copy_from_slice(src);
     }
   } else {
     // Zero-pad symmetrically.
     let pad_left = (FBANK_FRAMES - n_avail) / 2;
     for (f, out_row) in out.iter_mut().skip(pad_left).take(n_avail).enumerate() {
-      let frame = online
-        .get_frame(f)
-        .expect("get_frame within num_frames_ready");
-      out_row.copy_from_slice(frame);
+      let src = &raw[f * FBANK_NUM_MELS..(f + 1) * FBANK_NUM_MELS];
+      out_row.copy_from_slice(src);
     }
   }
 
@@ -162,43 +117,20 @@ pub fn compute_full_fbank(samples: &[f32]) -> Result<Vec<f32>, Error> {
     return Err(Error::NonFiniteInput);
   }
 
-  let mut opts = FbankOptions::default();
-  opts.frame_opts.samp_freq = 16_000.0;
-  opts.frame_opts.frame_length_ms = 25.0;
-  opts.frame_opts.frame_shift_ms = 10.0;
-  opts.frame_opts.dither = 0.0;
-  opts.frame_opts.preemph_coeff = 0.97;
-  opts.frame_opts.remove_dc_offset = true;
-  opts.frame_opts.window_type = "hamming".to_string();
-  opts.frame_opts.round_to_power_of_two = true;
-  opts.frame_opts.blackman_coeff = 0.42;
-  opts.frame_opts.snip_edges = true;
-  opts.mel_opts.num_bins = 80;
-  opts.mel_opts.low_freq = 20.0;
-  opts.mel_opts.high_freq = 0.0;
-  opts.use_energy = false;
-  opts.raw_energy = true;
-  opts.htk_compat = false;
-  opts.energy_floor = 1.0;
-  opts.use_log_fbank = true;
-  opts.use_power = true;
-
-  let computer = FbankComputer::new(opts).map_err(Error::Fbank)?;
-  let mut online = OnlineFeature::new(FeatureComputer::Fbank(computer));
-  let scaled: Vec<f32> = samples.iter().map(|&x| x * 32_768.0).collect();
-  online.accept_waveform(16_000.0, &scaled);
-  online.input_finished();
-
-  let num_frames = online.num_frames_ready();
-  let mut out: Vec<f32> = Vec::with_capacity(num_frames * FBANK_NUM_MELS);
-  for f in 0..num_frames {
-    let frame = online
-      .get_frame(f)
-      .expect("get_frame within num_frames_ready");
-    out.extend_from_slice(frame);
+  // Bit-near-exact port of `torchaudio.compliance.kaldi.fbank` (see
+  // src/embed/torchaudio_fbank.rs). Replaces the prior
+  // `kaldi-native-fbank` C++ backend whose f32 reduction order
+  // diverged from torchaudio by ~2.4e-4 on Mandarin
+  // `08_luyu_jinjing_freedom`, amplifying through ResNet34 to ~0.66
+  // absolute embedding-element error and an extra spurious cluster.
+  let mut out = super::torchaudio_fbank::compute_fbank(samples);
+  let num_frames = out.len() / FBANK_NUM_MELS;
+  if num_frames == 0 {
+    return Ok(out);
   }
 
-  // Mean-subtract per-(batch, mel) across frames.
+  // Mean-subtract per-(batch, mel) across frames (matches pyannote
+  // line 566: `return features - torch.mean(features, dim=1, keepdim=True)`).
   let mut mean_per_mel = [0.0f64; FBANK_NUM_MELS];
   for f in 0..num_frames {
     for m in 0..FBANK_NUM_MELS {
