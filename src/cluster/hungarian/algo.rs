@@ -26,20 +26,18 @@
 //! distribution. The captured 218-chunk fixture has zero tied chunks
 //! and passes parity exactly.
 //!
-//! TODO: if a future use case requires bit-exact pyannote parity on
-//! tied inputs (e.g. round-tripping `hard_clusters` for compatibility
-//! with another pyannote-based tool, not just diarization output), we
-//! may need a hand-rolled Hungarian that mirrors scipy's traversal
-//! order or a pre/post-processing layer that canonicalizes tied
-//! assignments. Until then, the invariant-based tie tests in
-//! `src/hungarian/tests.rs` ("tie-breaking" section) prove that *some*
-//! optimal matching is returned without locking in a specific label
-//! permutation.
+//! Bit-exact pyannote parity on tied inputs is **not** a contract here.
+//! A use case that requires it (e.g. round-tripping `hard_clusters` into
+//! another pyannote-based tool, rather than consuming diarization output)
+//! would need either a hand-rolled Hungarian mirroring scipy's traversal
+//! order or a pre/post-processing canonicalization layer. The
+//! invariant-based tie tests in `src/cluster/hungarian/tests.rs`
+//! ("tie-breaking" section) pin the contract this module *does* enforce:
+//! some optimal matching is returned, with no specific label permutation
+//! locked in.
 
 use crate::cluster::hungarian::error::Error;
 use nalgebra::DMatrix;
-use ordered_float::NotNan;
-use pathfinding::prelude::{Matrix, kuhn_munkres};
 
 /// Sentinel value for an unmatched speaker. Matches pyannote's
 /// `-2 * np.ones((num_chunks, num_speakers), dtype=np.int8)` initializer.
@@ -269,37 +267,28 @@ fn assign_one(
   num_clusters: usize,
   nanmin: f64,
 ) -> Result<Vec<i32>, Error> {
+  // scipy-compatible rectangular LSAP. Required for bit-exact pyannote
+  // parity on tied costs (inactive-(chunk, speaker) mask rows).
+  // `pathfinding::kuhn_munkres` returns the same maximum weight but
+  // diverges from scipy on tie-breaking, surfacing as
+  // `partition mismatch at chunk N` failures on long recordings (06,
+  // testaudioset 09/10/11/12/13/14/08). The Crouse-LAPJV port in
+  // `lsap` mirrors scipy's traversal order verbatim.
   let mut assignment = vec![UNMATCHED; num_speakers];
-
-  if num_speakers <= num_clusters {
-    // Direct path: rows = speakers, cols = clusters.
-    let mut data = Vec::with_capacity(num_speakers * num_clusters);
-    for s in 0..num_speakers {
-      for k in 0..num_clusters {
-        data.push(NotNan::new(clean(chunk[(s, k)], nanmin)).expect("clean() yields finite f64"));
-      }
-    }
-    let weights =
-      Matrix::from_vec(num_speakers, num_clusters, data).expect("matrix dims match data length");
-    let (_total, speaker_to_cluster) = kuhn_munkres(&weights);
-    for (s, &k) in speaker_to_cluster.iter().enumerate() {
-      assignment[s] = i32::try_from(k).expect("cluster idx fits in i32");
-    }
-  } else {
-    // Transpose path: rows = clusters, cols = speakers.
-    let mut data = Vec::with_capacity(num_clusters * num_speakers);
+  let mut row_major = Vec::with_capacity(num_speakers * num_clusters);
+  for s in 0..num_speakers {
     for k in 0..num_clusters {
-      for s in 0..num_speakers {
-        data.push(NotNan::new(clean(chunk[(s, k)], nanmin)).expect("clean() yields finite f64"));
-      }
-    }
-    let weights =
-      Matrix::from_vec(num_clusters, num_speakers, data).expect("matrix dims match data length");
-    let (_total, cluster_to_speaker) = kuhn_munkres(&weights);
-    for (k, &s) in cluster_to_speaker.iter().enumerate() {
-      assignment[s] = i32::try_from(k).expect("cluster idx fits in i32");
+      row_major.push(clean(chunk[(s, k)], nanmin));
     }
   }
-
+  let (row_ind, col_ind) = crate::cluster::hungarian::lsap::linear_sum_assignment(
+    num_speakers,
+    num_clusters,
+    &row_major,
+    true,
+  )?;
+  for (r, c) in row_ind.into_iter().zip(col_ind.into_iter()) {
+    assignment[r] = i32::try_from(c).expect("cluster idx fits in i32");
+  }
   Ok(assignment)
 }

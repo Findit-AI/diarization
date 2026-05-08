@@ -290,4 +290,72 @@ mod tests {
       }
     }
   }
+
+  #[test]
+  fn full_fbank_rejects_too_short() {
+    let r = compute_full_fbank(&[0.1; 100]);
+    assert!(
+      matches!(r, Err(Error::InvalidClip { len: 100, min: 400 })),
+      "expected InvalidClip {{ len: 100, min: 400 }}, got {r:?}"
+    );
+  }
+
+  #[test]
+  fn full_fbank_rejects_non_finite() {
+    let r = compute_full_fbank(&[f32::NAN; 32_000]);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "expected NonFiniteInput for NaN samples, got {r:?}"
+    );
+    let r = compute_full_fbank(&[f32::INFINITY; 32_000]);
+    assert!(
+      matches!(r, Err(Error::NonFiniteInput)),
+      "expected NonFiniteInput for +inf samples, got {r:?}"
+    );
+  }
+
+  #[test]
+  fn full_fbank_shape_scales_with_input_length() {
+    // 10s @ 16 kHz, 25 ms frame / 10 ms shift, snip_edges = true →
+    // num_frames = floor((160_000 - 400) / 160) + 1 = 998.
+    // Output is row-major (num_frames, FBANK_NUM_MELS), so total length
+    // is num_frames * FBANK_NUM_MELS. Pin the contract used by the ORT
+    // backend's `embed_chunk_with_frame_mask` path, which divides
+    // `fbank.len()` by `FBANK_NUM_MELS` to recover the frame count.
+    let samples = vec![0.001f32; 160_000];
+    let out = compute_full_fbank(&samples).unwrap();
+    assert!(!out.is_empty());
+    assert_eq!(out.len() % FBANK_NUM_MELS, 0);
+    let frames = out.len() / FBANK_NUM_MELS;
+    assert_eq!(frames, 998);
+    for v in &out {
+      assert!(v.is_finite(), "fbank coefficient went non-finite: {v}");
+    }
+  }
+
+  #[test]
+  fn full_fbank_is_mean_centered_per_mel() {
+    // Mean-subtraction at fbank.rs:201-215 zeros each mel band's
+    // mean across frames. Verifying this directly catches a future
+    // refactor that drops or reorders the centering pass — the
+    // resulting embeddings would be biased and silently mis-cluster.
+    let samples: Vec<f32> = (0..32_000)
+      .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin() * 0.5)
+      .collect();
+    let out = compute_full_fbank(&samples).unwrap();
+    let frames = out.len() / FBANK_NUM_MELS;
+    assert!(frames > 1);
+    for m in 0..FBANK_NUM_MELS {
+      let mean: f64 = (0..frames)
+        .map(|f| f64::from(out[f * FBANK_NUM_MELS + m]))
+        .sum::<f64>()
+        / frames as f64;
+      // f32 → f64 mean accumulator over up to ~200 frames; tolerance
+      // covers the f32 rounding of the per-(batch, mel) subtraction.
+      assert!(
+        mean.abs() < 1e-3,
+        "mel {m} mean = {mean} (should be ≈ 0 after mean-subtraction)"
+      );
+    }
+  }
 }

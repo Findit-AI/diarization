@@ -192,6 +192,12 @@ fn ahc_init_matches_pyannote_06_long_recording() {
   run_ahc_parity("06_long_recording");
 }
 
+#[test]
+#[ignore = "ad-hoc capture from testaudioset; localizes pyannote parity divergence"]
+fn ahc_init_matches_pyannote_10_mrbeast_clean_water() {
+  run_ahc_parity("10_mrbeast_clean_water");
+}
+
 /// Remap labels to encounter-order: the first label seen becomes 0,
 /// the second new label becomes 1, etc. After this transform, two
 /// different label arrays representing the same partition compare equal.

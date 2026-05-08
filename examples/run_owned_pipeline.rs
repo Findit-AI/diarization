@@ -13,8 +13,11 @@
 //! to compute DER vs pyannote.
 
 use diarization::{
-  embed::EmbedModel, offline::OwnedDiarizationPipeline, plda::PldaTransform,
-  reconstruct::spans_to_rttm_lines, segment::SegmentModel,
+  embed::EmbedModel,
+  offline::{OwnedDiarizationPipeline, OwnedPipelineOptions},
+  plda::PldaTransform,
+  reconstruct::spans_to_rttm_lines,
+  segment::SegmentModel,
 };
 use std::path::PathBuf;
 
@@ -58,7 +61,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|e| format!("load embed model from {}: {}", emb_path.display(), e))?;
   let plda = PldaTransform::new()?;
 
-  let pipeline = OwnedDiarizationPipeline::new();
+  // `OwnedPipelineOptions::new()` defaults to `smoothing_epsilon =
+  // None` for bit-exact pyannote community-1 RTTM. Callers wanting
+  // speakrs-style streaming-friendly stable speaker assignments
+  // (sub-100ms overlap-region splits merged into the previously-
+  // selected speaker) opt in via `with_smoothing_epsilon(Some(eps))`.
+  let opts = OwnedPipelineOptions::new();
+  let pipeline = OwnedDiarizationPipeline::with_options(opts);
   let out = pipeline.run(&mut seg, &mut emb, &plda, &samples)?;
 
   // Use clip basename as the RTTM uri.
