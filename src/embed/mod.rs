@@ -19,7 +19,6 @@ mod fbank;
 #[cfg(any(feature = "ort", feature = "tch"))]
 mod model;
 mod options;
-mod torchaudio_fbank;
 mod types;
 
 pub use error::Error;
