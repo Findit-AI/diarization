@@ -94,6 +94,15 @@ const SCALE_INT16: f32 = 32_768.0; // 1 << 15
 
 const EPSILON: f32 = 1.1920928955078125e-07; // f32::EPSILON, matches torchaudio
 
+/// Maximum f32 sample count that the thread-local `scaled` /
+/// `RAW_BUF` scratches keep across calls. The hot path is fixed
+/// 10 s / 16 kHz chunks (160 K samples) plus a small safety margin.
+/// One-off long clips (e.g. 30 min via `compute_full_fbank`) still
+/// run correctly — they just allocate a fresh buffer that is dropped
+/// at the end of the call rather than pinning hundreds of MB per
+/// worker thread for the lifetime of the process.
+const SCRATCH_RETAIN_LIMIT: usize = 256 * 1024;
+
 // `FBANK_NUM_MELS` is dia's public-API constant; compile-time check it
 // matches the local `NUM_MEL_BINS` (so changes to `embed::options`
 // can't silently desync the kernel).
@@ -522,8 +531,8 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f64 {
 #[target_feature(enable = "avx512f")]
 unsafe fn dot_avx512(a: &[f32], b: &[f32]) -> f64 {
   use core::arch::x86_64::{
-    __m512d, _mm512_add_pd, _mm512_castps512_ps256, _mm512_cvtps_pd, _mm512_extractf32x8_ps,
-    _mm512_loadu_ps, _mm512_mul_ps, _mm512_reduce_add_pd, _mm512_setzero_pd,
+    __m512d, _mm512_add_pd, _mm512_castps512_ps256, _mm512_cvtps_pd, _mm512_loadu_ps,
+    _mm512_mul_ps, _mm512_reduce_add_pd, _mm512_setzero_pd, _mm512_shuffle_f32x4,
   };
   unsafe {
     let n = a.len();
@@ -536,8 +545,20 @@ unsafe fn dot_avx512(a: &[f32], b: &[f32]) -> f64 {
       let av = _mm512_loadu_ps(ap.add(i * 16));
       let bv = _mm512_loadu_ps(bp.add(i * 16));
       let prod = _mm512_mul_ps(av, bv);
+      // Lower 256 bits of `prod` (lanes 0,1) → low f64x8 accumulator.
       let lo = _mm512_cvtps_pd(_mm512_castps512_ps256(prod));
-      let hi = _mm512_cvtps_pd(_mm512_extractf32x8_ps::<1>(prod));
+      // Move upper 256 bits (lanes 2,3) into the lower half of a
+      // shuffled `__m512`, then cast to `__m256`. Uses
+      // `_mm512_shuffle_f32x4` (AVX-512F) instead of
+      // `_mm512_extractf32x8_ps` (AVX-512DQ-only) so the kernel
+      // is correctly callable on AVX-512F-only chips like
+      // Knights Landing / Knights Mill — what the runtime
+      // detector in `crate::ops::avx512_available` actually
+      // gates on. MASK 0b00_00_11_10 picks `prod`'s lanes
+      // [2, 3, _, _] into result lanes [0, 1, 2, 3] (we only
+      // care about result's lower 256 bits).
+      let hi_full = _mm512_shuffle_f32x4::<0b00_00_11_10>(prod, prod);
+      let hi = _mm512_cvtps_pd(_mm512_castps512_ps256(hi_full));
       acc0 = _mm512_add_pd(acc0, lo);
       acc1 = _mm512_add_pd(acc1, hi);
     }
@@ -591,6 +612,11 @@ fn compute_torchaudio_fbank(samples: &[f32], out: &mut Vec<f32>) {
     // window is unused. `resize` reuses the existing capacity across
     // calls, so this is alloc-free after the first call per thread.
     let n_used = (num_frames - 1) * WINDOW_SHIFT + WINDOW_SIZE;
+    // Drop oversized retained capacity *before* resizing: an earlier
+    // huge call must not pin its allocation across this small one.
+    if scaled.capacity() > SCRATCH_RETAIN_LIMIT && n_used <= SCRATCH_RETAIN_LIMIT {
+      *scaled = Vec::with_capacity(n_used.max(WINDOW_SIZE));
+    }
     scaled.resize(n_used, 0.0);
     for (i, dst) in scaled.iter_mut().enumerate() {
       *dst = samples[i] * SCALE_INT16;
@@ -642,6 +668,13 @@ fn compute_torchaudio_fbank(samples: &[f32], out: &mut Vec<f32>) {
         row_dst[m] = (acc as f32).max(EPSILON).ln();
       }
     }
+
+    // Drop any oversized buffer back to a bounded retention size so a
+    // one-shot long clip can't keep hundreds of MB pinned per worker
+    // thread for the rest of the process's life.
+    if scaled.capacity() > SCRATCH_RETAIN_LIMIT {
+      *scaled = Vec::new();
+    }
   });
 }
 
@@ -676,27 +709,58 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
   // stack budgets; heap alloc is amortized over hundreds of inner-loop
   // FFTs.
   let mut out = Box::new([[0.0_f32; FBANK_NUM_MELS]; FBANK_FRAMES]);
+
+  // Predict frame count so we can crop input *before* feeding the
+  // kernel. `compute_fbank` always returns exactly `FBANK_FRAMES`
+  // rows — there is no reason to compute log-mel features for
+  // anything beyond the centered audio window we'll keep. Bounding
+  // the input here also bounds every downstream scratch (`scaled` in
+  // `FftScratch`, `RAW_BUF`) regardless of how big a clip the caller
+  // passes us.
+  let total_samples = samples.len();
+  let max_frames = if total_samples >= WINDOW_SIZE {
+    1 + (total_samples - WINDOW_SIZE) / WINDOW_SHIFT
+  } else {
+    0
+  };
+  let cropped: &[f32] = if max_frames > FBANK_FRAMES {
+    let start_frame = (max_frames - FBANK_FRAMES) / 2;
+    let start_sample = start_frame * WINDOW_SHIFT;
+    let end_sample = start_sample + (FBANK_FRAMES - 1) * WINDOW_SHIFT + WINDOW_SIZE;
+    &samples[start_sample..end_sample]
+  } else {
+    samples
+  };
+
   RAW_BUF.with(|cell| {
     let mut raw = cell.borrow_mut();
-    compute_torchaudio_fbank(samples, &mut raw);
+    compute_torchaudio_fbank(cropped, &mut raw);
     let n_avail = raw.len() / FBANK_NUM_MELS;
 
     if n_avail >= FBANK_FRAMES {
-      // Center-crop. Diarizer-level masking is applied before
-      // `compute_fbank`, so center-cropping here only ever drops
-      // already-masked-or-padded audio.
+      // Cropped exactly to FBANK_FRAMES (or one over due to the
+      // off-by-one in the crop arithmetic above) — copy straight
+      // through. Center-cropping was already done at the slice level.
       let start = (n_avail - FBANK_FRAMES) / 2;
       for (f, out_row) in out.iter_mut().enumerate() {
         let src = &raw[(start + f) * FBANK_NUM_MELS..(start + f + 1) * FBANK_NUM_MELS];
         out_row.copy_from_slice(src);
       }
     } else {
-      // Zero-pad symmetrically.
+      // Short clip path: zero-pad symmetrically.
       let pad_left = (FBANK_FRAMES - n_avail) / 2;
       for (f, out_row) in out.iter_mut().skip(pad_left).take(n_avail).enumerate() {
         let src = &raw[f * FBANK_NUM_MELS..(f + 1) * FBANK_NUM_MELS];
         out_row.copy_from_slice(src);
       }
+    }
+
+    // RAW_BUF is bounded by the cropped-input contract above, but
+    // reset it on the unlikely path where `n_avail` exceeded the
+    // expected `FBANK_FRAMES * NUM_MEL_BINS` cap (e.g. someone calls
+    // `compute_torchaudio_fbank` directly through this thread).
+    if raw.capacity() > SCRATCH_RETAIN_LIMIT {
+      *raw = Vec::new();
     }
   });
 
@@ -980,6 +1044,48 @@ mod tests {
   }
 
   // ─── SIMD cross-check: every available backend agrees with scalar ─
+
+  /// Codex review #2: a one-shot huge call must NOT permanently pin
+  /// hundreds of MB in the thread-local fbank scratch. We simulate a
+  /// 60 s clip at 16 kHz (~960 K samples), then call `compute_fbank`
+  /// with a small clip, and inspect the retained `scaled` capacity.
+  /// Both APIs must keep retained scratch ≤ `SCRATCH_RETAIN_LIMIT`.
+  #[test]
+  fn bounds_thread_local_scratch_after_huge_call() {
+    // Huge clip via the unbounded API. Allowed to allocate, but must
+    // shrink before returning.
+    let huge: Vec<f32> = vec![0.001_f32; 960_000];
+    let _ = compute_full_fbank(&huge).unwrap();
+    let cap_after_huge = FFT_SCRATCH.with(|cell| {
+      cell
+        .borrow()
+        .as_ref()
+        .map(|s| s.scaled.capacity())
+        .unwrap_or(0)
+    });
+    assert!(
+      cap_after_huge <= SCRATCH_RETAIN_LIMIT,
+      "scaled capacity {cap_after_huge} > SCRATCH_RETAIN_LIMIT {SCRATCH_RETAIN_LIMIT} \
+       after huge `compute_full_fbank` call"
+    );
+
+    // Now call the fixed-shape API with a typical 2 s clip — its
+    // input cropping must keep all scratches bounded too.
+    let small: Vec<f32> = vec![0.001_f32; 32_000];
+    let _ = compute_fbank(&small).unwrap();
+    let cap_after_small = FFT_SCRATCH.with(|cell| {
+      cell
+        .borrow()
+        .as_ref()
+        .map(|s| s.scaled.capacity())
+        .unwrap_or(0)
+    });
+    assert!(
+      cap_after_small <= SCRATCH_RETAIN_LIMIT,
+      "scaled capacity {cap_after_small} > SCRATCH_RETAIN_LIMIT \
+       after `compute_fbank` follow-up"
+    );
+  }
 
   /// Cross-check that whichever SIMD backend the dispatcher selects
   /// at runtime returns the same value as the scalar reference up to

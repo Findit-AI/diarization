@@ -168,10 +168,6 @@ nalgebra = "0.34"
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
 
-# Constrained Hungarian assignment.
-ordered-float = "5.3"
-pathfinding = "4.15"
-
 # AHC initialization (centroid-method linkage).
 kodama = "0.3"
 
