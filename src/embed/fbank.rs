@@ -213,6 +213,13 @@ impl FftScratch {
 #[inline]
 fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
   debug_assert_eq!(a.len(), b.len());
+  // Force-scalar escape hatch for sanitizer / cross-arch determinism
+  // testing (`RUSTFLAGS="--cfg diarization_force_scalar"`). Mirrors
+  // the gate already wired into `crate::ops` for the cluster ops.
+  if cfg!(diarization_force_scalar) {
+    window_mul_scalar(a, b);
+    return;
+  }
   #[cfg(target_arch = "aarch64")]
   {
     if neon_available() {
@@ -220,6 +227,8 @@ fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
       unsafe { window_mul_neon(a, b) };
       return;
     }
+    window_mul_scalar(a, b);
+    return;
   }
   #[cfg(target_arch = "x86_64")]
   {
@@ -228,6 +237,11 @@ fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
     return;
   }
   #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+  window_mul_scalar(a, b);
+}
+
+#[allow(dead_code)] // SIMD path may shadow on some arches
+fn window_mul_scalar(a: &mut [f32], b: &[f32]) {
   for (x, y) in a.iter_mut().zip(b.iter()) {
     *x *= *y;
   }
@@ -237,6 +251,10 @@ fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
 #[inline]
 fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
   debug_assert_eq!(fft.len(), power.len());
+  if cfg!(diarization_force_scalar) {
+    power_scalar(fft, power);
+    return;
+  }
   #[cfg(target_arch = "aarch64")]
   {
     if neon_available() {
@@ -244,6 +262,8 @@ fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
       unsafe { power_neon(fft, power) };
       return;
     }
+    power_scalar(fft, power);
+    return;
   }
   #[cfg(target_arch = "x86_64")]
   {
@@ -252,6 +272,11 @@ fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
     return;
   }
   #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+  power_scalar(fft, power);
+}
+
+#[allow(dead_code)] // SIMD path may shadow on some arches
+fn power_scalar(fft: &[Complex32], power: &mut [f32]) {
   for (k, c) in fft.iter().enumerate() {
     power[k] = c.re * c.re + c.im * c.im;
   }
@@ -266,6 +291,9 @@ fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
 #[inline]
 fn fma_dot_f32_to_f64(a: &[f32], b: &[f32]) -> f64 {
   debug_assert_eq!(a.len(), b.len());
+  if cfg!(diarization_force_scalar) {
+    return fma_dot_scalar(a, b);
+  }
   #[cfg(target_arch = "aarch64")]
   {
     if neon_available() {
@@ -665,7 +693,16 @@ fn compute_torchaudio_fbank(samples: &[f32], out: &mut Vec<f32>) {
       let row_dst = &mut out[f_idx * NUM_MEL_BINS..(f_idx + 1) * NUM_MEL_BINS];
       for m in 0..NUM_MEL_BINS {
         let acc = fma_dot_f32_to_f64(power, &bank[m]);
-        row_dst[m] = (acc as f32).max(EPSILON).ln();
+        let acc_f32 = acc as f32;
+        // NaN-propagating floor. Rust's `f32::max` returns the non-NaN
+        // operand (unlike `torch.max` which propagates NaN), so a
+        // `(NaN as f32).max(EPSILON).ln()` would silently produce
+        // `EPSILON.ln() = -16.118` and hide a corrupted FFT input.
+        // Manual cmp keeps NaN flowing — the embed model's
+        // `Error::NonFiniteOutput` check then surfaces it instead of
+        // emitting silently-corrupted finite embeddings.
+        let floored = if acc_f32 < EPSILON { EPSILON } else { acc_f32 };
+        row_dst[m] = floored.ln();
       }
     }
 
@@ -1044,6 +1081,59 @@ mod tests {
   }
 
   // ─── SIMD cross-check: every available backend agrees with scalar ─
+
+  /// NaN must propagate through the log floor, not be masked to a
+  /// finite log value. Rust's `f32::max(NaN, x)` returns `x`, which
+  /// would have silently floored a corrupted f32 multiplication to
+  /// `EPSILON.ln() = -16.118`. We feed a power spectrum tainted with
+  /// NaN through the same dot+log pipeline `compute_torchaudio_fbank`
+  /// uses internally and assert NaN survives.
+  #[test]
+  fn nan_propagates_through_log_floor() {
+    // `power` and `bank_row` must have the same length to mirror the
+    // production matmul. Place a NaN in `power[3]`.
+    let mut power = vec![1.0_f32; FFT_SPECTRUM_LEN];
+    power[3] = f32::NAN;
+    let bank = mel_bank();
+    let acc = fma_dot_f32_to_f64(&power, &bank[10]);
+    let acc_f32 = acc as f32;
+    let floored = if acc_f32 < EPSILON { EPSILON } else { acc_f32 };
+    let log = floored.ln();
+    assert!(
+      log.is_nan(),
+      "expected NaN to propagate through the log floor, got {log}"
+    );
+  }
+
+  /// Force-scalar escape hatch: when the kernel sees a deterministic
+  /// nonsense input, both the SIMD-dispatched dot and the explicit
+  /// scalar fallback must agree. This exercises the cfg!() bypass at
+  /// the top of `fma_dot_f32_to_f64` only when the build flag is set
+  /// (`RUSTFLAGS="--cfg diarization_force_scalar"`); otherwise it
+  /// asserts the SIMD path matches scalar within the established
+  /// rounding tolerance — which would catch regressions where either
+  /// kernel diverges.
+  #[test]
+  fn force_scalar_cfg_routes_through_scalar_when_set() {
+    let n = 257_usize;
+    let a: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.137).sin())).collect();
+    let b: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.241 + 1.0).cos())).collect();
+    let dispatched = fma_dot_f32_to_f64(&a, &b);
+    let scalar = fma_dot_scalar(&a, &b);
+    if cfg!(diarization_force_scalar) {
+      assert_eq!(
+        dispatched, scalar,
+        "force-scalar mode but dispatched != scalar — SIMD path was \
+         not bypassed"
+      );
+    } else {
+      let tol = (n as f64) * (f32::EPSILON as f64) * (1.0 + scalar.abs());
+      assert!(
+        (dispatched - scalar).abs() < tol,
+        "dispatched={dispatched}, scalar={scalar}, tol={tol:.3e}"
+      );
+    }
+  }
 
   /// Codex review #2: a one-shot huge call must NOT permanently pin
   /// hundreds of MB in the thread-local fbank scratch. We simulate a
