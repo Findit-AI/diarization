@@ -16,7 +16,9 @@ use diarization::{
 use std::{fs::File, io::BufReader, path::PathBuf};
 
 fn fixture_dir() -> PathBuf {
-  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/parity/fixtures/10_mrbeast_clean_water")
+  let f =
+    std::env::var("DIA_DRIFT_FIXTURE").unwrap_or_else(|_| "10_mrbeast_clean_water".to_string());
+  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/parity/fixtures/{f}"))
 }
 
 fn load_wav(path: &PathBuf) -> Vec<f32> {

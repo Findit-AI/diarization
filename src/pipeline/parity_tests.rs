@@ -134,6 +134,12 @@ fn assign_embeddings_matches_pyannote_hard_clusters_10_mrbeast_clean_water() {
   run_pipeline_parity("10_mrbeast_clean_water");
 }
 
+#[test]
+#[ignore = "ad-hoc capture from testaudioset; localizes 08_luyu_jinjing_freedom +1 spk"]
+fn assign_embeddings_matches_pyannote_hard_clusters_08_luyu_jinjing_freedom() {
+  run_pipeline_parity("08_luyu_jinjing_freedom");
+}
+
 /// Dump dia's ahc_init labels (run on captured raw_embeddings) and
 /// compare to pyannote's captured ahc_init_labels.npy. Per-row
 /// alignment vs partition-equivalence with relabeling will tell us

@@ -30,8 +30,8 @@ diarization output.
 
 ```sh
 # Pinned upstream revision + expected SHA-256 of the FP32 single-file ONNX.
-DIA_EMBED_MODEL_REV="38168b544a562dec24d49e63786c16e80782eeaf"
-DIA_EMBED_MODEL_SHA256="4c15c6be4235318d092c9d347e00c68ba476136d6172f675f76ad6b0c2661f01"
+DIA_EMBED_MODEL_REV="6eef479c954ec180e79cee316af2f16d5f7720bd"
+DIA_EMBED_MODEL_SHA256="f23f04aa9d0f6b8b0a28de016d226dcbe92d7461a6e58045401acfbed623838a"
 mkdir -p models
 TMP="$(mktemp "${TMPDIR:-/tmp}/wespeaker_resnet34_lm.XXXXXXXXXX")"
 ```

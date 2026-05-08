@@ -29,7 +29,7 @@ mkdir -p "$MODELS_DIR"
 # Pin a specific HF commit so the download is reproducible. The
 # README quickstart pins the same revision + SHA-256 inline; keep
 # both in sync when bumping.
-REV="38168b544a562dec24d49e63786c16e80782eeaf"
+REV="6eef479c954ec180e79cee316af2f16d5f7720bd"
 URL="https://huggingface.co/FinDIT-Studio/dia-models/resolve/$REV/wespeaker_resnet34_lm.onnx"
 DEST="$MODELS_DIR/wespeaker_resnet34_lm.onnx"
 
@@ -37,7 +37,7 @@ DEST="$MODELS_DIR/wespeaker_resnet34_lm.onnx"
 # external data) at the pinned `$REV`. Update both if the upstream
 # HF repo re-publishes — a mismatch indicates content drift that
 # could silently invalidate byte-determinism / pyannote-parity gates.
-EXPECTED_SHA256="4c15c6be4235318d092c9d347e00c68ba476136d6172f675f76ad6b0c2661f01"
+EXPECTED_SHA256="f23f04aa9d0f6b8b0a28de016d226dcbe92d7461a6e58045401acfbed623838a"
 
 if [ -f "$DEST" ]; then
   ACTUAL_SHA256="$(shasum -a 256 "$DEST" | awk '{print $1}')"
