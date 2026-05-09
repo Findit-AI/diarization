@@ -114,8 +114,8 @@ pub(crate) fn linear_sum_assignment(
     let sink = augmenting_path(
       work_nc,
       &working,
-      &mut u,
-      &mut v,
+      &u,
+      &v,
       &mut path,
       &row4col,
       &mut shortest_path_costs,
@@ -180,9 +180,9 @@ pub(crate) fn linear_sum_assignment(
   } else {
     let mut a = Vec::with_capacity(work_nr);
     let mut b = Vec::with_capacity(work_nr);
-    for i in 0..work_nr {
+    for (i, &c) in col4row.iter().enumerate().take(work_nr) {
       a.push(i);
-      b.push(col4row[i] as usize);
+      b.push(c as usize);
     }
     (a, b)
   };
@@ -213,8 +213,8 @@ fn augmenting_path(
   // tie-break direction on fully-tied rows (e.g. inactive-mask rows
   // where every column has the `inactive_const`).
   let mut num_remaining = nc;
-  for it in 0..nc {
-    remaining[it] = nc - it - 1;
+  for (it, slot) in remaining.iter_mut().enumerate().take(nc) {
+    *slot = nc - it - 1;
   }
   for x in sr.iter_mut() {
     *x = false;
@@ -233,8 +233,7 @@ fn augmenting_path(
     let mut lowest = f64::INFINITY;
     sr[i] = true;
 
-    for it in 0..num_remaining {
-      let j = remaining[it];
+    for (it, &j) in remaining[..num_remaining].iter().enumerate() {
       let r = min_val + cost[i * nc + j] - u[i] - v[j];
       if r < shortest_path_costs[j] {
         path[j] = i as isize;

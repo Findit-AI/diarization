@@ -289,7 +289,7 @@ fn assign_one(
     &row_major,
     true,
   )?;
-  for (r, c) in row_ind.into_iter().zip(col_ind.into_iter()) {
+  for (r, c) in row_ind.into_iter().zip(col_ind) {
     assignment[r] = i32::try_from(c).expect("cluster idx fits in i32");
   }
   Ok(assignment)

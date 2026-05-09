@@ -92,7 +92,8 @@ const NUM_FFT_BINS: usize = PADDED_WINDOW_SIZE / 2; // 256
 const FFT_SPECTRUM_LEN: usize = NUM_FFT_BINS + 1; // 257 incl. Nyquist
 const SCALE_INT16: f32 = 32_768.0; // 1 << 15
 
-const EPSILON: f32 = 1.1920928955078125e-07; // f32::EPSILON, matches torchaudio
+// `f32::EPSILON = 2^-23`. Matches torchaudio's `_get_epsilon` floor.
+const EPSILON: f32 = f32::EPSILON;
 
 /// Maximum f32 sample count that the thread-local `scaled` /
 /// `RAW_BUF` scratches keep across calls. The hot path is fixed
@@ -148,15 +149,15 @@ fn mel_bank() -> &'static MelBank {
     let mel_high = mel_scale(nyquist);
     let mel_delta = (mel_high - mel_low) / (NUM_MEL_BINS as f64 + 1.0);
     let mut bank: MelBank = [[0.0_f32; FFT_SPECTRUM_LEN]; NUM_MEL_BINS];
-    for m in 0..NUM_MEL_BINS {
+    for (m, row) in bank.iter_mut().enumerate() {
       let left_mel = mel_low + (m as f64) * mel_delta;
       let center_mel = mel_low + (m as f64 + 1.0) * mel_delta;
       let right_mel = mel_low + (m as f64 + 2.0) * mel_delta;
-      for k in 0..NUM_FFT_BINS {
+      for (k, slot) in row.iter_mut().enumerate().take(NUM_FFT_BINS) {
         let mel_freq = mel_scale(fft_bin_width * (k as f64));
         let up = (mel_freq - left_mel) / (center_mel - left_mel);
         let down = (right_mel - mel_freq) / (right_mel - center_mel);
-        bank[m][k] = up.min(down).max(0.0) as f32;
+        *slot = up.min(down).max(0.0) as f32;
       }
     }
     bank
@@ -211,6 +212,11 @@ impl FftScratch {
 
 /// In-place element-wise multiply `a[i] *= b[i]` (Hamming window).
 #[inline]
+// Per-arch cfg blocks each end with their dispatched call + an
+// explicit `return`; the trailing returns look needless to clippy
+// but each arch only sees one block. Removing them would let
+// non-arch-matched fallbacks execute on archs where they shouldn't.
+#[allow(clippy::needless_return)]
 fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
   // Real assert (not debug_assert) — the SIMD kernels below issue
   // raw-pointer vector loads from both inputs bounded only by
@@ -269,6 +275,8 @@ fn window_mul_scalar(a: &mut [f32], b: &[f32]) {
 /// bench (in-repo + testaudioset) still match pyannote's spk/seg
 /// counts with this formula.
 #[inline]
+// See `apply_window_inplace` for the cfg-gated dispatch rationale.
+#[allow(clippy::needless_return)]
 fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
   // See `apply_window_inplace` for why this is a real assert.
   assert_eq!(
@@ -340,6 +348,8 @@ fn power_scalar(fft: &[Complex32], power: &mut [f32]) {
 /// (Accelerate vs MKL vs OpenBLAS), so there is no single f32 result
 /// to match bit-exactly. f64 is the most stable common-case choice.
 #[inline]
+// See `apply_window_inplace` for the cfg-gated dispatch rationale.
+#[allow(clippy::needless_return)]
 fn fma_dot_f32_to_f64(a: &[f32], b: &[f32]) -> f64 {
   // Real assert (not debug_assert) — SIMD bodies do raw-pointer
   // vector loads from both inputs bounded only by `a.len()`. Without
@@ -1486,12 +1496,19 @@ mod tests {
   // Backends not selected by the dispatcher on the current host
   // (e.g. SSE2 on an AVX-512 chip) still get exercised here.
 
+  // Helpers for the per-backend tests. Only the
+  // `target_arch = "aarch64"` / `target_arch = "x86_64"` direct-call
+  // tests use them; on other archs (i686, riscv64, …) every per-
+  // backend test is cfg-excluded and these helpers would be dead
+  // code under `-Dwarnings`. Cfg-gate the helpers to match.
+  #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
   fn make_test_inputs(n: usize) -> (Vec<f32>, Vec<f32>) {
     let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.137).sin()).collect();
     let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.241 + 1.0).cos()).collect();
     (a, b)
   }
 
+  #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
   fn assert_dot_within_tol(got: f64, expected: f64, n: usize) {
     let tol = (n as f64) * (f32::EPSILON as f64) * (1.0 + expected.abs());
     assert!(
