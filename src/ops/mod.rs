@@ -148,6 +148,22 @@ mod backend_selection_tests {
        to exercise — check `--cfg diarization_disable_avx512` is in RUSTFLAGS"
     );
   }
+
+  /// Only fires under the native arm64 NEON CI job. Asserts the
+  /// dispatcher would pick NEON. Without this, a CPUID/runner-image
+  /// regression could silently fall the unsafe NEON kernels back to
+  /// scalar and leave them untested. Mirrors the AVX SDE assertion
+  /// pattern; CI sets `--cfg diarization_assert_neon` on the arm64
+  /// fbank job.
+  #[test]
+  #[cfg(all(target_arch = "aarch64", diarization_assert_neon))]
+  fn dispatch_selects_neon_under_native_arm64() {
+    assert!(
+      super::neon_available(),
+      "diarization_assert_neon set but neon_available() == false; \
+       runner regression would silently route SIMD tests through scalar"
+    );
+  }
 }
 
 #[cfg(test)]

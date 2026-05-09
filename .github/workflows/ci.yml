@@ -443,6 +443,64 @@ jobs:
       - name: Run AVX-512 SIMD tests under SDE
         run: bash ci/sde_avx512.sh
 
+  # NEON correctness on a pinned native arm64 runner.
+  #
+  # The AVX SDE jobs cover x86 SIMD; the cross/test matrix
+  # `macos-latest` happens to be Apple Silicon today, but its
+  # architecture is a label-resolution detail that GitHub can change.
+  # Miri forces `--cfg diarization_force_scalar`, so it does not
+  # exercise the unsafe NEON kernels either. Without an arm64-pinned
+  # job, a load/deinterleave/tail bug in `dot_neon`, `window_mul_neon`,
+  # or `power_neon` could ship while every required safety job stayed
+  # green.
+  #
+  # Pattern mirrors `avx2-sde` / `avx512-sde`. Sets
+  # `--cfg diarization_assert_neon` so
+  # `dispatch_selects_neon_under_native_arm64` (in
+  # `ops::backend_selection_tests`) fails the build if NEON dispatch
+  # ever falls back to scalar on this runner.
+  neon-native:
+    name: NEON (native arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-neon-native-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-neon-native-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Run fbank + ops:: tests on arm64 (NEON dispatched)
+        # `--cfg diarization_assert_neon` enables the
+        # `dispatch_selects_neon_under_native_arm64` test in
+        # `ops::backend_selection_tests`, failing if the runner image
+        # ever stops detecting NEON. Test scope mirrors `ci/sde_avx*.sh`:
+        # ops:: + embed::fbank::tests + the parity test modules whose
+        # threshold-sensitive decisions could flip under reduction-order
+        # drift.
+        env:
+          RUSTFLAGS: "-Dwarnings --cfg diarization_assert_neon"
+        run: |
+          cargo test \
+            --lib --no-default-features \
+            -- \
+            ops:: \
+            embed::fbank::tests \
+            pipeline::parity_tests \
+            cluster::ahc::parity_tests \
+            cluster::vbx::parity_tests \
+            cluster::centroid::parity_tests \
+            offline::parity_tests \
+            reconstruct::parity_tests \
+            aggregate::parity_tests \
+            plda::parity_tests
+
   sanitizer:
     name: sanitizer
     runs-on: ubuntu-latest
@@ -551,6 +609,7 @@ jobs:
       - miri-sb
       - avx2-sde
       - avx512-sde
+      - neon-native
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust

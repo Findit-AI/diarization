@@ -258,7 +258,16 @@ fn window_mul_scalar(a: &mut [f32], b: &[f32]) {
   }
 }
 
-/// `power[k] = re² + im²` over a real FFT spectrum.
+/// `power[k] = (sqrt(re² + im²))²` over a real FFT spectrum, matching
+/// torchaudio's `complex.abs().pow(2.0)` operation order.
+///
+/// Mathematically `(sqrt(x))² == x`, but in f32 the two extra
+/// roundings (sqrt + multiply) shift the result by ~1-2 ULP per bin
+/// from the direct `re² + im²` formula. We follow torchaudio's
+/// formula bit-for-bit so the kernel preserves the literal reference
+/// contract. Verified empirically that all 14 fixtures in the parity
+/// bench (in-repo + testaudioset) still match pyannote's spk/seg
+/// counts with this formula.
 #[inline]
 fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
   // See `apply_window_inplace` for why this is a real assert.
@@ -296,7 +305,10 @@ fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
 #[allow(dead_code)] // SIMD path may shadow on some arches
 fn power_scalar(fft: &[Complex32], power: &mut [f32]) {
   for (k, c) in fft.iter().enumerate() {
-    power[k] = c.re * c.re + c.im * c.im;
+    // sqrt-then-square mirrors torchaudio's
+    // `complex.abs().pow(2.0)` rounding sequence.
+    let mag = (c.re * c.re + c.im * c.im).sqrt();
+    power[k] = mag * mag;
   }
 }
 
@@ -409,7 +421,7 @@ unsafe fn window_mul_neon(a: &mut [f32], b: &[f32]) {
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn power_neon(fft: &[Complex32], power: &mut [f32]) {
-  use std::arch::aarch64::{vaddq_f32, vld2q_f32, vmulq_f32, vst1q_f32};
+  use std::arch::aarch64::{vaddq_f32, vld2q_f32, vmulq_f32, vsqrtq_f32, vst1q_f32};
   unsafe {
     let n = fft.len();
     let chunks = n / 4;
@@ -420,17 +432,17 @@ unsafe fn power_neon(fft: &[Complex32], power: &mut [f32]) {
       let pair = vld2q_f32(fp.add(i * 8));
       let re = pair.0;
       let im = pair.1;
-      // Two separate multiplies + an add (not `vfmaq_f32`): match
-      // the scalar / SSE2 paths' two-rounding semantics. A fused
-      // multiply-add would single-round and produce backend-specific
-      // power-spectrum values on aarch64 only — which the downstream
-      // threshold-sensitive segmentation could amplify.
-      let p = vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im));
-      vst1q_f32(pp.add(i * 4), p);
+      // Two separate multiplies + add (not `vfmaq_f32`): match the
+      // scalar / SSE2 paths' two-rounding semantics. Then sqrt-then-
+      // square mirrors torchaudio's `complex.abs().pow(2.0)`.
+      let sum = vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im));
+      let mag = vsqrtq_f32(sum);
+      vst1q_f32(pp.add(i * 4), vmulq_f32(mag, mag));
     }
     for k in (chunks * 4)..n {
       let c = fft[k];
-      power[k] = c.re * c.re + c.im * c.im;
+      let mag = (c.re * c.re + c.im * c.im).sqrt();
+      power[k] = mag * mag;
     }
   }
 }
@@ -502,8 +514,7 @@ unsafe fn window_mul_sse2(a: &mut [f32], b: &[f32]) {
 #[target_feature(enable = "sse2")]
 unsafe fn power_sse2(fft: &[Complex32], power: &mut [f32]) {
   use core::arch::x86_64::{
-    _mm_add_ps, _mm_loadu_ps, _mm_movehl_ps, _mm_movelh_ps, _mm_mul_ps, _mm_shuffle_ps,
-    _mm_storeu_ps,
+    _mm_add_ps, _mm_loadu_ps, _mm_mul_ps, _mm_shuffle_ps, _mm_sqrt_ps, _mm_storeu_ps,
   };
   unsafe {
     let n = fft.len();
@@ -511,21 +522,22 @@ unsafe fn power_sse2(fft: &[Complex32], power: &mut [f32]) {
     let fp = fft.as_ptr() as *const f32;
     let pp = power.as_mut_ptr();
     for i in 0..chunks {
-      // Load 4 complex = 8 f32 across two xmm registers.
       let v0 = _mm_loadu_ps(fp.add(i * 8)); // [c0re, c0im, c1re, c1im]
       let v1 = _mm_loadu_ps(fp.add(i * 8 + 4)); // [c2re, c2im, c3re, c3im]
-      // De-interleave: re-lane 0b10_00_10_00 picks indices [0,2] from
+      // De-interleave: shuffle 0b10_00_10_00 picks indices [0,2] from
       // each operand → [c0re, c1re, c2re, c3re].
       let re = _mm_shuffle_ps::<0b10_00_10_00>(v0, v1);
       let im = _mm_shuffle_ps::<0b11_01_11_01>(v0, v1);
-      let p = _mm_add_ps(_mm_mul_ps(re, re), _mm_mul_ps(im, im));
-      _mm_storeu_ps(pp.add(i * 4), p);
-      // Silence unused-import warnings on this build path.
-      let _ = (_mm_movehl_ps, _mm_movelh_ps);
+      // sqrt-then-square mirrors torchaudio's
+      // `complex.abs().pow(2.0)` rounding sequence.
+      let sum = _mm_add_ps(_mm_mul_ps(re, re), _mm_mul_ps(im, im));
+      let mag = _mm_sqrt_ps(sum);
+      _mm_storeu_ps(pp.add(i * 4), _mm_mul_ps(mag, mag));
     }
     for k in (chunks * 4)..n {
       let c = fft[k];
-      power[k] = c.re * c.re + c.im * c.im;
+      let mag = (c.re * c.re + c.im * c.im).sqrt();
+      power[k] = mag * mag;
     }
   }
 }
@@ -685,11 +697,7 @@ fn compute_torchaudio_fbank(samples: &[f32], out: &mut Vec<f32>) {
     // window is unused. `resize` reuses the existing capacity across
     // calls, so this is alloc-free after the first call per thread.
     let n_used = (num_frames - 1) * WINDOW_SHIFT + WINDOW_SIZE;
-    // Drop oversized retained capacity *before* resizing: an earlier
-    // huge call must not pin its allocation across this small one.
-    if scaled.capacity() > SCRATCH_RETAIN_LIMIT && n_used <= SCRATCH_RETAIN_LIMIT {
-      *scaled = Vec::with_capacity(n_used.max(WINDOW_SIZE));
-    }
+    shrink_scratch_before_resize(scaled, n_used);
     scaled.resize(n_used, 0.0);
     for (i, dst) in scaled.iter_mut().enumerate() {
       *dst = samples[i] * SCALE_INT16;
@@ -751,13 +759,38 @@ fn compute_torchaudio_fbank(samples: &[f32], out: &mut Vec<f32>) {
       }
     }
 
-    // Drop any oversized buffer back to a bounded retention size so a
-    // one-shot long clip can't keep hundreds of MB pinned per worker
-    // thread for the rest of the process's life.
-    if scaled.capacity() > SCRATCH_RETAIN_LIMIT {
-      *scaled = Vec::new();
-    }
+    shrink_scratch_after_loop(scaled);
   });
+}
+
+/// Pre-resize cap-and-reset: drop a retained scratch buffer that's
+/// larger than the cap when the upcoming call is small enough that
+/// it doesn't need it. An earlier huge call must not pin its
+/// allocation across this smaller one.
+///
+/// Extracted as a free function so Miri can verify both branches
+/// without going through `compute_torchaudio_fbank`'s FFT path
+/// (rustfft's default planners use SIMD intrinsics that Miri can't
+/// evaluate).
+#[inline]
+fn shrink_scratch_before_resize(scaled: &mut Vec<f32>, n_used: usize) {
+  if scaled.capacity() > SCRATCH_RETAIN_LIMIT && n_used <= SCRATCH_RETAIN_LIMIT {
+    *scaled = Vec::with_capacity(n_used.max(WINDOW_SIZE));
+  }
+}
+
+/// Post-loop cap-and-reset: a one-shot long clip can grow `scaled`
+/// past the retention limit even if it started small. Drop the
+/// buffer at the end of `compute_torchaudio_fbank` so it can't pin
+/// hundreds of MB per worker thread for the process's lifetime.
+///
+/// Extracted as a free function — see `shrink_scratch_before_resize`
+/// for the rationale.
+#[inline]
+fn shrink_scratch_after_loop(scaled: &mut Vec<f32>) {
+  if scaled.capacity() > SCRATCH_RETAIN_LIMIT {
+    *scaled = Vec::new();
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1034,26 +1067,50 @@ mod tests {
     }
   }
 
-  /// Always-on snapshot test that does NOT require external fixtures.
-  /// Pins eight `(frame, mel) → log-mel` anchor points captured once
-  /// from the SIMD-dispatched build for a deterministic chirp input.
-  /// Catches regressions in any of:
+  /// Always-on torchaudio parity test that does NOT require external
+  /// fixtures. Pins eight `(frame, mel) → log-mel` anchor points
+  /// captured directly from
+  /// `torchaudio.compliance.kaldi.fbank` (torchaudio 2.11) on a
+  /// deterministic chirp input. Catches regressions in any of:
   /// - mel filterbank construction
   /// - Hamming window
   /// - FFT plan / size
-  /// - power spectrum kernel (NEON / SSE2)
+  /// - power spectrum kernel (NEON / SSE2): direct `re²+im²` formula
   /// - dot kernel (NEON / SSE2 / AVX2 / AVX-512)
   /// - per-mel mean centering
   ///
-  /// Whatever SIMD backend the runtime selects, all four (incl. the
-  /// scalar fallback under `--cfg diarization_force_scalar`) must
-  /// agree with the snapshot within ULP-level rounding noise.
+  /// The reference values are torchaudio's actual output (see the
+  /// commented capture script below), so this test is a true
+  /// cross-implementation parity check. The `1e-4` tolerance pins
+  /// the f32 FFT-stage drift floor: realfft (radix-2 Cooley–Tukey)
+  /// vs PyTorch's pocketfft contributes ~1e-7 relative on each FFT
+  /// output, amplifying through `|fft|²` and the mel filterbank
+  /// matmul to ~few ULP per log-mel cell.
   ///
-  /// Independent of the torchaudio parity tests below — those only
-  /// run when the dev fixtures are provisioned. This one is the CI
-  /// safety net.
+  /// To regenerate the snapshot:
+  /// ```python
+  /// # tests/parity/python/.venv/bin/python
+  /// import torch, numpy as np
+  /// import torchaudio.compliance.kaldi as k
+  /// n, sr = 24_000, 16_000.0
+  /// t = np.arange(n, dtype=np.float32) / sr
+  /// freq = 100.0 + 600.0 * t
+  /// chunk = 0.3 * np.sin(2.0 * np.pi * freq * t)
+  /// fb = k.fbank(
+  ///     torch.from_numpy(chunk * 32768.0).unsqueeze(0),
+  ///     sample_frequency=16000, frame_length=25.0, frame_shift=10.0,
+  ///     dither=0.0, preemphasis_coefficient=0.97, remove_dc_offset=True,
+  ///     window_type='hamming', round_to_power_of_two=True,
+  ///     snip_edges=True, num_mel_bins=80, low_freq=20.0, high_freq=0.0,
+  ///     use_energy=False, raw_energy=True, htk_compat=False,
+  ///     energy_floor=1.0, use_log_fbank=True, use_power=True,
+  /// )
+  /// fb = (fb - fb.mean(dim=0, keepdim=True)).numpy().astype(np.float32)
+  /// for f, m in [(5,0),(5,40),(5,79),(50,10),(50,40),(50,70),(100,25),(140,55)]:
+  ///     print(f'({f}, {m}, {fb[f, m]}_f32),')
+  /// ```
   #[test]
-  fn deterministic_chirp_snapshot() {
+  fn compares_against_torchaudio_inline_chirp_snapshot() {
     // 1.5 s linear chirp from 100 Hz → 1 kHz at 16 kHz mono.
     let n = 24_000_usize;
     let sr = 16_000.0_f32;
@@ -1067,30 +1124,29 @@ mod tests {
     let out = compute_full_fbank(&chunk).unwrap();
     let frames = out.len() / NUM_MEL_BINS;
     assert_eq!(frames, 148);
-    let snapshot: [(usize, usize, f32); 8] = [
-      (5, 0, 2.446_690_6),
-      (5, 40, -4.950_185),
-      (5, 79, -3.003_877_6),
-      (50, 10, -1.586_247_4),
-      (50, 40, -2.035_995_5),
-      (50, 70, -0.119_341_85),
-      (100, 25, -0.236_327_17),
-      (140, 55, 2.090_998_6),
+    // torchaudio.compliance.kaldi.fbank reference values.
+    let torchaudio_ref: [(usize, usize, f32); 8] = [
+      (5, 0, 2.446_690),
+      (5, 40, -4.950_203),
+      (5, 79, -3.003_859),
+      (50, 10, -1.586_259),
+      (50, 40, -2.035_988),
+      (50, 70, -0.119_349),
+      (100, 25, -0.236_334),
+      (140, 55, 2.090_996),
     ];
     let mut max_abs = 0.0_f32;
-    for (f_idx, m, expected) in snapshot {
+    for (f_idx, m, expected) in torchaudio_ref {
       let got = out[f_idx * NUM_MEL_BINS + m];
       let d = (got - expected).abs();
       if d > max_abs {
         max_abs = d;
       }
     }
-    // Rounding-noise tolerance: f32 mantissa ~6e-8, ~80 mel bins ×
-    // ~257 dot terms × log compounds to a few ULP per cell.
     assert!(
       max_abs < 1e-4,
-      "fbank chirp snapshot drifted by {max_abs:.3e} (max abs); \
-       a SIMD dispatch or kernel regression?"
+      "fbank vs torchaudio drifted by {max_abs:.3e} (max abs over 8 \
+       anchor cells); a SIMD dispatch or kernel regression?"
     );
   }
 
@@ -1100,7 +1156,8 @@ mod tests {
   /// it depends on a captured `.npz` fixture that's not in the repo;
   /// run explicitly with `cargo test -- --ignored` after generating
   /// the fixture via `tests/parity/python/capture_intermediates.py`.
-  /// The always-on `deterministic_chirp_snapshot` test (above) covers
+  /// The always-on `compares_against_torchaudio_inline_chirp_snapshot`
+  /// test (above) covers
   /// the kernel under CI.
   #[test]
   #[ignore = "needs captured /tmp/mel_bank_ref.npz; run with --ignored"]
@@ -1260,6 +1317,12 @@ mod tests {
   /// 60 s clip at 16 kHz (~960 K samples), then call `compute_fbank`
   /// with a small clip, and inspect the retained `scaled` capacity.
   /// Both APIs must keep retained scratch ≤ `SCRATCH_RETAIN_LIMIT`.
+  ///
+  /// Skipped under Miri: ~6 K interpreted-mode FFTs is well past
+  /// Miri's per-test budget. The lighter
+  /// `caps_oversized_scratch_capacity` test below covers the
+  /// cap-and-reset paths under Miri.
+  #[cfg_attr(miri, ignore = "interprets ~6K FFTs; covered by lighter test below")]
   #[test]
   fn bounds_thread_local_scratch_after_huge_call() {
     // Huge clip via the unbounded API. Allowed to allocate, but must
@@ -1295,6 +1358,66 @@ mod tests {
       "scaled capacity {cap_after_small} > SCRATCH_RETAIN_LIMIT \
        after `compute_fbank` follow-up"
     );
+  }
+
+  /// Pre-resize branch — small upcoming call must drop the retained
+  /// oversized buffer. Pure helper, no FFT — runs under Miri.
+  #[test]
+  fn shrink_before_resize_drops_oversized_when_call_small() {
+    let mut v: Vec<f32> = Vec::with_capacity(SCRATCH_RETAIN_LIMIT * 2);
+    shrink_scratch_before_resize(&mut v, /* n_used = */ MIN_CLIP_SAMPLES as usize);
+    assert!(
+      v.capacity() <= SCRATCH_RETAIN_LIMIT,
+      "scratch capacity {} not bounded after small-call shrink",
+      v.capacity()
+    );
+  }
+
+  /// Pre-resize branch — huge upcoming call must KEEP the retained
+  /// buffer (no point dropping a buffer we're about to refill).
+  #[test]
+  fn shrink_before_resize_keeps_buffer_when_call_huge() {
+    let cap_before = SCRATCH_RETAIN_LIMIT * 2;
+    let mut v: Vec<f32> = Vec::with_capacity(cap_before);
+    shrink_scratch_before_resize(&mut v, /* n_used = */ SCRATCH_RETAIN_LIMIT * 4);
+    assert_eq!(
+      v.capacity(),
+      cap_before,
+      "shrink fired on a huge upcoming call — would re-allocate the buffer we're about to use"
+    );
+  }
+
+  /// Pre-resize branch — already-bounded buffer is left alone.
+  #[test]
+  fn shrink_before_resize_leaves_bounded_buffer() {
+    let cap_before = SCRATCH_RETAIN_LIMIT / 4;
+    let mut v: Vec<f32> = Vec::with_capacity(cap_before);
+    shrink_scratch_before_resize(&mut v, /* n_used = */ MIN_CLIP_SAMPLES as usize);
+    assert_eq!(v.capacity(), cap_before);
+  }
+
+  /// Post-loop branch — buffer that grew past the cap during a huge
+  /// call must be dropped. This is the branch a previous Miri test
+  /// missed (it only exercised the pre-resize branch via a small
+  /// call). Pure helper, no FFT — runs under Miri.
+  #[test]
+  fn shrink_after_loop_drops_oversized() {
+    let mut v: Vec<f32> = Vec::with_capacity(SCRATCH_RETAIN_LIMIT * 2);
+    shrink_scratch_after_loop(&mut v);
+    assert_eq!(
+      v.capacity(),
+      0,
+      "post-loop shrink failed to drop oversized buffer"
+    );
+  }
+
+  /// Post-loop branch — buffer below the cap is left alone.
+  #[test]
+  fn shrink_after_loop_keeps_bounded_buffer() {
+    let cap_before = SCRATCH_RETAIN_LIMIT / 2;
+    let mut v: Vec<f32> = Vec::with_capacity(cap_before);
+    shrink_scratch_after_loop(&mut v);
+    assert_eq!(v.capacity(), cap_before);
   }
 
   /// Length-mismatch must `assert!` even in release builds — SIMD
@@ -1349,6 +1472,174 @@ mod tests {
         (dispatched - s).abs() < tol,
         "n={n}: dispatched={dispatched}, scalar={s}, tol={tol:.3e}"
       );
+    }
+  }
+
+  // ─── per-backend tests ────────────────────────────────────────────
+  //
+  // The dispatcher above only routes to one SIMD path per CPU
+  // (AVX-512 > AVX2 > SSE2 on x86_64; NEON > scalar on aarch64).
+  // These per-backend tests bypass the dispatcher and call each
+  // unsafe kernel directly, gated on runtime feature detection.
+  // Backends not selected by the dispatcher on the current host
+  // (e.g. SSE2 on an AVX-512 chip) still get exercised here.
+
+  fn make_test_inputs(n: usize) -> (Vec<f32>, Vec<f32>) {
+    let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.137).sin()).collect();
+    let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.241 + 1.0).cos()).collect();
+    (a, b)
+  }
+
+  fn assert_dot_within_tol(got: f64, expected: f64, n: usize) {
+    let tol = (n as f64) * (f32::EPSILON as f64) * (1.0 + expected.abs());
+    assert!(
+      (got - expected).abs() < tol,
+      "n={n}: got={got}, scalar={expected}, tol={tol:.3e}"
+    );
+  }
+
+  #[cfg(target_arch = "aarch64")]
+  #[test]
+  fn dot_neon_agrees_with_scalar_directly() {
+    if !std::arch::is_aarch64_feature_detected!("neon") {
+      eprintln!("skip: NEON not available");
+      return;
+    }
+    for n in [1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 64, 257] {
+      let (a, b) = make_test_inputs(n);
+      let s = fma_dot_scalar(&a, &b);
+      // SAFETY: NEON checked via runtime feature detection above.
+      let got = unsafe { dot_neon(&a, &b) };
+      assert_dot_within_tol(got, s, n);
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn dot_sse2_agrees_with_scalar_directly() {
+    // SSE2 is x86_64 baseline; runtime check kept for completeness.
+    if !std::arch::is_x86_feature_detected!("sse2") {
+      eprintln!("skip: SSE2 not available");
+      return;
+    }
+    for n in [1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 64, 257] {
+      let (a, b) = make_test_inputs(n);
+      let s = fma_dot_scalar(&a, &b);
+      // SAFETY: SSE2 checked.
+      let got = unsafe { dot_sse2(&a, &b) };
+      assert_dot_within_tol(got, s, n);
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn dot_avx2_agrees_with_scalar_directly() {
+    if !std::arch::is_x86_feature_detected!("avx2") || !std::arch::is_x86_feature_detected!("fma") {
+      eprintln!("skip: AVX2 + FMA not available");
+      return;
+    }
+    for n in [1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 64, 257] {
+      let (a, b) = make_test_inputs(n);
+      let s = fma_dot_scalar(&a, &b);
+      // SAFETY: AVX2 + FMA checked.
+      let got = unsafe { dot_avx2(&a, &b) };
+      assert_dot_within_tol(got, s, n);
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn dot_avx512_agrees_with_scalar_directly() {
+    if !std::arch::is_x86_feature_detected!("avx512f") {
+      eprintln!("skip: AVX-512F not available");
+      return;
+    }
+    for n in [1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 64, 257] {
+      let (a, b) = make_test_inputs(n);
+      let s = fma_dot_scalar(&a, &b);
+      // SAFETY: AVX-512F checked.
+      let got = unsafe { dot_avx512(&a, &b) };
+      assert_dot_within_tol(got, s, n);
+    }
+  }
+
+  // Per-backend window/power tests follow the same pattern. Smaller
+  // length grid since these don't have lane-width-dependent rounding
+  // trees — just direct lane-wise mul/add.
+
+  #[cfg(target_arch = "aarch64")]
+  #[test]
+  fn window_neon_agrees_with_scalar_directly() {
+    if !std::arch::is_aarch64_feature_detected!("neon") {
+      return;
+    }
+    for n in [4, 16, 17, 400] {
+      let (mut a, b) = make_test_inputs(n);
+      let mut a_scalar = a.clone();
+      window_mul_scalar(&mut a_scalar, &b);
+      // SAFETY: NEON checked.
+      unsafe { window_mul_neon(&mut a, &b) };
+      assert_eq!(a, a_scalar);
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn window_sse2_agrees_with_scalar_directly() {
+    if !std::arch::is_x86_feature_detected!("sse2") {
+      return;
+    }
+    for n in [4, 16, 17, 400] {
+      let (mut a, b) = make_test_inputs(n);
+      let mut a_scalar = a.clone();
+      window_mul_scalar(&mut a_scalar, &b);
+      // SAFETY: SSE2 checked.
+      unsafe { window_mul_sse2(&mut a, &b) };
+      assert_eq!(a, a_scalar);
+    }
+  }
+
+  #[cfg(target_arch = "aarch64")]
+  #[test]
+  fn power_neon_agrees_with_scalar_directly() {
+    if !std::arch::is_aarch64_feature_detected!("neon") {
+      return;
+    }
+    for n in [4, 16, 17, FFT_SPECTRUM_LEN] {
+      let fft: Vec<Complex32> = (0..n)
+        .map(|i| {
+          let v = i as f32;
+          Complex32::new(v.sin() * 1e3, v.cos() * 1e3)
+        })
+        .collect();
+      let mut p_scalar = vec![0.0_f32; n];
+      let mut p_neon = vec![0.0_f32; n];
+      power_scalar(&fft, &mut p_scalar);
+      // SAFETY: NEON checked.
+      unsafe { power_neon(&fft, &mut p_neon) };
+      assert_eq!(p_neon, p_scalar);
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn power_sse2_agrees_with_scalar_directly() {
+    if !std::arch::is_x86_feature_detected!("sse2") {
+      return;
+    }
+    for n in [4, 16, 17, FFT_SPECTRUM_LEN] {
+      let fft: Vec<Complex32> = (0..n)
+        .map(|i| {
+          let v = i as f32;
+          Complex32::new(v.sin() * 1e3, v.cos() * 1e3)
+        })
+        .collect();
+      let mut p_scalar = vec![0.0_f32; n];
+      let mut p_sse2 = vec![0.0_f32; n];
+      power_scalar(&fft, &mut p_scalar);
+      // SAFETY: SSE2 checked.
+      unsafe { power_sse2(&fft, &mut p_sse2) };
+      assert_eq!(p_sse2, p_scalar);
     }
   }
 }
