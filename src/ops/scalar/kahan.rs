@@ -42,12 +42,22 @@
 /// Result is independent of summation order to `O(ε)`, modulo the
 /// f64 mul rounding of each `a[i] * b[i]` term.
 ///
-/// # Panics (debug only)
+/// # Panics
 ///
-/// Debug asserts on `a.len() == b.len()`.
+/// Asserts `a.len() == b.len()` unconditionally (release + debug).
+/// The loop indexes `b[i]` for `i in 0..a.len()`, so a length
+/// mismatch would panic on bounds-check in release anyway —
+/// surfacing the contract violation early with a descriptive
+/// message keeps it consistent with [`crate::ops::dispatch::dot`].
 #[inline]
 pub fn kahan_dot(a: &[f64], b: &[f64]) -> f64 {
-  debug_assert_eq!(a.len(), b.len(), "kahan_dot: length mismatch");
+  assert_eq!(
+    a.len(),
+    b.len(),
+    "kahan_dot: a.len() ({}) must equal b.len() ({})",
+    a.len(),
+    b.len()
+  );
   let n = a.len();
   let mut sum = 0.0_f64;
   let mut comp = 0.0_f64; // running compensation

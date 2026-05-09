@@ -47,12 +47,17 @@ use crate::cluster::hungarian::error::{Error, ShapeError};
 ///
 /// - `Error::Shape::EmptyChunks` if `nr == 0` or `nc == 0` (scipy's
 ///   trivial-input branch).
-/// - `Error::NonFinite` if any cost cell is `NaN` or `-inf`. (`+inf`
-///   is rejected by the existing `constrained_argmax` boundary, which
-///   feeds finite values into this function.)
+/// - `Error::NonFinite` if any cost cell is non-finite (`NaN`,
+///   `+inf`, or `-inf`). `+inf` and `NaN` are rejected here even
+///   though the in-tree caller `constrained_argmax` already filters
+///   them at its own boundary, so a future caller that bypasses
+///   `constrained_argmax` (or passes `maximize=false` where negation
+///   wouldn't convert `+inf` to `-inf`) still gets a clear error
+///   instead of an opaque `EmptyChunks` infeasibility report.
 /// - `Error::Shape::EmptyChunks` (re-used) if the cost matrix is
 ///   "infeasible" — every augmenting path lookup hit `+inf`. With
-///   finite inputs this branch is unreachable.
+///   finite inputs (which the check above guarantees) this branch
+///   is unreachable.
 ///
 /// `maximize=true` is handled the same way as scipy: negate the cost
 /// matrix in a working copy. Caller's input slice is not mutated.
@@ -92,9 +97,13 @@ pub(crate) fn linear_sum_assignment(
     }
   }
   // Validate after transpose/negate so the rejection mirrors scipy
-  // (which also checks the working copy).
+  // (which also checks the working copy). `!is_finite()` catches NaN
+  // and both infinities — important because under `maximize=false`
+  // a `+inf` would otherwise survive into the dual-update arithmetic
+  // (the previous narrower `is_nan() || == NEG_INFINITY` check missed
+  // that case for non-`constrained_argmax` callers).
   for &v in working.iter() {
-    if v.is_nan() || v == f64::NEG_INFINITY {
+    if !v.is_finite() {
       return Err(crate::cluster::hungarian::error::NonFiniteError::InfInSoftClusters.into());
     }
   }
