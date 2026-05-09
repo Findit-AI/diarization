@@ -212,7 +212,18 @@ impl FftScratch {
 /// In-place element-wise multiply `a[i] *= b[i]` (Hamming window).
 #[inline]
 fn apply_window_inplace(a: &mut [f32], b: &[f32]) {
-  debug_assert_eq!(a.len(), b.len());
+  // Real assert (not debug_assert) — the SIMD kernels below issue
+  // raw-pointer vector loads from both inputs bounded only by
+  // `a.len()`. A length mismatch here would OOB-read `b` in release
+  // builds where `debug_assert_eq` is a no-op. Mirrors the same
+  // safe-boundary rule used by `crate::ops::dispatch::dot`.
+  assert_eq!(
+    a.len(),
+    b.len(),
+    "apply_window_inplace: a.len()={} != b.len()={}",
+    a.len(),
+    b.len()
+  );
   // Force-scalar escape hatch for sanitizer / cross-arch determinism
   // testing (`RUSTFLAGS="--cfg diarization_force_scalar"`). Mirrors
   // the gate already wired into `crate::ops` for the cluster ops.
@@ -250,7 +261,14 @@ fn window_mul_scalar(a: &mut [f32], b: &[f32]) {
 /// `power[k] = re² + im²` over a real FFT spectrum.
 #[inline]
 fn power_spectrum(fft: &[Complex32], power: &mut [f32]) {
-  debug_assert_eq!(fft.len(), power.len());
+  // See `apply_window_inplace` for why this is a real assert.
+  assert_eq!(
+    fft.len(),
+    power.len(),
+    "power_spectrum: fft.len()={} != power.len()={}",
+    fft.len(),
+    power.len()
+  );
   if cfg!(diarization_force_scalar) {
     power_scalar(fft, power);
     return;
@@ -290,7 +308,17 @@ fn power_scalar(fft: &[Complex32], power: &mut [f32]) {
 /// would lose mantissa bits over 257 mul-adds.
 #[inline]
 fn fma_dot_f32_to_f64(a: &[f32], b: &[f32]) -> f64 {
-  debug_assert_eq!(a.len(), b.len());
+  // Real assert (not debug_assert) — SIMD bodies do raw-pointer
+  // vector loads from both inputs bounded only by `a.len()`. Without
+  // this guard, a release-build call from a future site that drifted
+  // its expected length would OOB-read `b`.
+  assert_eq!(
+    a.len(),
+    b.len(),
+    "fma_dot_f32_to_f64: a.len()={} != b.len()={}",
+    a.len(),
+    b.len()
+  );
   if cfg!(diarization_force_scalar) {
     return fma_dot_scalar(a, b);
   }
@@ -1060,24 +1088,21 @@ mod tests {
 
   // ─── parity checks against captured torchaudio reference ────────
 
-  /// Mel filterbank parity.
+  /// Mel filterbank parity vs torchaudio. `#[ignore]`-gated because
+  /// it depends on a captured `.npz` fixture that's not in the repo;
+  /// run explicitly with `cargo test -- --ignored` after generating
+  /// the fixture via `tests/parity/python/capture_intermediates.py`.
+  /// The always-on `deterministic_chirp_snapshot` test (above) covers
+  /// the kernel under CI.
   #[test]
+  #[ignore = "needs captured /tmp/mel_bank_ref.npz; run with --ignored"]
   fn matches_torchaudio_mel_bank() {
     let path = std::path::PathBuf::from("/tmp/mel_bank_ref.npz");
     if !path.exists() {
-      // CI must provision the torchaudio reference fixtures so the
-      // SIMD path is actually validated against pyannote's reference,
-      // not just against itself. Local dev still skips gracefully.
-      if std::env::var_os("CI").is_some()
-        || std::env::var_os("DIA_REQUIRE_PARITY_FIXTURES").is_some()
-      {
-        panic!(
-          "{} missing — provision via tests/parity/python/capture_intermediates.py",
-          path.display()
-        );
-      }
-      eprintln!("skip: {} not present", path.display());
-      return;
+      panic!(
+        "{} missing — generate via tests/parity/python/capture_intermediates.py",
+        path.display()
+      );
     }
     use std::{fs::File, io::BufReader};
     let f = File::open(&path).expect("open");
@@ -1099,25 +1124,18 @@ mod tests {
     assert!(max_abs < 5e-5, "mel bank parity {max_abs:.3e} > 5e-5");
   }
 
-  /// Bit-near-exact parity vs torchaudio on a real chunk that
-  /// previously caused the 08 spurious-cluster failure.
+  /// Bit-near-exact parity vs torchaudio on the real chunk that
+  /// previously caused the 08 spurious-cluster failure. Same
+  /// `#[ignore]` rationale as `matches_torchaudio_mel_bank`.
   #[test]
+  #[ignore = "needs captured /tmp/pyannote_fbank_08_c1146.npz; run with --ignored"]
   fn matches_torchaudio_on_08_chunk_1146() {
     let path = std::path::PathBuf::from("/tmp/pyannote_fbank_08_c1146.npz");
     if !path.exists() {
-      // CI must provision the torchaudio reference fixtures so the
-      // SIMD path is actually validated against pyannote's reference,
-      // not just against itself. Local dev still skips gracefully.
-      if std::env::var_os("CI").is_some()
-        || std::env::var_os("DIA_REQUIRE_PARITY_FIXTURES").is_some()
-      {
-        panic!(
-          "{} missing — provision via tests/parity/python/capture_intermediates.py",
-          path.display()
-        );
-      }
-      eprintln!("skip: {} not present", path.display());
-      return;
+      panic!(
+        "{} missing — generate via tests/parity/python/capture_intermediates.py",
+        path.display()
+      );
     }
     use std::{fs::File, io::BufReader};
     let f = File::open(&path).expect("open");
@@ -1266,6 +1284,34 @@ mod tests {
       "scaled capacity {cap_after_small} > SCRATCH_RETAIN_LIMIT \
        after `compute_fbank` follow-up"
     );
+  }
+
+  /// Length-mismatch must `assert!` even in release builds — SIMD
+  /// kernels do unchecked raw-pointer loads bounded only by `a.len()`.
+  /// Replaces the prior `debug_assert_eq!` which was a no-op in release
+  /// and could have OOB-read past `b`.
+  #[test]
+  #[should_panic(expected = "fma_dot_f32_to_f64")]
+  fn dot_panics_on_length_mismatch_in_release() {
+    let a = [1.0_f32; 16];
+    let b = [1.0_f32; 8];
+    let _ = fma_dot_f32_to_f64(&a, &b);
+  }
+
+  #[test]
+  #[should_panic(expected = "apply_window_inplace")]
+  fn window_panics_on_length_mismatch_in_release() {
+    let mut a = [1.0_f32; 16];
+    let b = [1.0_f32; 8];
+    apply_window_inplace(&mut a, &b);
+  }
+
+  #[test]
+  #[should_panic(expected = "power_spectrum")]
+  fn power_panics_on_length_mismatch_in_release() {
+    let fft = vec![Complex32::new(0.0, 0.0); 16];
+    let mut p = vec![0.0_f32; 8];
+    power_spectrum(&fft, &mut p);
   }
 
   /// Cross-check that whichever SIMD backend the dispatcher selects
