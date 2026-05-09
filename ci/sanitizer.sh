@@ -27,19 +27,19 @@ TARGET="x86_64-unknown-linux-gnu"
 
 # Run address sanitizer
 RUSTFLAGS="-Z sanitizer=address" \
-cargo test --lib --target "$TARGET" --no-default-features ops:: embed::fbank::tests
+cargo test --lib --target "$TARGET" --no-default-features -- ops:: embed::fbank::tests
 
 # Run leak sanitizer
 RUSTFLAGS="-Z sanitizer=leak" \
-cargo test --lib --target "$TARGET" --no-default-features ops:: embed::fbank::tests
+cargo test --lib --target "$TARGET" --no-default-features -- ops:: embed::fbank::tests
 
 # Run memory sanitizer (requires -Zbuild-std for instrumented std)
 RUSTFLAGS="-Z sanitizer=memory" \
-cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features ops:: embed::fbank::tests
+cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features -- ops:: embed::fbank::tests
 
 # Run thread sanitizer (requires -Zbuild-std for instrumented std).
 # Note: `ops::*` has no concurrency primitives — TSAN is kept here for
 # symmetry and to catch any future regression that introduces shared
 # state. Cheap to run.
 RUSTFLAGS="-Z sanitizer=thread" \
-cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features ops:: embed::fbank::tests
+cargo -Zbuild-std test --lib --target "$TARGET" --no-default-features -- ops:: embed::fbank::tests
