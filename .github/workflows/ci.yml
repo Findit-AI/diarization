@@ -476,7 +476,7 @@ jobs:
             ${{ runner.os }}-neon-native-
       - name: Install Rust
         run: rustup update stable && rustup default stable
-      - name: Run fbank + ops:: tests on arm64 (NEON dispatched)
+      - name: "Run fbank + ops:: tests on arm64 (NEON dispatched)"
         # `--cfg diarization_assert_neon` enables the
         # `dispatch_selects_neon_under_native_arm64` test in
         # `ops::backend_selection_tests`, failing if the runner image
