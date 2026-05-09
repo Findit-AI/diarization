@@ -61,6 +61,7 @@ cargo test \
   --no-default-features \
   -- \
   ops:: \
+  embed::fbank::tests \
   pipeline::parity_tests \
   cluster::ahc::parity_tests \
   cluster::vbx::parity_tests \

@@ -1,5 +1,21 @@
 # UNRELEASED
 
+BREAKING (pre-1.0):
+
+- `diarization::embed::Error` is now `#[non_exhaustive]`. Callers
+  with exhaustive `match` arms must add a `_ =>` wildcard. The
+  attribute is forward-looking — variants in this enum represent
+  low-level numerical / boundary conditions whose set evolves as
+  new failure modes are surfaced or as internal kernels stop
+  emitting one. The attribute lets future variant additions /
+  retirements stay non-breaking after this point.
+- `diarization::embed::Error::Fbank(String)` variant removed. The
+  variant was tied to the previous `kaldi-native-fbank` C++ backend,
+  which has been replaced by an in-tree torchaudio-compliance fbank
+  port (no `Result<_, String>` boundary to wrap). Code that matched
+  the variant directly will not compile.
+
+
 The pyannote-community-1 offline + streaming-offline pipelines now
 ship in full: VBx clustering, PLDA, AHC, centroid + Hungarian
 assignment, reconstruction, RTTM emission. The crate exposes both

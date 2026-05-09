@@ -35,10 +35,28 @@ cargo miri setup
 
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
-# Same scope and configuration as `miri_tb.sh`: SIMD-only test filter
-# (`ops::`), scalar dispatcher forced via `diarization_force_scalar`
-# (miri can't evaluate intrinsics), `--no-default-features` (skips ort
-# C++ runtime that miri can't FFI-call). See `miri_tb.sh` for the full
-# rationale.
+# Same scope and configuration as `miri_tb.sh`: SIMD-only test
+# filter (`ops::` + `embed::fbank::tests`), scalar dispatcher forced
+# via `diarization_force_scalar` (miri can't evaluate intrinsics),
+# `--no-default-features` (skips ort C++ runtime that miri can't
+# FFI-call), per-backend direct unsafe-call tests skipped because
+# they call NEON/SSE2/AVX2/AVX-512F kernels directly (no SIMD
+# evaluation under miri). See `miri_tb.sh` for the full rationale.
 export RUSTFLAGS="${RUSTFLAGS:-} --cfg diarization_force_scalar"
-cargo miri test --lib --target "$TARGET" --no-default-features ops::
+# See `miri_tb.sh` for the rationale on the explicit fbank
+# allowlist. Same set of tests under stacked-borrows.
+cargo miri test \
+  --lib --target "$TARGET" --no-default-features \
+  -- \
+  ops:: \
+  embed::fbank::tests::dot_panics_on_length_mismatch_in_release \
+  embed::fbank::tests::window_panics_on_length_mismatch_in_release \
+  embed::fbank::tests::power_panics_on_length_mismatch_in_release \
+  embed::fbank::tests::dot_kernels_agree_with_scalar \
+  embed::fbank::tests::nan_propagates_through_log_floor \
+  embed::fbank::tests::force_scalar_cfg_routes_through_scalar_when_set \
+  embed::fbank::tests::shrink_before_resize_drops_oversized_when_call_small \
+  embed::fbank::tests::shrink_before_resize_keeps_buffer_when_call_huge \
+  embed::fbank::tests::shrink_before_resize_leaves_bounded_buffer \
+  embed::fbank::tests::shrink_after_loop_drops_oversized \
+  embed::fbank::tests::shrink_after_loop_keeps_bounded_buffer
