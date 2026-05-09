@@ -880,8 +880,10 @@ pub fn compute_fbank(samples: &[f32]) -> Result<Box<[[f32; FBANK_NUM_MELS]; FBAN
   });
 
   // Mean-subtract per mel band across frames (pyannote
-  // `speaker_verification.py:566`). f64 accumulator: 200 squared-f32
-  // terms can lose mantissa bits in f32.
+  // `speaker_verification.py:566`). f64 accumulator: summing 200 raw
+  // log-mel f32 coefficients in f32 would lose mantissa bits when the
+  // running sum's magnitude exceeds the per-cell magnitude by a few
+  // orders. Widening to f64 first keeps the per-mel mean accurate.
   let mut mean_per_mel = [0.0_f64; FBANK_NUM_MELS];
   for row in out.iter() {
     for (m, &v) in row.iter().enumerate() {

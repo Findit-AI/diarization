@@ -6,35 +6,34 @@
 //! NaN entries with the *global* `np.nanmin(soft_clusters)`, and runs
 //! `scipy.optimize.linear_sum_assignment(cost, maximize=True)` per chunk.
 //!
-//! ## Tie-breaking divergence from scipy
+//! ## Solver
 //!
-//! `pathfinding::kuhn_munkres` produces a maximum-weight matching, but on
-//! tied optima its label choice can differ from
-//! `scipy.optimize.linear_sum_assignment`. Counterexample: cost
-//! `[[0,0],[0,0],[1,1]]` → scipy returns `[-2, 1, 0]`, pathfinding
-//! returns `[1, -2, 0]`. Both have the same total weight (1.0); they
-//! disagree on which equally-tied speaker is left unmatched.
+//! Uses the in-tree scipy-compatible LSAP port at
+//! [`crate::cluster::hungarian::lsap::linear_sum_assignment`] (a direct
+//! port of SciPy's `rectangular_lsap.cpp` — Crouse / LAPJV with the
+//! same row-traversal and column-augmentation order). On tied optima
+//! the tie-break therefore matches scipy bit-for-bit; the previous
+//! `pathfinding::kuhn_munkres` adapter that left ties as a non-contract
+//! has been retired.
 //!
-//! The realistic tie source is pyannote's own flow setting inactive
-//! speaker rows to a constant (`const = soft.min() - 1.0` for rows with
-//! `segmentations.sum(1) == 0`). Downstream, `reconstruct(segmentations,
-//! hard_clusters, count)` weights each `(chunk, speaker)`'s cluster
-//! contribution by segmentation activity, so an inactive row's cluster
-//! id contributes zero to `discrete_diarization` regardless of which
-//! cluster it was assigned. The tie-breaking divergence is therefore
-//! invisible to the final DER metric on the realistic input
-//! distribution. The captured 218-chunk fixture has zero tied chunks
-//! and passes parity exactly.
+//! Pre-port counterexample (`pathfinding::kuhn_munkres` vs scipy):
+//! cost `[[0,0],[0,0],[1,1]]` → scipy returns `[-2, 1, 0]`,
+//! pathfinding returned `[1, -2, 0]`. The new solver returns
+//! `[-2, 1, 0]` — same labels and unmatched-row choice as scipy.
 //!
-//! Bit-exact pyannote parity on tied inputs is **not** a contract here.
-//! A use case that requires it (e.g. round-tripping `hard_clusters` into
-//! another pyannote-based tool, rather than consuming diarization output)
-//! would need either a hand-rolled Hungarian mirroring scipy's traversal
-//! order or a pre/post-processing canonicalization layer. The
+//! ## Shape contract
+//!
+//! `linear_sum_assignment` accepts any rectangular cost matrix; the
+//! adapter here transposes when `num_speakers > num_clusters` to match
+//! pyannote's per-chunk maximize-over-cluster orientation, then maps
+//! the LSAP output back to a `[i32; SLOTS]` row. The previous
+//! "rows ≤ columns" constraint that the `pathfinding` adapter required
+//! no longer applies.
+//!
+//! Captured 218-chunk fixture passes parity exactly. The
 //! invariant-based tie tests in `src/cluster/hungarian/tests.rs`
-//! ("tie-breaking" section) pin the contract this module *does* enforce:
-//! some optimal matching is returned, with no specific label permutation
-//! locked in.
+//! ("tie-breaking" section) additionally pin that the same labels
+//! scipy would return are produced.
 
 use crate::cluster::hungarian::error::Error;
 use nalgebra::DMatrix;
@@ -44,13 +43,14 @@ use nalgebra::DMatrix;
 pub const UNMATCHED: i32 = -2;
 
 /// Maximum allowed magnitude for any finite entry in a cost matrix
-/// passed to [`constrained_argmax`]. The `kuhn_munkres` solver
-/// (`pathfinding::kuhn_munkres`) accumulates `lx[i] + ly[j] -
-/// weight[i,j]` and adds label updates iteratively; values approaching
-/// `f64::MAX` overflow to `±inf` after one or two additions. Once an
-/// entry overflows, the solver can wedge or return a non-optimal
-/// assignment per the crate's own docs — exactly the failure mode the
-/// upstream `±inf` guard exists to prevent.
+/// passed to [`constrained_argmax`]. The LSAP solver
+/// (`crate::cluster::hungarian::lsap::linear_sum_assignment`)
+/// accumulates dual-variable updates that touch every cell; values
+/// approaching `f64::MAX` overflow to `±inf` after one or two
+/// additions and wedge the augmenting-path search. The same bound
+/// applied under the previous `pathfinding::kuhn_munkres` adapter for
+/// the same reason — kept here so the upstream `±inf` guard catches
+/// caller-side corruption before the solver does.
 ///
 /// `1e15` is a documented safe range with O(150) decimal orders of
 /// headroom from `f64::MAX ≈ 1.8e308`. Production cosine distances are
@@ -149,13 +149,13 @@ pub type ChunkAssignment = <DefaultLayout as ChunkLayout>::Row;
 /// 1. Production cosine distances over finite embeddings are always
 ///    finite, so `±inf` indicates upstream corruption rather than a
 ///    well-defined edge case the algorithm should silently handle.
-/// 2. `pathfinding::kuhn_munkres` does `lx[root] + ly[y]` and other
-///    accumulating arithmetic on the costs; feeding `f64::MAX` risks
-///    overflow into `±inf`/`NaN` in the slack labelling, and the crate
-///    docs explicitly warn that *"indefinite values such as positive or
-///    negative infinity or NaN can cause this function to loop endlessly"*.
-///    Rejecting at the boundary keeps the solver inside its safe
-///    operating envelope.
+/// 2. The LSAP solver
+///    ([`crate::cluster::hungarian::lsap::linear_sum_assignment`])
+///    does dual-variable updates on the costs; feeding `f64::MAX`
+///    risks overflow into `±inf`/`NaN` and wedges the augmenting-path
+///    search. Rejecting at the boundary keeps the solver inside its
+///    safe operating envelope (and also bounded the prior
+///    `pathfinding::kuhn_munkres` adapter for the same reason).
 ///
 /// # Errors
 ///
@@ -169,10 +169,12 @@ pub type ChunkAssignment = <DefaultLayout as ChunkLayout>::Row;
 ///
 /// # Algorithm
 ///
-/// `pathfinding::kuhn_munkres` requires `rows <= columns`. When
-/// `num_speakers > num_clusters` the cost matrix is transposed to
-/// `(num_clusters, num_speakers)` before running kuhn_munkres, and the
-/// resulting `cluster → speaker` assignment is inverted.
+/// [`crate::cluster::hungarian::lsap::linear_sum_assignment`] is
+/// shape-agnostic, but pyannote runs the assignment in
+/// `(num_speakers, num_clusters)` orientation with `maximize=True`.
+/// We negate to convert maximize → minimize and pass the matrix
+/// directly. The output `(row_ind, col_ind)` is then mapped back to a
+/// `[i32; SLOTS]` row indexed by speaker.
 pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Error> {
   use crate::cluster::hungarian::error::ShapeError;
   if chunks.is_empty() {
@@ -191,8 +193,8 @@ pub fn constrained_argmax(chunks: &[DMatrix<f64>]) -> Result<Vec<Vec<i32>>, Erro
     }
   }
 
-  // Reject ±inf upfront, then bound the magnitude of finite entries so
-  // they cannot drive `kuhn_munkres`'s accumulating slack arithmetic
+  // Reject ±inf upfront, then bound the magnitude of finite entries
+  // so they cannot drive the LSAP solver's dual-variable updates
   // into overflow.
   //
   // Numpy's `np.nan_to_num` substitutes ±inf with `f64::MAX/MIN`, but

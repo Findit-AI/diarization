@@ -14,7 +14,7 @@ rust-version = "1.95"
 # for attribution. Downstream redistributors of any binary linking `dia`
 # MUST reproduce both the MIT segmentation attribution and the CC-BY-4.0
 # PLDA attribution.
-license = "(MIT OR Apache-2.0) AND MIT AND CC-BY-4.0"
+license = "(MIT OR Apache-2.0) AND MIT AND CC-BY-4.0 AND BSD-3-Clause"
 repository = "https://github.com/al8n/diarization"
 homepage = "https://github.com/al8n/diarization"
 documentation = "https://docs.rs/diarization"
@@ -158,7 +158,7 @@ ort = { version = "2.0.0-rc.12", optional = true }
 tch = { version = "0.24", optional = true }
 
 # Real-valued FFT for the bit-exact torchaudio.compliance.kaldi.fbank
-# port (see `src/embed/torchaudio_fbank.rs`). PyTorch's `torch.fft.rfft`
+# port (see `src/embed/fbank.rs`). PyTorch's `torch.fft.rfft`
 # routes to pocketfft on CPU; `realfft` wraps `rustfft`'s
 # Cooley-Tukey radix-2 path which produces the same spectrum within
 # ~1e-7 relative — small enough that the resnet+pooling output stays

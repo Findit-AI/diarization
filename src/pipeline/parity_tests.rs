@@ -384,8 +384,12 @@ fn diagnose_pipeline_per_chunk_10_mrbeast() {
 /// compare to pyannote's captured `hard_clusters`. Earlier stages
 /// (centroids, soft_clusters on active pairs) match bit-exactly per
 /// the diagnostic test below — so a mismatch here isolates dia's
-/// Hungarian (`pathfinding::kuhn_munkres`) tie-breaking from scipy's
-/// (`scipy.optimize.linear_sum_assignment` / LAPJV).
+/// Hungarian assignment (`crate::cluster::hungarian::lsap`, an
+/// in-tree port of SciPy's `rectangular_lsap.cpp`) against scipy's
+/// `scipy.optimize.linear_sum_assignment` reference. With the LSAP
+/// port replacing the prior `pathfinding::kuhn_munkres` adapter, the
+/// tie-breaking is matched bit-for-bit, so this test pins the
+/// integration boundary rather than just the optimal-weight contract.
 #[test]
 #[ignore = "isolates Hungarian tie-breaking divergence using captured 10_mrbeast_clean_water soft_clusters"]
 fn hungarian_only_parity_10_mrbeast() {
@@ -463,9 +467,12 @@ fn hungarian_only_parity_10_mrbeast() {
   );
   assert_eq!(
     mismatches, 0,
-    "Hungarian tie-breaking diverged from scipy in {mismatches} chunks. \
-     pathfinding::kuhn_munkres returns a different optimal assignment than \
-     scipy.optimize.linear_sum_assignment when ties exist."
+    "Hungarian tie-breaking diverged from scipy in {mismatches} chunks — \
+     `crate::cluster::hungarian::lsap` is meant to be a bit-for-bit port \
+     of `scipy.optimize.linear_sum_assignment` (Crouse / LAPJV). A \
+     mismatch here points to a regression in the LSAP traversal/augment \
+     order, not to the documented historical `pathfinding::kuhn_munkres` \
+     tie-break gap (that solver was retired)."
   );
 }
 
