@@ -321,9 +321,18 @@ fn fma_dot_f32_to_f64(a: &[f32], b: &[f32]) -> f64 {
 
 #[allow(dead_code)] // referenced from tests + non-SIMD fallbacks
 fn fma_dot_scalar(a: &[f32], b: &[f32]) -> f64 {
+  // Match the SIMD backends bit-exactly: multiply in f32 first, then
+  // widen to f64 for accumulation. The SIMD bodies use
+  // `_mm*_mul_ps` / `vmulq_f32` which round the product to f32 before
+  // any conversion. A naive `(*x as f64) * (*y as f64)` widens both
+  // operands first and computes the product in f64 — measurably
+  // different (~3e-12 per term) on production-scale inputs and would
+  // make `force_scalar` builds, sanitizer runs, and non-aarch64 /
+  // non-x86_64 fallbacks compute different fbank from the deployed
+  // path. Also matches PyTorch's BLAS sgemm semantics.
   let mut sum = 0.0_f64;
   for (x, y) in a.iter().zip(b.iter()) {
-    sum += (*x as f64) * (*y as f64);
+    sum += (*x * *y) as f64;
   }
   sum
 }
@@ -406,7 +415,7 @@ unsafe fn dot_neon(a: &[f32], b: &[f32]) -> f64 {
     std::ptr::copy_nonoverlapping(&pair as *const _ as *const f64, buf.as_mut_ptr(), 2);
     let mut sum = buf[0] + buf[1];
     for i in (chunks * 4)..n {
-      sum += (a[i] as f64) * (b[i] as f64);
+      sum += (a[i] * b[i]) as f64;
     }
     sum
   }
@@ -504,7 +513,7 @@ unsafe fn dot_sse2(a: &[f32], b: &[f32]) -> f64 {
       sum = buf[0];
     }
     for i in (chunks * 4)..n {
-      sum += (a[i] as f64) * (b[i] as f64);
+      sum += (a[i] * b[i]) as f64;
     }
     sum
   }
@@ -546,7 +555,7 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f64 {
     let sum2 = _mm_add_pd(lo128, hi128);
     let mut sum = _mm_cvtsd_f64(_mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2)));
     for i in (chunks * 8)..n {
-      sum += (a[i] as f64) * (b[i] as f64);
+      sum += (a[i] * b[i]) as f64;
     }
     sum
   }
@@ -593,7 +602,7 @@ unsafe fn dot_avx512(a: &[f32], b: &[f32]) -> f64 {
     let acc = _mm512_add_pd(acc0, acc1);
     let mut sum = _mm512_reduce_add_pd(acc);
     for i in (chunks * 16)..n {
-      sum += (a[i] as f64) * (b[i] as f64);
+      sum += (a[i] * b[i]) as f64;
     }
     sum
   }
@@ -989,6 +998,66 @@ mod tests {
     }
   }
 
+  /// Always-on snapshot test that does NOT require external fixtures.
+  /// Pins eight `(frame, mel) → log-mel` anchor points captured once
+  /// from the SIMD-dispatched build for a deterministic chirp input.
+  /// Catches regressions in any of:
+  /// - mel filterbank construction
+  /// - Hamming window
+  /// - FFT plan / size
+  /// - power spectrum kernel (NEON / SSE2)
+  /// - dot kernel (NEON / SSE2 / AVX2 / AVX-512)
+  /// - per-mel mean centering
+  ///
+  /// Whatever SIMD backend the runtime selects, all four (incl. the
+  /// scalar fallback under `--cfg diarization_force_scalar`) must
+  /// agree with the snapshot within ULP-level rounding noise.
+  ///
+  /// Independent of the torchaudio parity tests below — those only
+  /// run when the dev fixtures are provisioned. This one is the CI
+  /// safety net.
+  #[test]
+  fn deterministic_chirp_snapshot() {
+    // 1.5 s linear chirp from 100 Hz → 1 kHz at 16 kHz mono.
+    let n = 24_000_usize;
+    let sr = 16_000.0_f32;
+    let chunk: Vec<f32> = (0..n)
+      .map(|i| {
+        let t = i as f32 / sr;
+        let freq = 100.0 + 600.0 * t;
+        0.3 * (2.0 * std::f32::consts::PI * freq * t).sin()
+      })
+      .collect();
+    let out = compute_full_fbank(&chunk).unwrap();
+    let frames = out.len() / NUM_MEL_BINS;
+    assert_eq!(frames, 148);
+    let snapshot: [(usize, usize, f32); 8] = [
+      (5, 0, 2.446_690_6),
+      (5, 40, -4.950_185),
+      (5, 79, -3.003_877_6),
+      (50, 10, -1.586_247_4),
+      (50, 40, -2.035_995_5),
+      (50, 70, -0.119_341_85),
+      (100, 25, -0.236_327_17),
+      (140, 55, 2.090_998_6),
+    ];
+    let mut max_abs = 0.0_f32;
+    for (f_idx, m, expected) in snapshot {
+      let got = out[f_idx * NUM_MEL_BINS + m];
+      let d = (got - expected).abs();
+      if d > max_abs {
+        max_abs = d;
+      }
+    }
+    // Rounding-noise tolerance: f32 mantissa ~6e-8, ~80 mel bins ×
+    // ~257 dot terms × log compounds to a few ULP per cell.
+    assert!(
+      max_abs < 1e-4,
+      "fbank chirp snapshot drifted by {max_abs:.3e} (max abs); \
+       a SIMD dispatch or kernel regression?"
+    );
+  }
+
   // ─── parity checks against captured torchaudio reference ────────
 
   /// Mel filterbank parity.
@@ -996,6 +1065,17 @@ mod tests {
   fn matches_torchaudio_mel_bank() {
     let path = std::path::PathBuf::from("/tmp/mel_bank_ref.npz");
     if !path.exists() {
+      // CI must provision the torchaudio reference fixtures so the
+      // SIMD path is actually validated against pyannote's reference,
+      // not just against itself. Local dev still skips gracefully.
+      if std::env::var_os("CI").is_some()
+        || std::env::var_os("DIA_REQUIRE_PARITY_FIXTURES").is_some()
+      {
+        panic!(
+          "{} missing — provision via tests/parity/python/capture_intermediates.py",
+          path.display()
+        );
+      }
       eprintln!("skip: {} not present", path.display());
       return;
     }
@@ -1025,6 +1105,17 @@ mod tests {
   fn matches_torchaudio_on_08_chunk_1146() {
     let path = std::path::PathBuf::from("/tmp/pyannote_fbank_08_c1146.npz");
     if !path.exists() {
+      // CI must provision the torchaudio reference fixtures so the
+      // SIMD path is actually validated against pyannote's reference,
+      // not just against itself. Local dev still skips gracefully.
+      if std::env::var_os("CI").is_some()
+        || std::env::var_os("DIA_REQUIRE_PARITY_FIXTURES").is_some()
+      {
+        panic!(
+          "{} missing — provision via tests/parity/python/capture_intermediates.py",
+          path.display()
+        );
+      }
       eprintln!("skip: {} not present", path.display());
       return;
     }

@@ -6,7 +6,16 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors returned by `diarization::embed` APIs.
+///
+/// Marked `#[non_exhaustive]` so callers must include a `_ =>` arm in
+/// any `match`. Variants in this enum represent low-level numerical /
+/// boundary conditions (NaN/inf inputs, shape drift, ORT failure, …)
+/// and the set evolves as new failure modes are surfaced or as
+/// internal kernels stop being able to produce a given variant. The
+/// attribute lets us add or retire variants without it being a
+/// semver-breaking change for downstream exhaustive matchers.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
   /// Input clip too short. Either `samples.len() < MIN_CLIP_SAMPLES`
   /// (for `embed`/`embed_weighted`) or the gathered length after
