@@ -152,7 +152,7 @@ fn diagnose_ahc_labels_10_mrbeast() {
   let dir = "10_mrbeast_clean_water";
   let raw_path = fixture(&format!("tests/parity/fixtures/{dir}/raw_embeddings.npz"));
   let (raw_f32, raw_shape) = read_npz_array::<f32>(&raw_path, "embeddings");
-  let nc = raw_shape[0] as usize;
+  let _nc = raw_shape[0] as usize;
   let nsp = raw_shape[1] as usize;
   let dim = raw_shape[2] as usize;
 

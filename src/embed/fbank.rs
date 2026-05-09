@@ -409,7 +409,7 @@ unsafe fn window_mul_neon(a: &mut [f32], b: &[f32]) {
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn power_neon(fft: &[Complex32], power: &mut [f32]) {
-  use std::arch::aarch64::{vfmaq_f32, vld2q_f32, vmulq_f32, vst1q_f32};
+  use std::arch::aarch64::{vaddq_f32, vld2q_f32, vmulq_f32, vst1q_f32};
   unsafe {
     let n = fft.len();
     let chunks = n / 4;
@@ -420,7 +420,12 @@ unsafe fn power_neon(fft: &[Complex32], power: &mut [f32]) {
       let pair = vld2q_f32(fp.add(i * 8));
       let re = pair.0;
       let im = pair.1;
-      let p = vfmaq_f32(vmulq_f32(re, re), im, im);
+      // Two separate multiplies + an add (not `vfmaq_f32`): match
+      // the scalar / SSE2 paths' two-rounding semantics. A fused
+      // multiply-add would single-round and produce backend-specific
+      // power-spectrum values on aarch64 only — which the downstream
+      // threshold-sensitive segmentation could amplify.
+      let p = vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im));
       vst1q_f32(pp.add(i * 4), p);
     }
     for k in (chunks * 4)..n {
@@ -1228,8 +1233,8 @@ mod tests {
   #[test]
   fn force_scalar_cfg_routes_through_scalar_when_set() {
     let n = 257_usize;
-    let a: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.137).sin())).collect();
-    let b: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.241 + 1.0).cos())).collect();
+    let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.137).sin()).collect();
+    let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.241 + 1.0).cos()).collect();
     let dispatched = fma_dot_f32_to_f64(&a, &b);
     let scalar = fma_dot_scalar(&a, &b);
     if cfg!(diarization_force_scalar) {
@@ -1330,8 +1335,8 @@ mod tests {
     let lens = [1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 64, 257];
     for &n in &lens {
       // Deterministic pseudo-random pattern, no `rand` dep needed.
-      let a: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.137).sin())).collect();
-      let b: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.241 + 1.0).cos())).collect();
+      let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.137).sin()).collect();
+      let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.241 + 1.0).cos()).collect();
       let s = fma_dot_scalar(&a, &b);
       let dispatched = fma_dot_f32_to_f64(&a, &b);
       // Tolerance: scalar is left-to-right f64 sum of f32-products,

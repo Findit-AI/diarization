@@ -94,7 +94,7 @@ mod tests {
   #[test]
   fn matches_naive_for_well_conditioned_input() {
     let a: Vec<f64> = (0..100).map(|i| (i as f64) * 0.01).collect();
-    let b: Vec<f64> = (0..100).map(|i| ((i as f64).sin())).collect();
+    let b: Vec<f64> = (0..100).map(|i| (i as f64).sin()).collect();
     let kahan = kahan_dot(&a, &b);
     let naive: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     // For well-conditioned inputs, the difference is sub-ULP.

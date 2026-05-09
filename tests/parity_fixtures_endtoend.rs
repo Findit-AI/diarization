@@ -78,11 +78,26 @@ fn rttm_counts(path: &PathBuf) -> (usize, usize) {
 /// Run dia on `<fixtures_dir>/<name>/clip_16k.wav` and assert
 /// `(speakers, segments)` matches `reference.rttm`. Each call freshly
 /// builds models + pipeline so per-test state is bounded.
+///
+/// Skips with a clear `eprintln!` if the wav is absent (e.g. a
+/// shallow clone that hasn't pulled the wavs, or a contributor
+/// running tests before the fixtures land); CI must `panic!` since
+/// silently skipping a parity test in a release build defeats the
+/// point. Toggle via `DIA_REQUIRE_PARITY_FIXTURES=1` (or any
+/// non-empty `CI` env value).
 fn assert_fixture_parity(name: &str) {
   let fixture = fixtures_dir().join(name);
   let wav = fixture.join("clip_16k.wav");
   let reference = fixture.join("reference.rttm");
-  assert!(wav.exists(), "missing {}", wav.display());
+  if !wav.exists() {
+    let require =
+      std::env::var_os("CI").is_some() || std::env::var_os("DIA_REQUIRE_PARITY_FIXTURES").is_some();
+    if require {
+      panic!("{} missing — track via plain git or LFS", wav.display());
+    }
+    eprintln!("[skip {name}] {} not present", wav.display());
+    return;
+  }
   assert!(reference.exists(), "missing {}", reference.display());
 
   let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
