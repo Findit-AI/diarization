@@ -211,7 +211,7 @@ rustix = { version = "1", features = ["fs"] }
 # examples do not depend on it, so a clean checkout can build
 # without it. Enable via `--features silero-vad`.
 [dependencies.silero]
-version = "0.3"
+version = "0.4"
 optional = true
 
 # `serde` impls for the public `*Options` / `*Config` types so
