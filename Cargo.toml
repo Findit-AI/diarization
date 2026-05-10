@@ -18,6 +18,16 @@ exclude = [
   # workspace so cargo doesn't try to resolve its locked-down deps
   # alongside dia-core's.
   "crates/dia-core/tests/parity",
+  # `dia-burn` ships its own resolution graph because cargo's
+  # `links = "tch"` collision check unifies workspace members. The
+  # parent `dia-core` declares `tch = "0.24"` (optional, for the
+  # tch backend); `burn 0.21.0-pre.5` carries an optional
+  # `burn-tch` that links to `tch ^0.22`. Two tch versions in one
+  # graph fail resolution, even though both stay unactivated.
+  # Splitting `dia-burn` out into a sibling crate with its own
+  # `Cargo.lock` keeps the parent's `tch` decl invisible to burn
+  # and vice-versa.
+  "crates/dia-burn",
 ]
 
 # Workspace-wide lint config. Members opt in via `[lints] workspace = true`.
