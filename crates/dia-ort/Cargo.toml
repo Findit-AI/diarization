@@ -1,0 +1,66 @@
+[package]
+name = "dia-ort"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "(MIT OR Apache-2.0) AND MIT"
+repository = "https://github.com/al8n/diarization"
+documentation = "https://docs.rs/dia-ort"
+description = "ONNX Runtime (ort) inference backend for the dia diarization pipeline. Re-exports `diarization` with the `ort` feature pre-enabled — provides `SegmentModel` (pyannote/segmentation-3.0) and `EmbedModel` (WeSpeaker ResNet34-LM)."
+readme = "README.md"
+
+# ── Phase B step 1 layout ────────────────────────────────────────────
+# Today `dia-ort` is a thin re-export shim over `diarization` (a.k.a.
+# `dia-core`) with the `ort` feature pre-activated. The actual ORT
+# inference code is *physically* still inside `dia-core/src/embed/`
+# and `dia-core/src/segment/`, gated by `#[cfg(feature = "ort")]`.
+#
+# This lets us tighten the public contract today — downstream users
+# `cargo add dia-ort` instead of `diarization` with feature flag
+# wrangling — without the risky multi-thousand-line file move that
+# would otherwise have to land atomically. Phase B step 2 follow-up
+# physically migrates the cfg-gated modules across without changing
+# any of the public types or paths.
+
+[features]
+# `ort` is always on for dia-ort (the whole point of this crate).
+# `bundled-segmentation` is on by default to match `diarization`'s
+# default; explicit so contributors don't have to chase
+# diarization's feature defaults to know what dia-ort ships with.
+default = ["bundled-segmentation"]
+bundled-segmentation = ["diarization/bundled-segmentation"]
+serde = ["diarization/serde"]
+
+# ─── ONNX Runtime execution providers ─────────────────────────────────
+# Each forwards to `diarization`'s matching feature (which itself
+# forwards to the matching `ort` execution provider). Vendor-specific
+# EPs need the corresponding native library installed on the host —
+# see <https://ort.pyke.io/perf/execution-providers>.
+coreml = ["diarization/coreml"]
+cuda = ["diarization/cuda"]
+tensorrt = ["diarization/tensorrt"]
+directml = ["diarization/directml"]
+rocm = ["diarization/rocm"]
+migraphx = ["diarization/migraphx"]
+openvino = ["diarization/openvino"]
+webgpu = ["diarization/webgpu"]
+xnnpack = ["diarization/xnnpack"]
+onednn = ["diarization/onednn"]
+cann = ["diarization/cann"]
+acl = ["diarization/acl"]
+qnn = ["diarization/qnn"]
+nnapi = ["diarization/nnapi"]
+tvm = ["diarization/tvm"]
+azure = ["diarization/azure"]
+gpu = ["cuda", "tensorrt", "coreml", "directml", "rocm", "webgpu"]
+
+[dependencies]
+# Always on `ort` — that's the whole point of dia-ort. By depending
+# on `diarization` with `features = ["ort"]` we activate the ort
+# inference paths inside dia-core without needing a redundant
+# top-level `ort` dep here (which would force cargo to evaluate two
+# copies of ort during build).
+diarization = { version = "0.1", path = "../dia-core", features = ["ort"] }
+
+[lints]
+workspace = true

@@ -53,7 +53,7 @@ sde64 -version
 # differential tests through the scalar fallback and report green.
 RUSTFLAGS="-Dwarnings --cfg diarization_assert_avx512" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -future --" \
-cargo test \
+cargo test -p diarization \
   --lib \
   --target "$TARGET" \
   --no-default-features \

@@ -45,7 +45,7 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 export RUSTFLAGS="${RUSTFLAGS:-} --cfg diarization_force_scalar"
 # See `miri_tb.sh` for the rationale on the explicit fbank
 # allowlist. Same set of tests under stacked-borrows.
-cargo miri test \
+cargo miri test -p diarization \
   --lib --target "$TARGET" --no-default-features \
   -- \
   ops:: \

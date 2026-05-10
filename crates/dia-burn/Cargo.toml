@@ -1,0 +1,65 @@
+[package]
+name = "dia-burn"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "(MIT OR Apache-2.0) AND MIT"
+repository = "https://github.com/al8n/diarization"
+documentation = "https://docs.rs/dia-burn"
+description = "Pure-Rust burn-onnx inference backend for the dia diarization pipeline. Drop-in alternative to dia-ort for cross-compile targets ort-sys can't ship prebuilts to (powerpc64 / riscv64 / s390x / wasm / i686). Currently a documented placeholder pending upstream burn-onnx fixes — see crate docs."
+readme = "README.md"
+
+# `dia-burn` is intentionally NOT a workspace member of the parent
+# `dia` workspace. Cargo workspace members share a single resolution
+# graph; the parent declares `tch = "0.24"` as an optional dep for
+# the dia-tch backend, and `burn 0.21.0-pre.5` carries an optional
+# `burn-tch` that links to `tch ^0.22`. Two `tch` versions in one
+# resolution graph collide on `links = "tch"` (cargo enforces this
+# even when neither feature activates). Splitting `dia-burn` into
+# its own resolution graph (separate `Cargo.lock`) avoids the
+# collision: this crate's graph never sees the parent's `tch`
+# decl, and the parent's graph never sees `burn`. Build / test
+# from `crates/dia-burn/` directly.
+[workspace]
+
+[features]
+default = []
+# Opt-in: run burn-onnx codegen at build time. Currently broken
+# end-to-end on every dia model — see `build.rs` and crate docs
+# for the upstream issues. Kept feature-gated (and off by default)
+# so contributors can flip it on to reproduce the codegen
+# failures, but a default `cargo build` ships a working stub.
+unstable-onnx-codegen = ["dep:burn-onnx", "dep:burn", "dep:burn-store"]
+
+[dependencies]
+# Path-dep on dia-core (still named `diarization` — the meta-crate
+# rename happens in a follow-up commit). Only the public types we
+# need for the embed/segment shapes are re-used; no `tch` / `ort`
+# features are activated, so neither shows up in this crate's
+# resolution graph.
+diarization = { version = "0.1", path = "../dia-core", default-features = false }
+
+# Burn umbrella + ndarray backend + burnpack store. Pinned to the
+# 0.21.0-pre.5 line because that's the only burn-onnx version
+# whose IR matches the 0.21 burn API surface — mixing 0.21 stable
+# with 0.21.0-pre.5 makes `burn-autodiff` versions diverge.
+# Optional so the default build doesn't pull burn's full transitive
+# graph (~50 crates, ~1 minute compile) until codegen is unstuck.
+burn = { version = "=0.21.0-pre.5", default-features = false, features = ["std", "ndarray"], optional = true }
+burn-ndarray = { version = "=0.21.0-pre.5", default-features = false, features = ["std"] }
+burn-store = { version = "=0.21.0-pre.5", default-features = false, features = ["std", "burnpack"], optional = true }
+
+thiserror = "2"
+
+[build-dependencies]
+# `burn-onnx` ONNX→Rust codegen, only pulled when the unstable
+# codegen feature is on (see [features]). Pinned to the same
+# pre-release line as the runtime `burn-*` deps.
+burn-onnx = { version = "=0.21.0-pre.5", optional = true }
+
+[dev-dependencies]
+hound = "3"
+
+[lints.rust]
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
