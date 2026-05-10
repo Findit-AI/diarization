@@ -1,0 +1,28 @@
+[package]
+name = "dia-tch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "(MIT OR Apache-2.0) AND MIT"
+repository = "https://github.com/al8n/diarization"
+documentation = "https://docs.rs/dia-tch"
+description = "TorchScript (tch / libtorch) inference backend for the dia diarization pipeline. Bit-exact pyannote on heavy-overlap fixtures where ONNX→ORT diverges. Pulls libtorch (~600 MB)."
+readme = "README.md"
+
+[features]
+default = []
+# Off by default. With this feature off, the crate is a no-op shell
+# (tch/torch-sys never builds, so a contributor without LIBTORCH
+# can build the workspace). Enable to actually pull in libtorch and
+# the TorchScript backend.
+tch = ["dep:tch"]
+
+[dependencies]
+# Path-dep on the umbrella crate (still named `diarization`
+# mid-refactor — see dia-ort's matching note).
+diarization = { version = "0.1", path = "../dia-core" }
+tch = { version = "0.24", optional = true }
+thiserror = "2"
+
+[lints]
+workspace = true

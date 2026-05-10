@@ -1,11 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-  # Pure-algorithm core + types + (currently) inference backends.
-  # Phase B will extract `dia-ort` / `dia-tch` / `dia-burn` from
-  # this crate; Phase A keeps everything inside `dia-core` so the
-  # workspace skeleton lands without behavior change.
+  # Pure-algorithm core + types. Phase B is moving inference
+  # backends out of this crate into siblings; the `tch` / `ort`
+  # optional deps still live here mid-migration.
   "crates/dia-core",
+  # ONNX Runtime backend (placeholder; SegmentModel / EmbedModel
+  # move here from dia-core in follow-up commits in this branch).
+  "crates/dia-ort",
+  # TorchScript backend (placeholder; EmbedModel::from_torchscript_file
+  # moves here from dia-core).
+  "crates/dia-tch",
 ]
 exclude = [
   # The parity harness is its own throwaway sub-Cargo project (uses
