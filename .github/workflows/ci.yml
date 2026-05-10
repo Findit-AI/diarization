@@ -501,6 +501,56 @@ jobs:
             aggregate::parity_tests \
             plda::parity_tests
 
+  # End-to-end pyannote-community-1 parity bench across all 14
+  # audio-fixtures clips. Runs the full dia pipeline (fbank → ResNet34
+  # embedding → AHC + VBx + centroid + Hungarian → reconstruct) and
+  # asserts spk + seg counts match the captured pyannote 4.0.4
+  # reference RTTM bit-for-bit. ~5–60 s per fixture under release
+  # builds; the whole sweep is ~25–30 min.
+  #
+  # Requires:
+  # - `audio-fixtures` repo (wavs + reference RTTMs), checked out at
+  #   `$GITHUB_WORKSPACE/audio-fixtures` and pointed to via
+  #   `DIA_AUDIO_FIXTURES`.
+  # - WeSpeaker ResNet34 ONNX model — fetched by
+  #   `scripts/download-embed-model.sh` (~26 MB).
+  # - `--ignored --test-threads=1` because each fixture loads ~50–60
+  #   MB of audio into memory and the test process holds intermediate
+  #   segmentation tensors; running them in parallel inflates peak RSS
+  #   past the runner's budget.
+  parity-bench:
+    name: parity bench (14 audio-fixtures clips)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check out audio-fixtures
+        uses: actions/checkout@v6
+        with:
+          repository: Findit-AI/audio-fixtures
+          path: audio-fixtures
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-parity-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-parity-bench-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Download WeSpeaker embedding model
+        run: bash scripts/download-embed-model.sh
+      - name: Run end-to-end parity bench
+        env:
+          DIA_AUDIO_FIXTURES: ${{ github.workspace }}/audio-fixtures
+        run: |
+          cargo test --release \
+            --test parity_fixtures_endtoend \
+            --features ort,bundled-segmentation \
+            -- --ignored --test-threads=1 --nocapture
+
   sanitizer:
     name: sanitizer
     runs-on: ubuntu-latest
@@ -610,6 +660,7 @@ jobs:
       - avx2-sde
       - avx512-sde
       - neon-native
+      - parity-bench
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
