@@ -1,0 +1,6 @@
+pyproject.toml
+dia_parity_reference.egg-info/PKG-INFO
+dia_parity_reference.egg-info/SOURCES.txt
+dia_parity_reference.egg-info/dependency_links.txt
+dia_parity_reference.egg-info/requires.txt
+dia_parity_reference.egg-info/top_level.txt

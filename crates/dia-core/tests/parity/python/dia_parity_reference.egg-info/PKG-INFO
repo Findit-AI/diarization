@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: dia-parity-reference
+Version: 0.0.0
+Requires-Python: >=3.10
+Requires-Dist: pyannote.audio==4.0.4
+Requires-Dist: pyannote.metrics>=3.2
+Requires-Dist: numpy>=1.26

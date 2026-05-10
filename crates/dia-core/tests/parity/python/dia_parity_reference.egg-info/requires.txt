@@ -1,0 +1,3 @@
+pyannote.audio==4.0.4
+pyannote.metrics>=3.2
+numpy>=1.26
