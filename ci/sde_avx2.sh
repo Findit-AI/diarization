@@ -55,7 +55,7 @@ sde64 -version
 # we want emulated).
 RUSTFLAGS="-Dwarnings --cfg diarization_disable_avx512 --cfg diarization_assert_avx2" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sde64 -hsw --" \
-cargo test \
+cargo test -p diarization \
   --lib \
   --target "$TARGET" \
   --no-default-features \

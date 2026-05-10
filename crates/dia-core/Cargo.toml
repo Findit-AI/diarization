@@ -286,16 +286,6 @@ name = "pipeline"
 harness = false
 required-features = ["_bench"]
 
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = "thin"
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
-
 [package.metadata.docs.rs]
 # Pin the docs.rs feature set explicitly. `all-features = true`
 # would enable `tch` (needs LIBTORCH on the build host) and the

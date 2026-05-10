@@ -6,23 +6,39 @@ rust-version = "1.95"
 license = "(MIT OR Apache-2.0) AND MIT"
 repository = "https://github.com/al8n/diarization"
 documentation = "https://docs.rs/dia-tch"
-description = "TorchScript (tch / libtorch) inference backend for the dia diarization pipeline. Bit-exact pyannote on heavy-overlap fixtures where ONNX→ORT diverges. Pulls libtorch (~600 MB)."
+description = "TorchScript (tch / libtorch) inference backend for the dia diarization pipeline. Bit-exact pyannote on heavy-overlap fixtures where ONNX→ORT diverges. Pulls libtorch (~600 MB) — see crate docs."
 readme = "README.md"
 
+# ── Phase B step 1 layout ────────────────────────────────────────────
+# Today `dia-tch` is a thin re-export shim over `diarization` with
+# `tch` (and `ort` for the segmentation half) features activated.
+# The actual TorchScript code is *physically* still inside
+# `dia-core/src/embed/model.rs` (the `tch_backend` module) gated by
+# `#[cfg(feature = "tch")]`. Phase B step 2 physically migrates it
+# across without changing any of the public types or paths.
+#
+# Note: `dia-tch` doesn't include its own segmentation backend —
+# pyannote's segmentation model has no TorchScript export shipped
+# with the dia repo, so the segmentation half always runs on ort.
+# That's why `dia-tch` keeps the `ort` feature on too.
+
 [features]
-default = []
-# Off by default. With this feature off, the crate is a no-op shell
-# (tch/torch-sys never builds, so a contributor without LIBTORCH
-# can build the workspace). Enable to actually pull in libtorch and
-# the TorchScript backend.
-tch = ["dep:tch"]
+default = ["bundled-segmentation"]
+# Enable the actual `tch` runtime. Off-by-default because libtorch
+# is ~600 MB and typically requires `LIBTORCH` env var pointing at
+# a libtorch install. With the feature off, this crate is
+# effectively just an alias for `dia-ort`.
+tch = ["diarization/tch"]
+# Segmentation runs on ORT regardless (see crate-level note); keep
+# `bundled-segmentation` here so dia-tch has the same default
+# "works out of the box" experience as dia-ort.
+bundled-segmentation = ["diarization/bundled-segmentation"]
+serde = ["diarization/serde"]
 
 [dependencies]
-# Path-dep on the umbrella crate (still named `diarization`
-# mid-refactor — see dia-ort's matching note).
-diarization = { version = "0.1", path = "../dia-core" }
-tch = { version = "0.24", optional = true }
-thiserror = "2"
+# Activate `ort` always (segmentation), `tch` opt-in (the embedding
+# backend that gives bit-exact pyannote on overlap-heavy fixtures).
+diarization = { version = "0.1", path = "../dia-core", features = ["ort"] }
 
 [lints]
 workspace = true

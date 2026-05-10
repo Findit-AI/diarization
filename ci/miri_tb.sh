@@ -79,7 +79,7 @@ export RUSTFLAGS="${RUSTFLAGS:-} --cfg diarization_force_scalar"
 # `compute_full_fbank` once with a single-frame input (one size-512
 # FFT) — Miri tolerates that at the time of writing, but if rustfft
 # regresses on Miri-supported intrinsics this is the test to drop.
-cargo miri test \
+cargo miri test -p diarization \
   --lib --target "$TARGET" --no-default-features \
   -- \
   ops:: \

@@ -68,7 +68,10 @@ jobs:
       # Per-EP coverage lives in the docs.rs metadata + a focused
       # `ep-link-check` job below; the each-feature sweep stays
       # bounded to the link-safe core features.
-      run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
+      # `-p diarization`: scope the each-feature sweep to dia-core's
+      # feature surface. The shim crates (`dia-ort`/`dia-tch`)
+      # forward into it, and `dia-burn` is workspace-excluded.
+      run: cargo hack clippy -p diarization --each-feature --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   # Run tests on some extra platforms
   # Portability check: scalar-only build across the broad cross matrix.
@@ -130,9 +133,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64
       - name: cargo build --target ${{ matrix.target }} --no-default-features
+        # `-p diarization`: a virtual workspace's `--no-default-features`
+        # flag doesn't propagate to members' defaults, so without
+        # naming the package every member would still pull its own
+        # defaults (including `ort`, which lacks prebuilt binaries on
+        # this matrix). Targeting `diarization` directly limits the
+        # build to dia-core in scalar config.
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --target ${{ matrix.target }} --no-default-features
+          cargo build -p diarization --target ${{ matrix.target }} --no-default-features
 
   # ORT-enabled build matrix. Restricted to the targets where the
   # `ort` crate ships prebuilt binaries (or links cleanly against the
@@ -168,9 +177,14 @@ jobs:
       - name: Install Rust
         run: rustup update stable && rustup default stable
       - name: cargo build --target ${{ matrix.target }}
+        # `-p diarization`: dia-tch's defaults pull in libtorch
+        # which is not provisioned on the cross matrix runners.
+        # dia-ort gets its full ort coverage in the workspace test
+        # job below; here we just want `diarization` (dia-core) +
+        # `ort` + `bundled-segmentation` on a clean cross target.
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --target ${{ matrix.target }}
+          cargo build -p diarization --target ${{ matrix.target }}
 
   # Windows-MSVC ort coverage — runs on `windows-latest` because
   # `ort-sys 2.0.0-rc.12` ships a Windows MSVC archive (the GNU
@@ -193,9 +207,11 @@ jobs:
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo build --target x86_64-pc-windows-msvc
+        # `-p diarization`: see matching note in `cross-ort`. dia-tch's
+        # libtorch dep isn't provisioned on the Windows runner.
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo build --target x86_64-pc-windows-msvc
+          cargo build -p diarization --target x86_64-pc-windows-msvc
 
   # Per-EP **bindings** check (NOT link coverage). The cargo-hack
   # feature sweeps above exclude every per-EP feature (and the
@@ -248,7 +264,11 @@ jobs:
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo check --features ${{ matrix.ep }}
-        run: cargo check --no-default-features --features ort,${{ matrix.ep }}
+        # `-p diarization`: the EP feature flags live on the
+        # `diarization` (dia-core) crate; the workspace virtual
+        # manifest has none of these features, so we must target
+        # the concrete crate.
+        run: cargo check -p diarization --no-default-features --features ort,${{ matrix.ep }}
 
   # docs.rs equivalence gate. `package.metadata.docs.rs.features`
   # enables ALL 16 per-EP features simultaneously plus the
@@ -284,8 +304,8 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links --cfg docsrs"
         run: |
-          cargo doc --no-deps --features \
-            ort,bundled-segmentation,serde,silero-vad,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure
+          cargo doc --no-deps -p diarization --features \
+            ort,bundled-segmentation,serde,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure
 
   # Compile check for the `tch` (TorchScript) backend. `tch` is not in
   # the cargo-hack feature sweeps below because it requires libtorch
@@ -320,7 +340,40 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: cargo check --no-default-features --features tch
-        run: cargo check --lib --no-default-features --features tch
+        # `dia-tch` shim activates `diarization/tch`. Checking the
+        # shim crate is enough — it pulls dia-core's tch path along.
+        run: cargo check -p dia-tch --lib --no-default-features --features tch
+
+  # Standalone build of the `dia-burn` crate. `dia-burn` is workspace-
+  # excluded (its `burn 0.21.0-pre.5` transitively requires `tch ^0.22`
+  # via an optional `burn-tch` feature, which collides on `links =
+  # "tch"` with the parent workspace's `tch = 0.24` decl). This means a
+  # plain `cargo {build,test} --workspace` from the repo root never
+  # builds dia-burn, so a regression there would otherwise ship
+  # undetected. Run from the crate dir to use its own resolution graph.
+  dia-burn:
+    name: dia-burn (standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/dia-burn/target
+          key: ${{ runner.os }}-diaburn-${{ hashFiles('crates/dia-burn/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-diaburn-
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: cargo build (default features = stub)
+        working-directory: crates/dia-burn
+        run: cargo build --verbose
+      - name: cargo test (stub correctness)
+        working-directory: crates/dia-burn
+        run: cargo test --verbose
 
   build:
     name: build
@@ -356,7 +409,10 @@ jobs:
       # over the 16 EPs would also explode combinatorially. Per-EP
       # link coverage lives in the dedicated `ep-link-check` job
       # below.
-      run: cargo hack build --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
+      # `-p diarization`: keep the powerset bounded to dia-core's
+      # feature surface — the dia-ort and dia-tch shim crates just
+      # forward to it, and `dia-burn` is workspace-excluded.
+      run: cargo hack build -p diarization --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   test:
     name: test
@@ -389,7 +445,8 @@ jobs:
       # env-dep, dedicated job) and all per-EP / `gpu` features
       # (CPU-only `ort-sys` archive cannot satisfy vendor link
       # steps; per-EP coverage is in `ep-link-check`).
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
+      # `-p diarization`: see matching note in the `build` job.
+      run: cargo hack test -p diarization --feature-powerset --exclude-no-default-features --exclude-features tch,coreml,cuda,tensorrt,directml,rocm,migraphx,openvino,webgpu,xnnpack,onednn,cann,acl,qnn,nnapi,tvm,azure,gpu
 
   # AVX2 + FMA correctness via Intel SDE. GH free runners may have AVX2
   # natively, but our dispatcher prefers AVX-512F on hosts that have it
@@ -487,7 +544,7 @@ jobs:
         env:
           RUSTFLAGS: "-Dwarnings --cfg diarization_assert_neon"
         run: |
-          cargo test \
+          cargo test -p diarization \
             --lib --no-default-features \
             -- \
             ops:: \
@@ -631,10 +688,8 @@ jobs:
           RUSTFLAGS: "--cfg tarpaulin"
         # Explicit feature list instead of `--all-features`: the `tch`
         # backend needs libtorch on the runner (handled only by the
-        # dedicated `tch-compile-check` job). `silero-vad` is enabled
-        # below because the streaming example is documented as a
-        # supported quickstart and we want coverage to exercise it.
-        run: cargo tarpaulin --features ort,bundled-segmentation,serde,silero-vad,_bench --run-types tests --run-types doctests --workspace --out xml
+        # dedicated `tch-compile-check` job).
+        run: cargo tarpaulin -p diarization --features ort,bundled-segmentation,serde,_bench --run-types tests --run-types doctests --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:

@@ -53,3 +53,18 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 # `lto = "thin"` cut release build time roughly in half on ORT
 # inference benches with no measurable runtime regression.
 lto = "thin"
+
+# Bench profile lifted up here from `crates/dia-core/Cargo.toml`
+# during the Phase A workspace move. Cargo only honors `[profile.*]`
+# at the workspace root once a package becomes a member, so the
+# in-crate copy was being silently ignored. This keeps the
+# pre-workspace bench tuning intact for `cargo bench -p diarization`.
+[profile.bench]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = "thin"
+incremental = false
+debug-assertions = false
+overflow-checks = false
+rpath = false
