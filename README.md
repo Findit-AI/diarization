@@ -76,11 +76,12 @@ cargo run --release --features ort --example run_owned_pipeline -- \
   path/to/clip_16k.wav > hyp.rttm
 ```
 
-For the streaming pipeline (uses `silero-vad` to detect voice ranges
-on the fly), enable the matching feature:
+For the streaming pipeline (uses the sister `silero` crate to detect
+voice ranges on the fly), the same `ort` feature is enough — `silero`
+itself is a dev-dependency, always available to examples:
 
 ```sh
-cargo run --release --features ort,silero-vad --example run_streaming_pipeline -- \
+cargo run --release --features ort --example run_streaming_pipeline -- \
   path/to/clip.wav
 ```
 
@@ -94,7 +95,9 @@ location if you keep the model elsewhere.
 | `ort` | yes | The ONNX-runtime-backed `SegmentModel` and `EmbedModel` types. |
 | `bundled-segmentation` | yes | Embeds `models/segmentation-3.0.onnx` (~6 MB) into the binary. Exposes `SegmentModel::bundled()`. Implies `ort`. Disable to ship a fine-tuned segmentation model separately. |
 | `tch` | no | TorchScript embedding backend (libtorch ≈600 MB). Bit-exact pyannote on heavy-overlap fixtures where ONNX→ORT diverges. |
-| `silero-vad` | no | Path-dep on the sister `silero` crate; only used by `examples/run_streaming_pipeline.rs`. |
+
+`silero` is tracked as a dev-dependency (only `examples/run_streaming_pipeline.rs`
+consumes it). No feature gate — examples have access to dev-deps.
 
 The PLDA parity test runs as part of the regular test suite — no
 feature flag required:

@@ -14,6 +14,13 @@ BREAKING (pre-1.0):
   which has been replaced by an in-tree torchaudio-compliance fbank
   port (no `Result<_, String>` boundary to wrap). Code that matched
   the variant directly will not compile.
+- `silero-vad` Cargo feature removed. The `silero` crate was only
+  consumed by `examples/run_streaming_pipeline.rs` and is now a
+  `[dev-dependencies]` entry — no feature gate needed. Build the
+  streaming example with just `--features ort,bundled-segmentation`.
+  Bumped `silero` from 0.3 → 0.4 (its segmenter API changed:
+  `process_samples`/`finish_stream` no longer take a closure;
+  example updated to drain the pending-segment queue instead).
 
 
 The pyannote-community-1 offline + streaming-offline pipelines now

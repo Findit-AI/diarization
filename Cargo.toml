@@ -136,14 +136,6 @@ gpu = [
   "rocm",
   "webgpu",
 ]
-# Pulls in the sister `silero` crate (`silero = "0.3"`) as an
-# optional dependency, used only by the `run_streaming_pipeline`
-# example to drive VAD externally. The crate's lib + non-streaming
-# examples do NOT depend on silero, so a clean checkout still builds
-# without it. Enable this feature when building the streaming
-# example or developing with VAD in scope.
-silero-vad = ["dep:silero"]
-
 # Internal feature for benchmarks. Exposes pub(crate) modules
 # (`vbx`, `ahc`, `centroid`, `pipeline`, `reconstruct`, `hungarian`,
 # `plda`) as `pub` so external benches in `benches/*.rs` can call the
@@ -206,14 +198,6 @@ rustix = { version = "1", features = ["fs"] }
 # `[target.'cfg(...)']` block above — that block scopes its entries
 # to Linux/Android only.
 
-# Sister `silero` crate (VAD for streaming voice-range detection).
-# Used by the `run_streaming_pipeline` example; the lib + offline
-# examples do not depend on it, so a clean checkout can build
-# without it. Enable via `--features silero-vad`.
-[dependencies.silero]
-version = "0.3"
-optional = true
-
 # `serde` impls for the public `*Options` / `*Config` types so
 # callers can persist diarization configuration.
 [dependencies.serde]
@@ -232,6 +216,15 @@ optional = true
 anyhow = "1"
 criterion = "0.8"
 hound = "3"
+# Sister `silero` crate (VAD for streaming voice-range detection).
+# Only the `run_streaming_pipeline` example consumes it — the lib
+# itself never imports `silero`. Tracked as a dev-dependency rather
+# than an optional `[dependencies.silero] + silero-vad` feature pair
+# because (a) the lib has no code path through silero, (b)
+# downstream consumers never need it transitively, (c) examples have
+# access to dev-dependencies, so keeping it here both lightens the
+# public dependency graph and the feature surface.
+silero = "0.4"
 # `diarization::plda` parity tests load captured `.npz` artifacts.
 # Production code embeds the PLDA weights via `include_bytes!` and
 # does not depend on npyz.
@@ -253,8 +246,10 @@ required-features = ["tch", "ort", "bundled-segmentation"]
 [[example]]
 path = "examples/run_streaming_pipeline.rs"
 name = "run_streaming_pipeline"
-# Calls `SegmentModel::bundled()` which needs `bundled-segmentation`.
-required-features = ["silero-vad", "ort", "bundled-segmentation"]
+# Calls `SegmentModel::bundled()` which needs `bundled-segmentation`,
+# and `EmbedModel::from_file` which needs `ort`. `silero` itself is a
+# dev-dependency, always available to examples — no feature gate.
+required-features = ["ort", "bundled-segmentation"]
 
 [[bench]]
 path = "benches/segment.rs"
@@ -306,16 +301,16 @@ rpath = false
 # would enable `tch` (needs LIBTORCH on the build host) and the
 # `_bench` internal feature — neither of which docs.rs provides.
 # The list below covers the full public API surface: default
-# (`ort` + `bundled-segmentation`), optional `serde`, the streaming
-# example surface (`silero-vad`), and EVERY per-EP feature so that
-# every `dia::ep::*` re-export and `#[doc(cfg(...))]` annotation
-# renders on docs.rs (the `gpu` meta-feature alone covers only
-# 6 of the 16 EPs and would silently hide the rest).
+# (`ort` + `bundled-segmentation`), optional `serde`, and EVERY per-EP
+# feature so that every `dia::ep::*` re-export and `#[doc(cfg(...))]`
+# annotation renders on docs.rs (the `gpu` meta-feature alone covers
+# only 6 of the 16 EPs and would silently hide the rest). `silero` is
+# a dev-dependency for the streaming example only and does not appear
+# in the lib's public docs.
 features = [
   "ort",
   "bundled-segmentation",
   "serde",
-  "silero-vad",
   "coreml",
   "cuda",
   "tensorrt",

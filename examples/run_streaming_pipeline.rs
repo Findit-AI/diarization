@@ -7,9 +7,12 @@
 //!
 //! ```sh
 //! cargo run --release \
-//!   --features ort,silero-vad,bundled-segmentation \
+//!   --features ort,bundled-segmentation \
 //!   --example run_streaming_pipeline -- clip_16k.wav > hyp.rttm
 //! ```
+//!
+//! `silero` is tracked as a dev-dependency (only this example
+//! consumes it), so no extra feature gate is needed.
 
 use diarization::{
   embed::EmbedModel,
@@ -72,16 +75,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   // range-to-PCM mapping is straightforward because we already have
   // `samples` fully buffered; in a true streaming setting (e.g.
   // ffmpeg → stdin) the caller would maintain a rolling buffer.
+  //
+  // silero 0.4's `push_samples` returns one `SpeechSegment` at a
+  // time and queues the rest internally; drain the queue with
+  // empty-slice pushes between non-empty windows.
   let chunk = 16_000;
   let mut emitted: Vec<SpeechSegment> = Vec::new();
   for window in samples.chunks(chunk) {
-    vad_segmenter.process_samples(&mut vad_session, &mut vad_stream, window, |s| {
+    if let Some(s) = vad_segmenter.push_samples(&mut vad_session, &mut vad_stream, window)? {
       emitted.push(s);
-    })?;
+      while let Some(s) = vad_segmenter.push_samples(&mut vad_session, &mut vad_stream, &[])? {
+        emitted.push(s);
+      }
+    }
   }
-  vad_segmenter.finish_stream(&mut vad_session, &mut vad_stream, |s| {
+  // End-of-stream: flush model tail + close any trailing open segment.
+  if let Some(s) = vad_segmenter.finish_stream(&mut vad_session, &mut vad_stream)? {
     emitted.push(s);
-  })?;
+    while let Some(s) = vad_segmenter.push_samples(&mut vad_session, &mut vad_stream, &[])? {
+      emitted.push(s);
+    }
+  }
 
   for seg_span in &emitted {
     let start = seg_span.start_sample() as usize;
